@@ -34,7 +34,6 @@ from .const import (
     DEFAULT_BAT_PRICE,
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_MAX_POWER,
-    DEFAULT_BAT_VOLTAGE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -261,7 +260,6 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         bat_price = self._user_input.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE)
         bat_cycles = self._user_input.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES)
         bat_max_power = self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)
-        bat_voltage = self._user_input.get(CONF_BAT_VOLTAGE, DEFAULT_BAT_VOLTAGE)
 
         schema_dict = {}
 
@@ -312,13 +310,16 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 selector.EntitySelectorConfig(domain="sensor")
             )
 
-        schema_dict[vol.Required(CONF_BAT_VOLTAGE, default=bat_voltage)] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0,
-                step=0.1,
-                mode=selector.NumberSelectorMode.BOX
+        # 4. Bat Voltage (entity)
+        val_voltage = get_value(CONF_BAT_VOLTAGE)
+        if val_voltage:
+            schema_dict[vol.Optional(CONF_BAT_VOLTAGE, default=val_voltage)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
             )
-        )
+        else:
+            schema_dict[vol.Optional(CONF_BAT_VOLTAGE)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
 
         return self.async_show_form(
             step_id="battery_optimization",

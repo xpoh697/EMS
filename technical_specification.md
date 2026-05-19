@@ -34,9 +34,9 @@ To ensure flexibility and modular configuration, the integration must implement:
         - **Bat price** (Стоимость АКБ): decimal numeric value (default: 0.0)
         - **Bat cycles** (Количество циклов АКБ): integer numeric value (default: 6000)
         - **Bat capacity (entity)** (Сенсор емкости АКБ): energy capacity sensor (domain: sensor)
-        - **Bat Max Power** (Максимальная мощность АКБ): decimal numeric value (default: 3000.0)
+        - **Bat max power** (Максимальная мощность АКБ): decimal numeric value (default: 3000.0)
         - **Bat cur power (entity)** (Сенсор текущей мощности АКБ): power sensor (domain: sensor)
-        - **Bat voltage** (Напряжение АКБ): decimal numeric value (default: 48.0)
+        - **Bat voltage (entity)** (Сенсор напряжения АКБ): voltage sensor (domain: sensor)
 
 Based on `bat_price`, `bat_cycles`, and `bat_capacity_entity`, the integration dynamically calculates battery degradation cost per kWh of energy throughput using the formula:
 `degradation_cost = bat_price / (bat_cycles * bat_capacity)`. If capacity is reported in Wh, it is automatically converted to kWh. This calculated value is logged to `ems.log` and stored in `hass.data[DOMAIN]["bat_degradation_per_kwh"]`.

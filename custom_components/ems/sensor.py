@@ -50,7 +50,6 @@ from .const import (
     DEFAULT_BAT_PRICE,
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_MAX_POWER,
-    DEFAULT_BAT_VOLTAGE,
 )
 from .utils import ems_log, calculate_battery_degradation
 
@@ -181,7 +180,7 @@ async def async_setup_entry(
     bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
     bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
     bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
-    bat_voltage = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE, DEFAULT_BAT_VOLTAGE))
+    bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
 
     # Log errors or info for house consumption / basic settings
     if not target_sensor_id:
@@ -241,6 +240,11 @@ async def async_setup_entry(
         ems_log(hass, _LOGGER, logging.ERROR, "Battery current power entity is not configured in settings!")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Battery current power entity configured successfully: {bat_cur_power_entity_id}")
+
+    if not bat_voltage_entity_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Battery voltage entity is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Battery voltage entity configured successfully: {bat_voltage_entity_id}")
 
     # Calculate and log battery degradation cost per kWh
     def update_degradation_cost():
