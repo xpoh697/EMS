@@ -149,8 +149,12 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
             "average_sunday",
         ]
 
+        now = dt_util.now()
+        today_weekday = now.weekday()
+
         attrs = {
             "today": self._today_consumption,
+            "average_today": self._averages.get(today_weekday, [self._fallback_consumption] * 24),
             "last_total_value": self._last_total_value,
             "last_hour": self._last_hour,
             "last_day": self._last_day,

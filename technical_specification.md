@@ -71,6 +71,7 @@ To track and report load energy consumption dynamically, the integration provide
 - **State Class**: `total_increasing`
 - **Attributes**:
   - `today`: An array of 24 decimal values representing actual hourly consumption for the current day.
+  - `average_today`: An array of 24 decimal values representing average hourly consumption for the current day of the week, calculated from historical statistics.
   - `average_monday` to `average_sunday`: Arrays of 24 decimal values representing average hourly consumption for each day of the week, calculated from historical statistics.
   - `last_total_value`: The last recorded raw cumulative value of the target sensor.
   - `last_hour`: The last hour slot updated.
