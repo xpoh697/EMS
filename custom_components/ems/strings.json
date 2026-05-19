@@ -31,6 +31,7 @@
         "data": {
           "total_load_consumption": "Total load consumption sensor",
           "current_house_consumption": "Current house consumption sensor",
+          "inverter_modes_list": "Inverter modes list selector",
           "statistics_days": "Number of history days for averaging",
           "fallback_consumption": "Fallback consumption per hour (kWh)",
           "debug": "Enable debug logging"
@@ -45,6 +46,27 @@
           "pv_forecast_today": "PV Forecast today sensor",
           "pv_forecast_tomorrow": "PV Forecast tomorrow sensor"
         }
+      },
+      "financial": {
+        "title": "Financial Settings",
+        "description": "Configure financial parameters for billing and optimization.",
+        "data": {
+          "price_buy_sensor": "Price buy sensor",
+          "price_sell_sensor": "Price sell sensor",
+          "system_cost": "System cost"
+        }
+      },
+      "battery_optimization": {
+        "title": "Battery Optimization Settings",
+        "description": "Configure physical limits, capacity and cost models for the battery storage.",
+        "data": {
+          "bat_price": "Battery price",
+          "bat_cycles": "Battery cycles",
+          "bat_capacity_entity": "Battery capacity sensor (entity)",
+          "bat_max_power": "Battery max power (W)",
+          "bat_cur_power_entity": "Battery current power sensor (entity)",
+          "bat_voltage": "Battery voltage (V)"
+        }
       }
     }
   },
@@ -52,7 +74,9 @@
     "category": {
       "options": {
         "basic_settings": "Basic settings",
-        "pv_forecast": "PV Forecast"
+        "pv_forecast": "PV Forecast",
+        "financial": "Financial",
+        "battery_optimization": "Battery optimization"
       }
     }
   }

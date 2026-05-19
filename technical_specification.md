@@ -17,6 +17,7 @@ To ensure flexibility and modular configuration, the integration must implement:
      1. **Basic settings** (Основные настройки):
         - **Total load consumption** (Общее потребление нагрузки): cumulative energy sensor (domain: sensor)
         - **Current house consumption** (Текущее потребление дома): power sensor (domain: sensor)
+        - **Inverter Modes List** (Список режимов инвертора): dropdown select helper (domain: select, input_select)
         - **Number of history days for averaging** (Количество дней истории для усреднения): positive integer (range: 1 - 365, default: 14)
         - **Fallback consumption per hour** (Фолбэк потребления в час): decimal value in kWh (range: 0.0 - 100.0, default: 0.5)
         - **Enable debug logging** (Включить отладочное логирование): boolean flag (default: False)
@@ -25,6 +26,17 @@ To ensure flexibility and modular configuration, the integration must implement:
         - **PV generation today** (Генерация СЭС за сегодня): energy sensor (domain: sensor)
         - **PV Forecast today** (Прогноз СЭС на сегодня): solar forecast sensor (domain: sensor)
         - **PV Forecast tomorrow** (Прогноз СЭС на завтра): solar forecast sensor (domain: sensor)
+     3. **Financial** (Финансы):
+        - **Price Buy sensor** (Сенсор цены покупки электричества): price sensor (domain: sensor)
+        - **Price Sell Sensor** (Сенсор цены продажи электричества): price sensor (domain: sensor)
+        - **System cost** (Стоимость системы): decimal numeric value (default: 0.0)
+     4. **Battery optimization** (Оптимизация АКБ):
+        - **Bat price** (Стоимость АКБ): decimal numeric value (default: 0.0)
+        - **Bat cycles** (Количество циклов АКБ): integer numeric value (default: 6000)
+        - **Bat capacity (entity)** (Сенсор емкости АКБ): energy capacity sensor (domain: sensor)
+        - **Bat Max Power** (Максимальная мощность АКБ): decimal numeric value (default: 3000.0)
+        - **Bat cur power (entity)** (Сенсор текущей мощности АКБ): power sensor (domain: sensor)
+        - **Bat voltage** (Напряжение АКБ): decimal numeric value (default: 48.0)
 
 ## 3. Localization
 The system must support localization in English and Russian, defined in `strings.json` and translated under `translations/ru.json` and `translations/en.json`.

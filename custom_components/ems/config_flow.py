@@ -10,6 +10,7 @@ from .const import (
     DOMAIN,
     CONF_TOTAL_LOAD_CONSUMPTION,
     CONF_CURRENT_HOUSE_CONSUMPTION,
+    CONF_INVERTER_MODES_LIST,
     CONF_CURRENT_PV_GENERATION,
     CONF_PV_GENERATION_TODAY,
     CONF_PV_FORECAST_TODAY,
@@ -17,9 +18,23 @@ from .const import (
     CONF_STATISTICS_DAYS,
     CONF_FALLBACK_CONSUMPTION,
     CONF_DEBUG,
+    CONF_PRICE_BUY_SENSOR,
+    CONF_PRICE_SELL_SENSOR,
+    CONF_SYSTEM_COST,
+    CONF_BAT_PRICE,
+    CONF_BAT_CYCLES,
+    CONF_BAT_CAPACITY_ENTITY,
+    CONF_BAT_MAX_POWER,
+    CONF_BAT_CUR_POWER_ENTITY,
+    CONF_BAT_VOLTAGE,
     DEFAULT_STATISTICS_DAYS,
     DEFAULT_FALLBACK_CONSUMPTION,
     DEFAULT_DEBUG,
+    DEFAULT_SYSTEM_COST,
+    DEFAULT_BAT_PRICE,
+    DEFAULT_BAT_CYCLES,
+    DEFAULT_BAT_MAX_POWER,
+    DEFAULT_BAT_VOLTAGE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,6 +79,10 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_basic_settings()
             if category == "pv_forecast":
                 return await self.async_step_pv_forecast()
+            if category == "financial":
+                return await self.async_step_financial()
+            if category == "battery_optimization":
+                return await self.async_step_battery_optimization()
 
         return self.async_show_form(
             step_id="init",
@@ -73,6 +92,8 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                         options=[
                             {"value": "basic_settings", "label": "Basic settings"},
                             {"value": "pv_forecast", "label": "PV Forecast"},
+                            {"value": "financial", "label": "Financial"},
+                            {"value": "battery_optimization", "label": "Battery optimization"},
                         ],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
@@ -110,7 +131,18 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                     selector.EntitySelectorConfig(domain="sensor")
                 )
 
-        # 2. Calculation & Fallback Parameters
+        # 2. Inverter Modes List
+        val_inv = get_value(CONF_INVERTER_MODES_LIST)
+        if val_inv:
+            schema_dict[vol.Optional(CONF_INVERTER_MODES_LIST, default=val_inv)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["select", "input_select"])
+            )
+        else:
+            schema_dict[vol.Optional(CONF_INVERTER_MODES_LIST)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["select", "input_select"])
+            )
+
+        # 3. Calculation & Fallback Parameters
         schema_dict[vol.Required(CONF_STATISTICS_DAYS, default=stats_days)] = selector.NumberSelector(
             selector.NumberSelectorConfig(
                 min=1,
@@ -129,7 +161,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             )
         )
 
-        # 3. System Settings
+        # 4. System Settings
         schema_dict[vol.Required(CONF_DEBUG, default=debug_val)] = selector.BooleanSelector()
 
         return self.async_show_form(
@@ -170,5 +202,125 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="pv_forecast",
+            data_schema=vol.Schema(schema_dict)
+        )
+
+    async def async_step_financial(self, user_input=None):
+        """Handle the Financial settings step."""
+        if user_input is not None:
+            self._user_input.update(user_input)
+            return self.async_create_entry(title="", data=self._user_input)
+
+        def get_value(key):
+            val = self._user_input.get(key)
+            if not val or val == "undefined":
+                return None
+            return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
+
+        system_cost = self._user_input.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST)
+
+        schema_dict = {}
+
+        # Price Buy & Sell Sensors
+        for key in [CONF_PRICE_BUY_SENSOR, CONF_PRICE_SELL_SENSOR]:
+            val = get_value(key)
+            if val:
+                schema_dict[vol.Optional(key, default=val)] = selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                )
+            else:
+                schema_dict[vol.Optional(key)] = selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                )
+
+        schema_dict[vol.Required(CONF_SYSTEM_COST, default=system_cost)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                step=0.01,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        return self.async_show_form(
+            step_id="financial",
+            data_schema=vol.Schema(schema_dict)
+        )
+
+    async def async_step_battery_optimization(self, user_input=None):
+        """Handle the Battery optimization settings step."""
+        if user_input is not None:
+            self._user_input.update(user_input)
+            return self.async_create_entry(title="", data=self._user_input)
+
+        def get_value(key):
+            val = self._user_input.get(key)
+            if not val or val == "undefined":
+                return None
+            return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
+
+        bat_price = self._user_input.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE)
+        bat_cycles = self._user_input.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES)
+        bat_max_power = self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)
+        bat_voltage = self._user_input.get(CONF_BAT_VOLTAGE, DEFAULT_BAT_VOLTAGE)
+
+        schema_dict = {}
+
+        # 1. Numbers
+        schema_dict[vol.Required(CONF_BAT_PRICE, default=bat_price)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                step=0.01,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        schema_dict[vol.Required(CONF_BAT_CYCLES, default=bat_cycles)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=1,
+                step=1,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        # 2. Bat Capacity (entity)
+        val_cap = get_value(CONF_BAT_CAPACITY_ENTITY)
+        if val_cap:
+            schema_dict[vol.Optional(CONF_BAT_CAPACITY_ENTITY, default=val_cap)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_BAT_CAPACITY_ENTITY)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        schema_dict[vol.Required(CONF_BAT_MAX_POWER, default=bat_max_power)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                step=1.0,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        # 3. Bat Current Power (entity)
+        val_cur_pow = get_value(CONF_BAT_CUR_POWER_ENTITY)
+        if val_cur_pow:
+            schema_dict[vol.Optional(CONF_BAT_CUR_POWER_ENTITY, default=val_cur_pow)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_BAT_CUR_POWER_ENTITY)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        schema_dict[vol.Required(CONF_BAT_VOLTAGE, default=bat_voltage)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                step=0.1,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        return self.async_show_form(
+            step_id="battery_optimization",
             data_schema=vol.Schema(schema_dict)
         )

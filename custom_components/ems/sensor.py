@@ -27,14 +27,31 @@ from .const import (
     VERSION,
     CONF_TOTAL_LOAD_CONSUMPTION,
     CONF_CURRENT_HOUSE_CONSUMPTION,
+    CONF_INVERTER_MODES_LIST,
     CONF_CURRENT_PV_GENERATION,
     CONF_PV_GENERATION_TODAY,
     CONF_PV_FORECAST_TODAY,
     CONF_PV_FORECAST_TOMORROW,
     CONF_STATISTICS_DAYS,
     CONF_FALLBACK_CONSUMPTION,
+    CONF_DEBUG,
+    CONF_PRICE_BUY_SENSOR,
+    CONF_PRICE_SELL_SENSOR,
+    CONF_SYSTEM_COST,
+    CONF_BAT_PRICE,
+    CONF_BAT_CYCLES,
+    CONF_BAT_CAPACITY_ENTITY,
+    CONF_BAT_MAX_POWER,
+    CONF_BAT_CUR_POWER_ENTITY,
+    CONF_BAT_VOLTAGE,
     DEFAULT_STATISTICS_DAYS,
     DEFAULT_FALLBACK_CONSUMPTION,
+    DEFAULT_DEBUG,
+    DEFAULT_SYSTEM_COST,
+    DEFAULT_BAT_PRICE,
+    DEFAULT_BAT_CYCLES,
+    DEFAULT_BAT_MAX_POWER,
+    DEFAULT_BAT_VOLTAGE,
 )
 from .utils import ems_log
 
@@ -141,16 +158,33 @@ async def async_setup_entry(
     config = entry.data
     options = entry.options
 
+    # Basic settings
     target_sensor_id = options.get(CONF_TOTAL_LOAD_CONSUMPTION, config.get(CONF_TOTAL_LOAD_CONSUMPTION))
     current_house_consumption_id = options.get(CONF_CURRENT_HOUSE_CONSUMPTION, config.get(CONF_CURRENT_HOUSE_CONSUMPTION))
+    inverter_modes_list_id = options.get(CONF_INVERTER_MODES_LIST, config.get(CONF_INVERTER_MODES_LIST))
+    statistics_days = options.get(CONF_STATISTICS_DAYS, config.get(CONF_STATISTICS_DAYS, DEFAULT_STATISTICS_DAYS))
+    fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
+
+    # PV forecast settings
     current_pv_generation_id = options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION))
     pv_generation_today_id = options.get(CONF_PV_GENERATION_TODAY, config.get(CONF_PV_GENERATION_TODAY))
     pv_today_id = options.get(CONF_PV_FORECAST_TODAY, config.get(CONF_PV_FORECAST_TODAY))
     pv_tomorrow_id = options.get(CONF_PV_FORECAST_TOMORROW, config.get(CONF_PV_FORECAST_TOMORROW))
-    statistics_days = options.get(CONF_STATISTICS_DAYS, config.get(CONF_STATISTICS_DAYS, DEFAULT_STATISTICS_DAYS))
-    fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
 
-    # Log errors or info for house consumption sensors
+    # Financial settings
+    price_buy_sensor_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
+    price_sell_sensor_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
+    system_cost = options.get(CONF_SYSTEM_COST, config.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST))
+
+    # Battery optimization settings
+    bat_price = options.get(CONF_BAT_PRICE, config.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE))
+    bat_cycles = options.get(CONF_BAT_CYCLES, config.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES))
+    bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+    bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
+    bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+    bat_voltage = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE, DEFAULT_BAT_VOLTAGE))
+
+    # Log errors or info for house consumption / basic settings
     if not target_sensor_id:
         ems_log(hass, _LOGGER, logging.ERROR, "Total load consumption sensor is not configured in settings!")
     else:
@@ -160,6 +194,11 @@ async def async_setup_entry(
         ems_log(hass, _LOGGER, logging.ERROR, "Current house consumption sensor is not configured in settings!")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Current house consumption sensor configured successfully: {current_house_consumption_id}")
+
+    if not inverter_modes_list_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Inverter modes list is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Inverter modes list configured successfully: {inverter_modes_list_id}")
 
     # Log errors or info for PV sensors
     if not current_pv_generation_id:
@@ -181,6 +220,28 @@ async def async_setup_entry(
         ems_log(hass, _LOGGER, logging.ERROR, "PV Forecast tomorrow sensor is not configured in settings!")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"PV Forecast tomorrow sensor configured successfully: {pv_tomorrow_id}")
+
+    # Log errors or info for Financial sensors
+    if not price_buy_sensor_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Price buy sensor is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Price buy sensor configured successfully: {price_buy_sensor_id}")
+
+    if not price_sell_sensor_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Price sell sensor is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Price sell sensor configured successfully: {price_sell_sensor_id}")
+
+    # Log errors or info for Battery optimization sensors
+    if not bat_capacity_entity_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Battery capacity entity is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Battery capacity entity configured successfully: {bat_capacity_entity_id}")
+
+    if not bat_cur_power_entity_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Battery current power entity is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Battery current power entity configured successfully: {bat_cur_power_entity_id}")
 
     entities = []
 
