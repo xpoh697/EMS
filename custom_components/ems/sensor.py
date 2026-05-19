@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -14,6 +14,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
     async_track_state_change_event,
@@ -56,6 +57,7 @@ from .const import (
     DEFAULT_MIN_BAT_SOC,
 )
 from .utils import ems_log, calculate_battery_degradation, parse_price_sensor
+from .dp_engine import run_unified_dp, DPConfig
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -382,6 +384,15 @@ async def async_setup_entry(
                 entry.entry_id,
                 entry.title,
                 pv_tomorrow_id,
+            )
+        )
+
+    if bat_cur_power_entity_id and bat_capacity_entity_id:
+        entities.append(
+            EmsDpSensor(
+                entry.entry_id,
+                entry.title,
+                entry,
             )
         )
 
@@ -868,3 +879,414 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
         """Recalculate forecast on hourly transitions."""
         self._update_forecast()
         self.async_write_ha_state()
+
+
+class EmsDpSensor(SensorEntity):
+    """EMS Dynamic Programming Strategy Sensor."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
+        """Initialize the DP strategy sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._entry = entry
+        self._attr_name = "DP Strategy"
+        self._attr_unique_id = f"{entry_id}_dp_strategy"
+        self.entity_id = "sensor.dp"
+
+        # State and attributes
+        self._state: str = "idle"
+        self._charge_hours: list[dict] = []
+        self._discharge_hours: list[dict] = []
+        self._pv_charge_hours: list[dict] = []
+        self._self_consume_hours: list[dict] = []
+        self._paid_import_hours: list[dict] = []
+        self._solar_export_hours: list[dict] = []
+        self._schedule: list[dict] = []
+        self._stats: dict = {}
+        self._error_msg: str | None = None
+
+        # Throttling/hysteresis helpers
+        self._last_calc_time: datetime | None = None
+        self._last_calc_soc: float | None = None
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return recommended action for current hour."""
+        return self._state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "charge_hours": self._charge_hours,
+            "discharge_hours": self._discharge_hours,
+            "pv_charge_hours": self._pv_charge_hours,
+            "self_consume_hours": self._self_consume_hours,
+            "paid_import_hours": self._paid_import_hours,
+            "solar_export_hours": self._solar_export_hours,
+            "schedule": self._schedule,
+            "stats": self._stats,
+            "error": self._error_msg,
+            "last_calculation": self._last_calc_time.isoformat() if self._last_calc_time else None,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition."""
+        await super().async_added_to_hass()
+
+        # Initial calculation
+        await self.async_update_strategy()
+
+        # Recalculate on every hour transition
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._async_hourly_trigger, minute=0, second=0
+            )
+        )
+
+        config = self._entry.data
+        options = self._entry.options
+        price_buy_sensor_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
+        price_sell_sensor_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
+        bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+
+        # Recalculate on SOC changes with throttling
+        if bat_cur_power_entity_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [bat_cur_power_entity_id], self._async_soc_listener
+                )
+            )
+
+        # Listen for tariff, forecast and load profile changes
+        generic_listeners = []
+        if price_buy_sensor_id:
+            generic_listeners.append(price_buy_sensor_id)
+        if price_sell_sensor_id:
+            generic_listeners.append(price_sell_sensor_id)
+        generic_listeners.extend([
+            "sensor.pv_forecast_today",
+            "sensor.pv_forecast_tomorrow",
+            "sensor.load_consumption"
+        ])
+
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, generic_listeners, self._async_generic_listener
+            )
+        )
+
+    async def _async_hourly_trigger(self, datetime_now) -> None:
+        """Handle hourly recalculation."""
+        ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: hourly recalculation triggered")
+        await self.async_update_strategy()
+
+    async def _async_generic_listener(self, event) -> None:
+        """Handle changes in generic sensors immediately."""
+        entity_id = event.data.get("entity_id")
+        new_state = event.data.get("new_state")
+        if new_state:
+            ems_log(self.hass, _LOGGER, logging.DEBUG, f"EMS DP trigger: update from {entity_id}")
+            await self.async_update_strategy()
+
+    async def _async_soc_listener(self, event) -> None:
+        """Handle SOC updates with 2% change or 10 min throttle."""
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in (None, "unknown", "unavailable"):
+            return
+
+        try:
+            soc = float(new_state.state)
+        except (ValueError, TypeError):
+            return
+
+        now = dt_util.now()
+        if (
+            self._last_calc_time is None
+            or self._last_calc_soc is None
+            or abs(soc - self._last_calc_soc) >= 2.0
+            or (now - self._last_calc_time).total_seconds() > 600
+        ):
+            ems_log(
+                self.hass,
+                _LOGGER,
+                logging.DEBUG,
+                f"EMS DP trigger: SOC changed to {soc}% (last calculated: {self._last_calc_soc}%)"
+            )
+            await self.async_update_strategy()
+
+    async def async_update_strategy(self) -> None:
+        """Gather states and call DP execution inside executor pool."""
+        config = self._entry.data
+        options = self._entry.options
+
+        fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
+        min_sell_price = options.get(CONF_MIN_SELL_PRICE, config.get(CONF_MIN_SELL_PRICE, DEFAULT_MIN_SELL_PRICE))
+        bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+        bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+        bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
+        min_bat_soc = options.get(CONF_MIN_BAT_SOC, config.get(CONF_MIN_BAT_SOC, DEFAULT_MIN_BAT_SOC))
+
+        # Parse capacity
+        capacity = 5.12
+        if bat_capacity_entity_id:
+            cap_state = self.hass.states.get(bat_capacity_entity_id)
+            if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    capacity = float(cap_state.state)
+                    unit = cap_state.attributes.get("unit_of_measurement")
+                    if unit == "Wh" or capacity > 100.0:
+                        capacity = capacity / 1000.0
+                except (ValueError, TypeError):
+                    pass
+
+        # Parse current SOC
+        soc = 50.0
+        if bat_cur_power_entity_id:
+            soc_state = self.hass.states.get(bat_cur_power_entity_id)
+            if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    soc = float(soc_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+        cycle_cost = self.hass.data.get(DOMAIN, {}).get("bat_degradation_per_kwh", 0.0)
+
+        buy_prices_today = self.hass.data.get(DOMAIN, {}).get("price_buy_today", [0.0] * 24)
+        buy_prices_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_buy_tomorrow", [0.0] * 24)
+        sell_prices_today = self.hass.data.get(DOMAIN, {}).get("price_sell_today", [0.0] * 24)
+        sell_prices_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_sell_tomorrow", [0.0] * 24)
+
+        pv_today = [0.0] * 24
+        pv_today_state = self.hass.states.get("sensor.pv_forecast_today")
+        if pv_today_state:
+            pv_today = pv_today_state.attributes.get("hourly_forecast", [0.0] * 24)
+
+        pv_tomorrow = [0.0] * 24
+        pv_tomorrow_state = self.hass.states.get("sensor.pv_forecast_tomorrow")
+        if pv_tomorrow_state:
+            pv_tomorrow = pv_tomorrow_state.attributes.get("hourly_forecast", [0.0] * 24)
+
+        consumption_today = [fallback_consumption] * 24
+        consumption_tomorrow = [fallback_consumption] * 24
+        load_state = self.hass.states.get("sensor.load_consumption")
+        if load_state:
+            consumption_today = load_state.attributes.get("average_today", [fallback_consumption] * 24)
+            now = dt_util.now()
+            tomorrow_weekday = (now + timedelta(days=1)).weekday()
+            day_keys = [
+                "average_monday", "average_tuesday", "average_wednesday",
+                "average_thursday", "average_friday", "average_saturday",
+                "average_sunday",
+            ]
+            tomorrow_key = day_keys[tomorrow_weekday]
+            consumption_tomorrow = load_state.attributes.get(tomorrow_key, [fallback_consumption] * 24)
+
+        result = await self.hass.async_add_executor_job(
+            self._calculate_strategy_sync,
+            soc,
+            capacity,
+            min_bat_soc,
+            bat_max_power,
+            min_sell_price,
+            cycle_cost,
+            buy_prices_today,
+            buy_prices_tomorrow,
+            sell_prices_today,
+            sell_prices_tomorrow,
+            pv_today,
+            pv_tomorrow,
+            consumption_today,
+            consumption_tomorrow,
+            fallback_consumption,
+        )
+
+        self._state = result.get("current_action", "idle")
+        self._charge_hours = result.get("charge_hours", [])
+        self._discharge_hours = result.get("discharge_hours", [])
+        self._pv_charge_hours = result.get("pv_charge_hours", [])
+        self._self_consume_hours = result.get("self_consume_hours", [])
+        self._paid_import_hours = result.get("paid_import_hours", [])
+        self._solar_export_hours = result.get("solar_export_hours", [])
+        self._schedule = result.get("schedule", [])
+        self._stats = result.get("stats", {})
+        self._error_msg = result.get("error")
+
+        self._last_calc_time = dt_util.now()
+        self._last_calc_soc = soc
+
+        self.async_write_ha_state()
+
+    def _calculate_strategy_sync(
+        self,
+        soc: float,
+        capacity: float,
+        min_bat_soc: float,
+        bat_max_power: float,
+        min_sell_price: float,
+        cycle_cost: float,
+        buy_prices_today: list[float],
+        buy_prices_tomorrow: list[float],
+        sell_prices_today: list[float],
+        sell_prices_tomorrow: list[float],
+        pv_today: list[float],
+        pv_tomorrow: list[float],
+        consumption_today: list[float],
+        consumption_tomorrow: list[float],
+        fallback_consumption: float,
+    ) -> dict[str, Any]:
+        """Build grid of slots and call DP core helper."""
+        from .dp_engine import run_unified_dp, DPConfig
+
+        now = dt_util.now()
+        current_hour = now.hour
+        today_str = now.strftime("%Y-%m-%d")
+        tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        slots = []
+        # Today
+        for h in range(current_hour, 24):
+            slots.append({
+                "date": today_str,
+                "hour": h,
+                "buy_price": buy_prices_today[h] if h < len(buy_prices_today) else 0.0,
+                "sell_price": sell_prices_today[h] if h < len(sell_prices_today) else 0.0,
+                "pv_kwh": pv_today[h] if h < len(pv_today) else 0.0,
+                "consumption_kwh": consumption_today[h] if h < len(consumption_today) else fallback_consumption,
+            })
+        # Tomorrow
+        has_tomorrow_prices = any(buy_prices_tomorrow) or any(sell_prices_tomorrow)
+        if has_tomorrow_prices:
+            for h in range(24):
+                slots.append({
+                    "date": tomorrow_str,
+                    "hour": h,
+                    "buy_price": buy_prices_tomorrow[h] if h < len(buy_prices_tomorrow) else 0.0,
+                    "sell_price": sell_prices_tomorrow[h] if h < len(sell_prices_tomorrow) else 0.0,
+                    "pv_kwh": pv_tomorrow[h] if h < len(pv_tomorrow) else 0.0,
+                    "consumption_kwh": consumption_tomorrow[h] if h < len(consumption_tomorrow) else fallback_consumption,
+                })
+
+        usable_capacity = capacity * (1 - min_bat_soc / 100)
+        current_usable = capacity * (soc - min_bat_soc) / 100
+        current_usable = max(0.0, min(current_usable, usable_capacity))
+
+        # Reserve calculation (night hours average demand)
+        night_hours = [23, 0, 1, 2, 3, 4, 5, 6, 7]
+        profile = consumption_tomorrow if has_tomorrow_prices else consumption_today
+        reserve = sum(profile[h] for h in night_hours if h < len(profile))
+        min_end_usable = min(reserve, usable_capacity)
+
+        horizon_buy = [slot["buy_price"] for slot in slots]
+        global_min_buy = min(horizon_buy) if horizon_buy else 0.0
+        terminal_value = max(min_sell_price, global_min_buy + cycle_cost)
+
+        dp_config = DPConfig(
+            min_sell_price=min_sell_price,
+            battery_max_discharge_power=bat_max_power / 1000.0,
+            battery_max_charge_power=bat_max_power / 1000.0,
+            battery_min_soc=int(min_bat_soc),
+            battery_capacity=capacity,
+        )
+
+        try:
+            (
+                chg_h,
+                dis_h,
+                pvc_h,
+                sc_h,
+                pim_h,
+                stats,
+            ) = run_unified_dp(
+                slots=slots,
+                current_usable=current_usable,
+                usable_capacity=usable_capacity,
+                cycle_cost=cycle_cost,
+                terminal_value_per_kwh=terminal_value,
+                min_end_usable=min_end_usable,
+                config=dp_config,
+            )
+        except Exception as ex:
+            return {
+                "current_action": "idle",
+                "error": f"DP calculation error: {str(ex)}",
+            }
+
+        current_action = "idle"
+        solar_export_hours = []
+        schedule = []
+
+        chg_keys = {(h["date"], h["hour"]): h for h in chg_h}
+        dis_keys = {(h["date"], h["hour"]): h for h in dis_h}
+        pvc_keys = {(h["date"], h["hour"]): h for h in pvc_h}
+        sc_keys = {(h["date"], h["hour"]): h for h in sc_h}
+        pim_keys = {(h["date"], h["hour"]): h for h in pim_h}
+
+        for idx, slot in enumerate(slots):
+            key = (slot["date"], slot["hour"])
+            action = "idle"
+            energy = 0.0
+
+            if key in chg_keys:
+                action = "grid_charge"
+                energy = chg_keys[key].get("planned_energy_kwh", 0.0)
+            elif key in dis_keys:
+                action = "discharge"
+                energy = dis_keys[key].get("planned_energy_kwh", 0.0)
+            elif key in pvc_keys:
+                action = "pv_charge"
+                energy = pvc_keys[key].get("charge_kwh", 0.0)
+            elif key in sc_keys:
+                action = "self_consume"
+                energy = sc_keys[key].get("planned_energy_kwh", 0.0)
+            elif key in pim_keys:
+                action = "paid_import"
+                energy = pim_keys[key].get("planned_grid_import_kwh", 0.0)
+            else:
+                if slot["pv_kwh"] > 0.1:
+                    action = "solar_export"
+                    solar_export_hours.append({
+                        "date": slot["date"],
+                        "hour": slot["hour"],
+                        "pv_kwh": slot["pv_kwh"],
+                    })
+
+            if idx == 0:
+                current_action = action
+
+            schedule.append({
+                "date": slot["date"],
+                "hour": slot["hour"],
+                "buy_price": slot["buy_price"],
+                "sell_price": slot["sell_price"],
+                "pv_kwh": slot["pv_kwh"],
+                "consumption_kwh": slot["consumption_kwh"],
+                "action": action,
+                "energy_kwh": round(energy, 2),
+            })
+
+        return {
+            "current_action": current_action,
+            "charge_hours": chg_h,
+            "discharge_hours": dis_h,
+            "pv_charge_hours": pvc_h,
+            "self_consume_hours": sc_h,
+            "paid_import_hours": pim_h,
+            "solar_export_hours": solar_export_hours,
+            "schedule": schedule,
+            "stats": stats,
+            "error": None,
+        }

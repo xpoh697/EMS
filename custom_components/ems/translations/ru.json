@@ -81,5 +81,21 @@
         "battery_optimization": "Оптимизация АКБ"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "dp": {
+        "name": "Стратегия DP",
+        "state": {
+          "idle": "Ожидание",
+          "solar_export": "Экспорт СЭС",
+          "discharge": "Экспорт в сеть (Разряд АКБ)",
+          "pv_charge": "Заряд от СЭС",
+          "grid_charge": "Заряд от сети",
+          "self_consume": "Собственное потребление",
+          "paid_import": "Оплачиваемый импорт"
+        }
+      }
+    }
   }
 }
