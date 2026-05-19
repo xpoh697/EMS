@@ -9,6 +9,9 @@ import homeassistant.helpers.config_validation as cv
 from .const import (
     DOMAIN,
     CONF_TOTAL_LOAD_CONSUMPTION,
+    CONF_CURRENT_HOUSE_CONSUMPTION,
+    CONF_CURRENT_PV_GENERATION,
+    CONF_PV_GENERATION_TODAY,
     CONF_PV_FORECAST_TODAY,
     CONF_PV_FORECAST_TOMORROW,
     CONF_STATISTICS_DAYS,
@@ -59,6 +62,8 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             category = user_input.get("category")
             if category == "basic_settings":
                 return await self.async_step_basic_settings()
+            if category == "pv_forecast":
+                return await self.async_step_pv_forecast()
 
         return self.async_show_form(
             step_id="init",
@@ -67,6 +72,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                     selector.SelectSelectorConfig(
                         options=[
                             {"value": "basic_settings", "label": "Basic settings"},
+                            {"value": "pv_forecast", "label": "PV Forecast"},
                         ],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
@@ -90,10 +96,65 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         fallback_cons = self._user_input.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION)
         debug_val = self._user_input.get(CONF_DEBUG, DEFAULT_DEBUG)
 
-        # Build schema dynamically to avoid voluptuous validation issues with missing keys
         schema_dict = {}
+
+        # 1. House Consumption Sensors
+        for key in [CONF_TOTAL_LOAD_CONSUMPTION, CONF_CURRENT_HOUSE_CONSUMPTION]:
+            val = get_value(key)
+            if val:
+                schema_dict[vol.Optional(key, default=val)] = selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                )
+            else:
+                schema_dict[vol.Optional(key)] = selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                )
+
+        # 2. Calculation & Fallback Parameters
+        schema_dict[vol.Required(CONF_STATISTICS_DAYS, default=stats_days)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=1,
+                max=365,
+                step=1,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        schema_dict[vol.Required(CONF_FALLBACK_CONSUMPTION, default=fallback_cons)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                max=100.0,
+                step=0.1,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        # 3. System Settings
+        schema_dict[vol.Required(CONF_DEBUG, default=debug_val)] = selector.BooleanSelector()
+
+        return self.async_show_form(
+            step_id="basic_settings",
+            data_schema=vol.Schema(schema_dict)
+        )
+
+    async def async_step_pv_forecast(self, user_input=None):
+        """Handle the PV Forecast settings step."""
+        if user_input is not None:
+            self._user_input.update(user_input)
+            return self.async_create_entry(title="", data=self._user_input)
+
+        def get_value(key):
+            val = self._user_input.get(key)
+            if not val or val == "undefined":
+                return None
+            return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
+
+        schema_dict = {}
+
+        # PV Generation & Forecast Sensors
         for key in [
-            CONF_TOTAL_LOAD_CONSUMPTION,
+            CONF_CURRENT_PV_GENERATION,
+            CONF_PV_GENERATION_TODAY,
             CONF_PV_FORECAST_TODAY,
             CONF_PV_FORECAST_TOMORROW,
         ]:
@@ -107,30 +168,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                     selector.EntitySelectorConfig(domain="sensor")
                 )
 
-        # Add positive integer statistics days slider/box (range 1-365)
-        schema_dict[vol.Required(CONF_STATISTICS_DAYS, default=stats_days)] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=1,
-                max=365,
-                step=1,
-                mode=selector.NumberSelectorMode.BOX
-            )
-        )
-
-        # Add fallback hourly consumption (range 0.0 - 100.0)
-        schema_dict[vol.Required(CONF_FALLBACK_CONSUMPTION, default=fallback_cons)] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0,
-                max=100.0,
-                step=0.1,
-                mode=selector.NumberSelectorMode.BOX
-            )
-        )
-
-        # Add debug switch
-        schema_dict[vol.Required(CONF_DEBUG, default=debug_val)] = selector.BooleanSelector()
-
         return self.async_show_form(
-            step_id="basic_settings",
+            step_id="pv_forecast",
             data_schema=vol.Schema(schema_dict)
         )

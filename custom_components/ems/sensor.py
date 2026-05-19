@@ -26,6 +26,9 @@ from .const import (
     DOMAIN,
     VERSION,
     CONF_TOTAL_LOAD_CONSUMPTION,
+    CONF_CURRENT_HOUSE_CONSUMPTION,
+    CONF_CURRENT_PV_GENERATION,
+    CONF_PV_GENERATION_TODAY,
     CONF_PV_FORECAST_TODAY,
     CONF_PV_FORECAST_TOMORROW,
     CONF_STATISTICS_DAYS,
@@ -47,16 +50,35 @@ async def async_setup_entry(
     options = entry.options
 
     target_sensor_id = options.get(CONF_TOTAL_LOAD_CONSUMPTION, config.get(CONF_TOTAL_LOAD_CONSUMPTION))
+    current_house_consumption_id = options.get(CONF_CURRENT_HOUSE_CONSUMPTION, config.get(CONF_CURRENT_HOUSE_CONSUMPTION))
+    current_pv_generation_id = options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION))
+    pv_generation_today_id = options.get(CONF_PV_GENERATION_TODAY, config.get(CONF_PV_GENERATION_TODAY))
     pv_today_id = options.get(CONF_PV_FORECAST_TODAY, config.get(CONF_PV_FORECAST_TODAY))
     pv_tomorrow_id = options.get(CONF_PV_FORECAST_TOMORROW, config.get(CONF_PV_FORECAST_TOMORROW))
     statistics_days = options.get(CONF_STATISTICS_DAYS, config.get(CONF_STATISTICS_DAYS, DEFAULT_STATISTICS_DAYS))
     fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
 
-    # Log error if any required entity is missing/None, and info if successfully configured
+    # Log errors or info for house consumption sensors
     if not target_sensor_id:
         ems_log(hass, _LOGGER, logging.ERROR, "Total load consumption sensor is not configured in settings!")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Total load consumption sensor configured successfully: {target_sensor_id}")
+
+    if not current_house_consumption_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Current house consumption sensor is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Current house consumption sensor configured successfully: {current_house_consumption_id}")
+
+    # Log errors or info for PV sensors
+    if not current_pv_generation_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Current PV generation sensor is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Current PV generation sensor configured successfully: {current_pv_generation_id}")
+
+    if not pv_generation_today_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "PV generation today sensor is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"PV generation today sensor configured successfully: {pv_generation_today_id}")
 
     if not pv_today_id:
         ems_log(hass, _LOGGER, logging.ERROR, "PV Forecast today sensor is not configured in settings!")

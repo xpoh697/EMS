@@ -30,12 +30,29 @@
         "description": "Настройте базовые датчики для Системы управления энергией.",
         "data": {
           "total_load_consumption": "Сенсор общего потребления нагрузки",
-          "pv_forecast_today": "Сенсор прогноза СЭС на сегодня",
-          "pv_forecast_tomorrow": "Сенсор прогноза СЭС на завтра",
+          "current_house_consumption": "Сенсор текущего потребления дома",
           "statistics_days": "Количество дней истории для усреднения",
           "fallback_consumption": "Фолбэк потребления в час (кВтч)",
           "debug": "Включить отладочное логирование (debug)"
         }
+      },
+      "pv_forecast": {
+        "title": "Настройки генерации и прогнозов СЭС",
+        "description": "Настройте датчики текущей генерации и прогнозов СЭС.",
+        "data": {
+          "current_pv_generation": "Сенсор текущей генерации СЭС",
+          "pv_generation_today": "Сенсор генерации СЭС за сегодня",
+          "pv_forecast_today": "Сенсор прогноза СЭС на сегодня",
+          "pv_forecast_tomorrow": "Сенсор прогноза СЭС на завтра"
+        }
+      }
+    }
+  },
+  "selector": {
+    "category": {
+      "options": {
+        "basic_settings": "Основные настройки",
+        "pv_forecast": "Прогноз СЭС"
       }
     }
   }

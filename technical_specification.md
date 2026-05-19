@@ -13,14 +13,18 @@ To ensure flexibility and modular configuration, the integration must implement:
    - Triggers the creation of the integration entry.
 2. **Options Flow**:
    - Offers a settings menu to easily navigate between different configuration categories.
-   - The first menu category must be **Basic settings** (Основные настройки).
-   - Basic settings page must request the following Home Assistant sensor entities and settings:
-     - **Total load consumption** (Общее потребление нагрузки): sensor entity (domain: sensor)
-     - **PV Forecast today** (Прогноз СЭС на сегодня): sensor entity (domain: sensor)
-     - **PV Forecast tomorrow** (Прогноз СЭС на завтра): sensor entity (domain: sensor)
-     - **Number of history days for averaging** (Количество дней истории для усреднения): positive integer (range: 1 - 365, default: 14)
-     - **Fallback consumption per hour** (Фолбэк потребления в час): decimal value in kWh (range: 0.0 - 100.0, default: 0.5)
-     - **Enable debug logging** (Включить отладочное логирование): boolean flag (default: False)
+   - The categories are:
+     1. **Basic settings** (Основные настройки):
+        - **Total load consumption** (Общее потребление нагрузки): cumulative energy sensor (domain: sensor)
+        - **Current house consumption** (Текущее потребление дома): power sensor (domain: sensor)
+        - **Number of history days for averaging** (Количество дней истории для усреднения): positive integer (range: 1 - 365, default: 14)
+        - **Fallback consumption per hour** (Фолбэк потребления в час): decimal value in kWh (range: 0.0 - 100.0, default: 0.5)
+        - **Enable debug logging** (Включить отладочное логирование): boolean flag (default: False)
+     2. **PV Forecast** (Прогноз СЭС / Настройки генерации и прогнозов СЭС):
+        - **Current PV generation** (Текущая генерация СЭС): power sensor (domain: sensor)
+        - **PV generation today** (Генерация СЭС за сегодня): energy sensor (domain: sensor)
+        - **PV Forecast today** (Прогноз СЭС на сегодня): solar forecast sensor (domain: sensor)
+        - **PV Forecast tomorrow** (Прогноз СЭС на завтра): solar forecast sensor (domain: sensor)
 
 ## 3. Localization
 The system must support localization in English and Russian, defined in `strings.json` and translated under `translations/ru.json` and `translations/en.json`.

@@ -30,12 +30,29 @@
         "description": "Configure basic sensor entities for the Energy Management System.",
         "data": {
           "total_load_consumption": "Total load consumption sensor",
-          "pv_forecast_today": "PV Forecast today sensor",
-          "pv_forecast_tomorrow": "PV Forecast tomorrow sensor",
+          "current_house_consumption": "Current house consumption sensor",
           "statistics_days": "Number of history days for averaging",
           "fallback_consumption": "Fallback consumption per hour (kWh)",
           "debug": "Enable debug logging"
         }
+      },
+      "pv_forecast": {
+        "title": "PV Forecast Settings",
+        "description": "Configure PV generation and solar forecast sensors.",
+        "data": {
+          "current_pv_generation": "Current PV generation power sensor",
+          "pv_generation_today": "PV generation today energy sensor",
+          "pv_forecast_today": "PV Forecast today sensor",
+          "pv_forecast_tomorrow": "PV Forecast tomorrow sensor"
+        }
+      }
+    }
+  },
+  "selector": {
+    "category": {
+      "options": {
+        "basic_settings": "Basic settings",
+        "pv_forecast": "PV Forecast"
       }
     }
   }
