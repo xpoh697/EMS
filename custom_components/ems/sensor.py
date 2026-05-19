@@ -24,6 +24,8 @@ from homeassistant.util import dt as dt_util
 from .const import (
     DOMAIN,
     CONF_TOTAL_LOAD_CONSUMPTION,
+    CONF_PV_FORECAST_TODAY,
+    CONF_PV_FORECAST_TOMORROW,
     CONF_STATISTICS_DAYS,
     CONF_FALLBACK_CONSUMPTION,
     DEFAULT_STATISTICS_DAYS,
@@ -43,8 +45,26 @@ async def async_setup_entry(
     options = entry.options
 
     target_sensor_id = options.get(CONF_TOTAL_LOAD_CONSUMPTION, config.get(CONF_TOTAL_LOAD_CONSUMPTION))
+    pv_today_id = options.get(CONF_PV_FORECAST_TODAY, config.get(CONF_PV_FORECAST_TODAY))
+    pv_tomorrow_id = options.get(CONF_PV_FORECAST_TOMORROW, config.get(CONF_PV_FORECAST_TOMORROW))
     statistics_days = options.get(CONF_STATISTICS_DAYS, config.get(CONF_STATISTICS_DAYS, DEFAULT_STATISTICS_DAYS))
     fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
+
+    # Log error if any required entity is missing/None, and info if successfully configured
+    if not target_sensor_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Total load consumption sensor is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Total load consumption sensor configured successfully: {target_sensor_id}")
+
+    if not pv_today_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "PV Forecast today sensor is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"PV Forecast today sensor configured successfully: {pv_today_id}")
+
+    if not pv_tomorrow_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "PV Forecast tomorrow sensor is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"PV Forecast tomorrow sensor configured successfully: {pv_tomorrow_id}")
 
     if target_sensor_id:
         async_add_entities(
@@ -212,13 +232,37 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
     async def _async_sensor_state_listener(self, event) -> None:
         """Track state updates from the target cumulative sensor and calculate hourly deltas."""
         new_state = event.data.get("new_state")
-        if new_state is None or new_state.state in (None, "unknown", "unavailable"):
+        if new_state is None:
+            ems_log(self.hass, _LOGGER, logging.ERROR, f"Sensor state for {self._target_sensor_id} is None!")
+            return
+
+        if new_state.state in (None, "unknown", "unavailable"):
+            ems_log(
+                self.hass,
+                _LOGGER,
+                logging.ERROR,
+                f"Sensor state for {self._target_sensor_id} is invalid: {new_state.state}"
+            )
             return
 
         try:
             new_value = float(new_state.state)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as err:
+            ems_log(
+                self.hass,
+                _LOGGER,
+                logging.ERROR,
+                f"Could not convert sensor state '{new_state.state}' to float for {self._target_sensor_id}: {err}"
+            )
             return
+
+        # Successfully retrieved value - log as INFO
+        ems_log(
+            self.hass,
+            _LOGGER,
+            logging.INFO,
+            f"Successfully retrieved value from {self._target_sensor_id}: {new_value} kWh"
+        )
 
         now = dt_util.now()
 
@@ -251,4 +295,3 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         self._state = round(sum(self._today_consumption), 4)
 
         self.async_write_ha_state()
-``` chosen option
