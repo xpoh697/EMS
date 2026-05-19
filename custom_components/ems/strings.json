@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Energy Management System (EMS)",
+        "description": "Configure the Energy Management System instance.",
+        "data": {
+          "name": "Integration Instance Name"
+        }
+      }
+    },
+    "error": {
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "This integration instance is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "EMS Configuration Menu",
+        "description": "Select the settings category you want to configure.",
+        "data": {
+          "category": "Settings Category"
+        }
+      },
+      "basic_settings": {
+        "title": "Basic Settings",
+        "description": "Configure basic sensor entities for the Energy Management System.",
+        "data": {
+          "total_load_consumption": "Total load consumption sensor",
+          "pv_forecast_today": "PV Forecast today sensor",
+          "pv_forecast_tomorrow": "PV Forecast tomorrow sensor"
+        }
+      }
+    }
+  }
+}
