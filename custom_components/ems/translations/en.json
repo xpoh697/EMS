@@ -31,7 +31,10 @@
         "data": {
           "total_load_consumption": "Total load consumption sensor",
           "pv_forecast_today": "PV Forecast today sensor",
-          "pv_forecast_tomorrow": "PV Forecast tomorrow sensor"
+          "pv_forecast_tomorrow": "PV Forecast tomorrow sensor",
+          "statistics_days": "Number of history days for averaging",
+          "fallback_consumption": "Fallback consumption per hour (kWh)",
+          "debug": "Enable debug logging"
         }
       }
     }

@@ -11,6 +11,12 @@ from .const import (
     CONF_TOTAL_LOAD_CONSUMPTION,
     CONF_PV_FORECAST_TODAY,
     CONF_PV_FORECAST_TOMORROW,
+    CONF_STATISTICS_DAYS,
+    CONF_FALLBACK_CONSUMPTION,
+    CONF_DEBUG,
+    DEFAULT_STATISTICS_DAYS,
+    DEFAULT_FALLBACK_CONSUMPTION,
+    DEFAULT_DEBUG,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,6 +86,10 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 return None
             return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
 
+        stats_days = self._user_input.get(CONF_STATISTICS_DAYS, DEFAULT_STATISTICS_DAYS)
+        fallback_cons = self._user_input.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION)
+        debug_val = self._user_input.get(CONF_DEBUG, DEFAULT_DEBUG)
+
         # Build schema dynamically to avoid voluptuous validation issues with missing keys
         schema_dict = {}
         for key in [
@@ -96,6 +106,29 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 schema_dict[vol.Optional(key)] = selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 )
+
+        # Add positive integer statistics days slider/box (range 1-365)
+        schema_dict[vol.Required(CONF_STATISTICS_DAYS, default=stats_days)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=1,
+                max=365,
+                step=1,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        # Add fallback hourly consumption (range 0.0 - 100.0)
+        schema_dict[vol.Required(CONF_FALLBACK_CONSUMPTION, default=fallback_cons)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                max=100.0,
+                step=0.1,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        # Add debug switch
+        schema_dict[vol.Required(CONF_DEBUG, default=debug_val)] = selector.BooleanSelector()
 
         return self.async_show_form(
             step_id="basic_settings",
