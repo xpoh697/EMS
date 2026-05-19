@@ -50,8 +50,8 @@ async def setup_ems_logger(hass: HomeAssistant) -> None:
             handler.close()
             logger.removeHandler(handler)
 
-    log_dir = hass.config.path("custom_components", "ems")
-    log_file = os.path.join(log_dir, "ems.log")
+    log_dir = hass.config.config_dir
+    log_file = hass.config.path("ems.log")
 
     # Run blocking file/handler setup in the executor thread pool
     handler = await hass.async_add_executor_job(

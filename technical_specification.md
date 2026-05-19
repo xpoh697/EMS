@@ -103,6 +103,11 @@ To provide user-controlled debugging info, the integration implements a conditio
   - `level`: Log level (e.g., `logging.DEBUG`, `logging.INFO`, `logging.WARNING`, `logging.ERROR`).
   - `message`: Log message string.
   - `*args`, `**kwargs`: Forwarded directly to the underlying logging methods (supporting `exc_info=True`, etc.).
+- **Log File Location**:
+  - Redirects logs to a separate file named `ems.log` located at the root of the Home Assistant config directory:
+    `\\192.168.100.5\config\ems.log`
+  - All logs from `custom_components.ems` are isolated and do not populate the root `home-assistant.log`.
+  - Implements a 5 MB rollover file size with up to 5 history backup files (`ems.log.1` to `ems.log.5`).
 - **Caching optimization**:
   - The debug setting is retrieved and cached in `hass.data[DOMAIN]["debug"]` during the integration startup (`async_setup_entry`).
   - Checking the flag is an $O(1)$ memory operation, avoiding DB/ConfigEntry scans.
