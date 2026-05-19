@@ -19,6 +19,7 @@ CONF_DEBUG = "debug"
 CONF_PRICE_BUY_SENSOR = "price_buy_sensor"
 CONF_PRICE_SELL_SENSOR = "price_sell_sensor"
 CONF_SYSTEM_COST = "system_cost"
+CONF_MIN_SELL_PRICE = "min_sell_price"
 
 # Battery optimization configuration keys
 CONF_BAT_PRICE = "bat_price"
@@ -27,6 +28,7 @@ CONF_BAT_CAPACITY_ENTITY = "bat_capacity_entity"
 CONF_BAT_MAX_POWER = "bat_max_power"
 CONF_BAT_CUR_POWER_ENTITY = "bat_cur_power_entity"
 CONF_BAT_VOLTAGE = "bat_voltage"
+CONF_MIN_BAT_SOC = "min_bat_soc"
 
 # Default values
 DEFAULT_STATISTICS_DAYS = 14
@@ -34,6 +36,8 @@ DEFAULT_FALLBACK_CONSUMPTION = 0.5
 DEFAULT_DEBUG = False
 
 DEFAULT_SYSTEM_COST = 0.0
+DEFAULT_MIN_SELL_PRICE = 0.0
 DEFAULT_BAT_PRICE = 0.0
 DEFAULT_BAT_CYCLES = 6000
 DEFAULT_BAT_MAX_POWER = 3000.0
+DEFAULT_MIN_BAT_SOC = 20.0

@@ -21,19 +21,23 @@ from .const import (
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
     CONF_SYSTEM_COST,
+    CONF_MIN_SELL_PRICE,
     CONF_BAT_PRICE,
     CONF_BAT_CYCLES,
     CONF_BAT_CAPACITY_ENTITY,
     CONF_BAT_MAX_POWER,
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_VOLTAGE,
+    CONF_MIN_BAT_SOC,
     DEFAULT_STATISTICS_DAYS,
     DEFAULT_FALLBACK_CONSUMPTION,
     DEFAULT_DEBUG,
     DEFAULT_SYSTEM_COST,
+    DEFAULT_MIN_SELL_PRICE,
     DEFAULT_BAT_PRICE,
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_MAX_POWER,
+    DEFAULT_MIN_BAT_SOC,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -217,6 +221,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
 
         system_cost = self._user_input.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST)
+        min_sell_price = self._user_input.get(CONF_MIN_SELL_PRICE, DEFAULT_MIN_SELL_PRICE)
 
         schema_dict = {}
 
@@ -235,6 +240,13 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         schema_dict[vol.Required(CONF_SYSTEM_COST, default=system_cost)] = selector.NumberSelector(
             selector.NumberSelectorConfig(
                 min=0.0,
+                step=0.01,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        schema_dict[vol.Required(CONF_MIN_SELL_PRICE, default=min_sell_price)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
                 step=0.01,
                 mode=selector.NumberSelectorMode.BOX
             )
@@ -260,6 +272,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         bat_price = self._user_input.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE)
         bat_cycles = self._user_input.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES)
         bat_max_power = self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)
+        min_bat_soc = self._user_input.get(CONF_MIN_BAT_SOC, DEFAULT_MIN_BAT_SOC)
 
         schema_dict = {}
 
@@ -320,6 +333,15 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             schema_dict[vol.Optional(CONF_BAT_VOLTAGE)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
+
+        schema_dict[vol.Required(CONF_MIN_BAT_SOC, default=min_bat_soc)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                max=100.0,
+                step=1.0,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
 
         return self.async_show_form(
             step_id="battery_optimization",

@@ -37,19 +37,23 @@ from .const import (
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
     CONF_SYSTEM_COST,
+    CONF_MIN_SELL_PRICE,
     CONF_BAT_PRICE,
     CONF_BAT_CYCLES,
     CONF_BAT_CAPACITY_ENTITY,
     CONF_BAT_MAX_POWER,
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_VOLTAGE,
+    CONF_MIN_BAT_SOC,
     DEFAULT_STATISTICS_DAYS,
     DEFAULT_FALLBACK_CONSUMPTION,
     DEFAULT_DEBUG,
     DEFAULT_SYSTEM_COST,
+    DEFAULT_MIN_SELL_PRICE,
     DEFAULT_BAT_PRICE,
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_MAX_POWER,
+    DEFAULT_MIN_BAT_SOC,
 )
 from .utils import ems_log, calculate_battery_degradation, parse_price_sensor
 
@@ -173,6 +177,7 @@ async def async_setup_entry(
     price_buy_sensor_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
     price_sell_sensor_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
     system_cost = options.get(CONF_SYSTEM_COST, config.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST))
+    min_sell_price = options.get(CONF_MIN_SELL_PRICE, config.get(CONF_MIN_SELL_PRICE, DEFAULT_MIN_SELL_PRICE))
 
     # Battery optimization settings
     bat_price = options.get(CONF_BAT_PRICE, config.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE))
@@ -181,6 +186,7 @@ async def async_setup_entry(
     bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
     bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
     bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
+    min_bat_soc = options.get(CONF_MIN_BAT_SOC, config.get(CONF_MIN_BAT_SOC, DEFAULT_MIN_BAT_SOC))
 
     # Log errors or info for house consumption / basic settings
     if not target_sensor_id:
@@ -230,6 +236,8 @@ async def async_setup_entry(
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Price sell sensor configured successfully: {price_sell_sensor_id}")
 
+    ems_log(hass, _LOGGER, logging.INFO, f"Minimum sell price configured: {min_sell_price}")
+
     # Log errors or info for Battery optimization sensors
     if not bat_capacity_entity_id:
         ems_log(hass, _LOGGER, logging.ERROR, "Battery capacity entity is not configured in settings!")
@@ -245,6 +253,8 @@ async def async_setup_entry(
         ems_log(hass, _LOGGER, logging.ERROR, "Battery voltage entity is not configured in settings!")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Battery voltage entity configured successfully: {bat_voltage_entity_id}")
+
+    ems_log(hass, _LOGGER, logging.INFO, f"Minimum battery SOC configured: {min_bat_soc}%")
 
     # Calculate and log battery degradation cost per kWh
     def update_degradation_cost():
