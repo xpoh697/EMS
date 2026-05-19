@@ -68,3 +68,12 @@ async def setup_ems_logger(hass: HomeAssistant) -> None:
     handler.setLevel(logging.DEBUG)
     
     logger.addHandler(handler)
+
+def calculate_battery_degradation(price: float, cycles: float | int, capacity: float) -> float:
+    """Calculate battery degradation cost per kWh based on price, cycles, and capacity."""
+    if cycles <= 0 or capacity <= 0.0:
+        return 0.0
+    total_throughput = float(cycles) * float(capacity)
+    if total_throughput <= 0.0:
+        return 0.0
+    return round(float(price) / total_throughput, 6)

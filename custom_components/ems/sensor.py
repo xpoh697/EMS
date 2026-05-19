@@ -14,7 +14,6 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
     async_track_state_change_event,
@@ -53,7 +52,7 @@ from .const import (
     DEFAULT_BAT_MAX_POWER,
     DEFAULT_BAT_VOLTAGE,
 )
-from .utils import ems_log
+from .utils import ems_log, calculate_battery_degradation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -242,6 +241,51 @@ async def async_setup_entry(
         ems_log(hass, _LOGGER, logging.ERROR, "Battery current power entity is not configured in settings!")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Battery current power entity configured successfully: {bat_cur_power_entity_id}")
+
+    # Calculate and log battery degradation cost per kWh
+    def update_degradation_cost():
+        """Fetch capacity and calculate battery degradation cost per kWh."""
+        capacity = 0.0
+        if bat_capacity_entity_id:
+            cap_state = hass.states.get(bat_capacity_entity_id)
+            if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    capacity = float(cap_state.state)
+                    # Convert to kWh if unit is Wh or capacity value seems to be in Wh
+                    unit = cap_state.attributes.get("unit_of_measurement")
+                    if unit == "Wh" or capacity > 100.0:
+                        capacity = capacity / 1000.0
+                except (ValueError, TypeError):
+                    pass
+
+        # Calculate degradation
+        degradation = calculate_battery_degradation(bat_price, bat_cycles, capacity)
+
+        # Save to domain data for future use
+        if DOMAIN not in hass.data:
+            hass.data[DOMAIN] = {}
+        hass.data[DOMAIN]["bat_degradation_per_kwh"] = degradation
+
+        # Log the calculated value
+        ems_log(
+            hass,
+            _LOGGER,
+            logging.INFO,
+            f"Battery degradation calculated: {degradation:.6f} per kWh (Price: {bat_price}, Cycles: {bat_cycles}, Capacity: {capacity:.3f} kWh)"
+        )
+
+    # Initial calculation
+    update_degradation_cost()
+
+    # Track state changes of capacity entity if configured
+    if bat_capacity_entity_id:
+        async def _async_capacity_changed_listener(event):
+            update_degradation_cost()
+
+        cleanup = async_track_state_change_event(
+            hass, [bat_capacity_entity_id], _async_capacity_changed_listener
+        )
+        entry.async_on_unload(cleanup)
 
     entities = []
 

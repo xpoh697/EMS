@@ -38,6 +38,9 @@ To ensure flexibility and modular configuration, the integration must implement:
         - **Bat cur power (entity)** (Сенсор текущей мощности АКБ): power sensor (domain: sensor)
         - **Bat voltage** (Напряжение АКБ): decimal numeric value (default: 48.0)
 
+Based on `bat_price`, `bat_cycles`, and `bat_capacity_entity`, the integration dynamically calculates battery degradation cost per kWh of energy throughput using the formula:
+`degradation_cost = bat_price / (bat_cycles * bat_capacity)`. If capacity is reported in Wh, it is automatically converted to kWh. This calculated value is logged to `ems.log` and stored in `hass.data[DOMAIN]["bat_degradation_per_kwh"]`.
+
 ## 3. Localization
 The system must support localization in English and Russian, defined in `strings.json` and translated under `translations/ru.json` and `translations/en.json`.
 
