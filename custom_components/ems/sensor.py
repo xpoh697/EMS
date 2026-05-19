@@ -51,7 +51,7 @@ from .const import (
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_MAX_POWER,
 )
-from .utils import ems_log, calculate_battery_degradation
+from .utils import ems_log, calculate_battery_degradation, parse_price_sensor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -289,6 +289,58 @@ async def async_setup_entry(
         cleanup = async_track_state_change_event(
             hass, [bat_capacity_entity_id], _async_capacity_changed_listener
         )
+        entry.async_on_unload(cleanup)
+
+    # Calculate and log buy/sell price sensors
+    def update_prices():
+        """Fetch and parse buy/sell prices, then save to hass.data."""
+        if DOMAIN not in hass.data:
+            hass.data[DOMAIN] = {}
+
+        if price_buy_sensor_id:
+            buy_state = hass.states.get(price_buy_sensor_id)
+            buy_today, buy_tomorrow = parse_price_sensor(buy_state)
+            hass.data[DOMAIN]["price_buy_today"] = buy_today
+            hass.data[DOMAIN]["price_buy_tomorrow"] = buy_tomorrow
+            ems_log(
+                hass,
+                _LOGGER,
+                logging.INFO,
+                f"Parsed Buy Prices Today: {buy_today}, Tomorrow: {buy_tomorrow}"
+            )
+
+        if price_sell_sensor_id:
+            sell_state = hass.states.get(price_sell_sensor_id)
+            sell_today, sell_tomorrow = parse_price_sensor(sell_state)
+            hass.data[DOMAIN]["price_sell_today"] = sell_today
+            hass.data[DOMAIN]["price_sell_tomorrow"] = sell_tomorrow
+            ems_log(
+                hass,
+                _LOGGER,
+                logging.INFO,
+                f"Parsed Sell Prices Today: {sell_today}, Tomorrow: {sell_tomorrow}"
+            )
+
+    # Initial calculation
+    update_prices()
+
+    # Track state changes
+    price_listeners = []
+    if price_buy_sensor_id:
+        async def _async_buy_price_changed(event):
+            update_prices()
+        price_listeners.append(
+            async_track_state_change_event(hass, [price_buy_sensor_id], _async_buy_price_changed)
+        )
+
+    if price_sell_sensor_id:
+        async def _async_sell_price_changed(event):
+            update_prices()
+        price_listeners.append(
+            async_track_state_change_event(hass, [price_sell_sensor_id], _async_sell_price_changed)
+        )
+
+    for cleanup in price_listeners:
         entry.async_on_unload(cleanup)
 
     entities = []
