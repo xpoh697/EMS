@@ -40,6 +40,98 @@ from .utils import ems_log
 
 _LOGGER = logging.getLogger(__name__)
 
+def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> list[float]:
+    """Parse Solcast detailedForecast and analysis intervals to compute baseline hourly kWh."""
+    hourly_baselines = [0.0] * 24
+    if not state_obj:
+        return hourly_baselines
+
+    attrs = state_obj.attributes
+    detailed_forecast = attrs.get("detailedForecast")
+    if not isinstance(detailed_forecast, list):
+        # Fallback: if detailedForecast is not present, check if there's a simple state value
+        try:
+            total_val = float(state_obj.state)
+        except (ValueError, TypeError):
+            total_val = 0.0
+        # Distribute total_val over daylight hours (e.g. 7:00 to 18:00, 12 hours)
+        if total_val > 0.0:
+            for h in range(7, 19):
+                hourly_baselines[h] = round(total_val / 12.0, 4)
+        return hourly_baselines
+
+    analysis = attrs.get("analysis", {})
+    intervals = []
+    if isinstance(analysis, dict):
+        intervals = analysis.get("intervals", [])
+
+    # Group slots by local hour
+    slot_duration = 0.5
+    if len(detailed_forecast) > 0:
+        # Try to calculate duration from the first two periods
+        try:
+            start_str = detailed_forecast[0].get("period_start")
+            if len(detailed_forecast) > 1:
+                next_start_str = detailed_forecast[1].get("period_start")
+                start_dt = dt_util.parse_datetime(start_str)
+                next_dt = dt_util.parse_datetime(next_start_str)
+                if start_dt and next_dt:
+                    slot_duration = abs((next_dt - start_dt).total_seconds()) / 3600.0
+        except Exception:
+            pass
+
+    for i, slot in enumerate(detailed_forecast):
+        period_start = slot.get("period_start")
+        if not period_start:
+            continue
+
+        try:
+            parsed_dt = dt_util.parse_datetime(period_start)
+            if not parsed_dt:
+                continue
+            local_dt = dt_util.as_local(parsed_dt)
+            local_hour = local_dt.hour
+        except Exception:
+            if len(detailed_forecast) == 48:
+                local_hour = min(23, max(0, i // 2))
+            elif len(detailed_forecast) == 24:
+                local_hour = min(23, max(0, i))
+            else:
+                continue
+
+        try:
+            pv_estimate = float(slot.get("pv_estimate", 0.0))
+        except (ValueError, TypeError):
+            pv_estimate = 0.0
+
+        try:
+            pv_estimate10 = float(slot.get("pv_estimate10", slot.get("estimate10", 0.0)))
+        except (ValueError, TypeError):
+            pv_estimate10 = 0.0
+
+        # Retrieve confidence
+        confidence = 1.0
+        if isinstance(intervals, list) and i < len(intervals):
+            confidence_val = intervals[i].get("confidence", 1.0)
+        else:
+            confidence_val = analysis.get("confidence", 1.0)
+
+        try:
+            confidence = float(confidence_val)
+        except (ValueError, TypeError):
+            confidence = 1.0
+
+        # Baseline formula: baseline_kwh = pv_estimate10 + confidence * (pv_estimate - pv_estimate10)
+        # Note: estimate is in kW, so energy is power * duration
+        baseline_kw = pv_estimate10 + confidence * (pv_estimate - pv_estimate10)
+        baseline_kwh = baseline_kw * slot_duration
+
+        if 0 <= local_hour < 24:
+            hourly_baselines[local_hour] += baseline_kwh
+
+    return [round(val, 4) for val in hourly_baselines]
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -90,18 +182,40 @@ async def async_setup_entry(
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"PV Forecast tomorrow sensor configured successfully: {pv_tomorrow_id}")
 
+    entities = []
+
     if target_sensor_id:
-        async_add_entities(
-            [
-                EmsLoadConsumptionSensor(
-                    entry.entry_id,
-                    entry.title,
-                    target_sensor_id,
-                    statistics_days,
-                    fallback_consumption,
-                )
-            ]
+        entities.append(
+            EmsLoadConsumptionSensor(
+                entry.entry_id,
+                entry.title,
+                target_sensor_id,
+                statistics_days,
+                fallback_consumption,
+            )
         )
+
+    if pv_today_id:
+        entities.append(
+            EmsPvForecastTodaySensor(
+                entry.entry_id,
+                entry.title,
+                pv_today_id,
+                pv_generation_today_id,
+            )
+        )
+
+    if pv_tomorrow_id:
+        entities.append(
+            EmsPvForecastTomorrowSensor(
+                entry.entry_id,
+                entry.title,
+                pv_tomorrow_id,
+            )
+        )
+
+    if entities:
+        async_add_entities(entities)
 
 
 class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
@@ -336,4 +450,250 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         self._last_hour = current_hour
         self._state = round(sum(self._today_consumption), 4)
 
+        self.async_write_ha_state()
+
+
+class EmsPvForecastTodaySensor(SensorEntity):
+    """EMS sensor that tracks today's corrected PV forecast."""
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        source_forecast_id: str,
+        actual_generation_id: str | None,
+    ) -> None:
+        """Initialize the forecast sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._source_forecast_id = source_forecast_id
+        self._actual_generation_id = actual_generation_id
+
+        self._attr_name = "PV Forecast Today"
+        self._attr_unique_id = f"{entry_id}_pv_forecast_today"
+        self.entity_id = "sensor.pv_forecast_today"
+
+        # Internal state
+        self._state: float = 0.0
+        self._baselines: list[float] = [0.0] * 24
+        self._forecasts: list[float] = [0.0] * 24
+        self._factor: float = 1.0
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        """Return today's total forecast energy."""
+        return self._state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "hourly_forecast": self._forecasts,
+            "baseline": self._baselines,
+            "factor_today": self._factor,
+            "source_sensor": self._source_forecast_id,
+            "actual_sensor": self._actual_generation_id,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition."""
+        await super().async_added_to_hass()
+
+        # Update initial forecast
+        self._update_forecast()
+
+        # Track forecast source changes
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [self._source_forecast_id], self._async_update_listener
+            )
+        )
+
+        # Track actual generation changes if configured
+        if self._actual_generation_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [self._actual_generation_id], self._async_update_listener
+                )
+            )
+
+        # Hourly trigger to update elapsed hours
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._async_hourly_trigger, minute=0, second=0
+            )
+        )
+
+    def _update_forecast(self) -> None:
+        """Calculate probabilistic baseline and apply Layer 2 corrective factor."""
+        state_obj = self.hass.states.get(self._source_forecast_id)
+        if not state_obj:
+            ems_log(self.hass, _LOGGER, logging.ERROR, f"Source PV forecast sensor {self._source_forecast_id} not found!")
+            return
+
+        self._baselines = parse_solcast_forecast(self.hass, state_obj)
+
+        # Get actual today generation
+        actual_today = 0.0
+        if self._actual_generation_id:
+            gen_state = self.hass.states.get(self._actual_generation_id)
+            if gen_state and gen_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    actual_today = float(gen_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+        # Calculate baseline for elapsed hours
+        now = dt_util.now()
+        current_hour = now.hour
+
+        # Sum baseline from hour 0 to current_hour - 1
+        baseline_elapsed = sum(self._baselines[0:current_hour])
+
+        # Calculate Layer 2 corrective factor (safeguard against division by zero)
+        if baseline_elapsed > 0.0:
+            self._factor = max(0.3, min(actual_today / baseline_elapsed, 1.5))
+        else:
+            self._factor = 1.0
+
+        # Apply factor to remaining hours of today
+        new_forecasts = []
+        for h in range(24):
+            if h >= current_hour:
+                new_forecasts.append(round(self._baselines[h] * self._factor, 4))
+            else:
+                new_forecasts.append(self._baselines[h])
+
+        self._forecasts = new_forecasts
+        self._state = round(sum(self._forecasts), 4)
+
+        ems_log(
+            self.hass,
+            _LOGGER,
+            logging.INFO,
+            f"Updated Today's PV Forecast: {self._state} kWh (Factor: {self._factor:.3f}, Actual Today: {actual_today} kWh)"
+        )
+
+    async def _async_update_listener(self, event) -> None:
+        """Handle state change event from source or actual generation sensors."""
+        self._update_forecast()
+        self.async_write_ha_state()
+
+    async def _async_hourly_trigger(self, datetime_now) -> None:
+        """Recalculate forecast on hourly transitions."""
+        self._update_forecast()
+        self.async_write_ha_state()
+
+
+class EmsPvForecastTomorrowSensor(SensorEntity):
+    """EMS sensor that tracks tomorrow's PV forecast."""
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        source_forecast_id: str,
+    ) -> None:
+        """Initialize the forecast sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._source_forecast_id = source_forecast_id
+
+        self._attr_name = "PV Forecast Tomorrow"
+        self._attr_unique_id = f"{entry_id}_pv_forecast_tomorrow"
+        self.entity_id = "sensor.pv_forecast_tomorrow"
+
+        # Internal state
+        self._state: float = 0.0
+        self._baselines: list[float] = [0.0] * 24
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        """Return tomorrow's total forecast energy."""
+        return self._state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "hourly_forecast": self._baselines,  # Same as baseline for tomorrow
+            "baseline": self._baselines,
+            "source_sensor": self._source_forecast_id,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition."""
+        await super().async_added_to_hass()
+
+        self._update_forecast()
+
+        # Track forecast source changes
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [self._source_forecast_id], self._async_update_listener
+            )
+        )
+
+        # Hourly trigger to keep updated if needed
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._async_hourly_trigger, minute=0, second=0
+            )
+        )
+
+    def _update_forecast(self) -> None:
+        """Calculate probabilistic baseline for tomorrow."""
+        state_obj = self.hass.states.get(self._source_forecast_id)
+        if not state_obj:
+            ems_log(self.hass, _LOGGER, logging.ERROR, f"Source PV forecast sensor {self._source_forecast_id} not found!")
+            return
+
+        self._baselines = parse_solcast_forecast(self.hass, state_obj)
+        self._state = round(sum(self._baselines), 4)
+
+        ems_log(
+            self.hass,
+            _LOGGER,
+            logging.INFO,
+            f"Updated Tomorrow's PV Forecast: {self._state} kWh"
+        )
+
+    async def _async_update_listener(self, event) -> None:
+        """Handle state change event from source sensor."""
+        self._update_forecast()
+        self.async_write_ha_state()
+
+    async def _async_hourly_trigger(self, datetime_now) -> None:
+        """Recalculate forecast on hourly transitions."""
+        self._update_forecast()
         self.async_write_ha_state()

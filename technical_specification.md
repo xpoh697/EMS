@@ -115,3 +115,42 @@ To provide user-controlled debugging info, the integration implements a conditio
 - **Caching optimization**:
   - The debug setting is retrieved and cached in `hass.data[DOMAIN]["debug"]` during the integration startup (`async_setup_entry`).
   - Checking the flag is an $O(1)$ memory operation, avoiding DB/ConfigEntry scans.
+
+## 9. PV Forecast Management (Управление прогнозами СЭС)
+To estimate future solar energy generation, the integration defines two prediction entities in `custom_components/ems/sensor.py`:
+- `sensor.pv_forecast_today`: Corrected PV generation forecast for today.
+- `sensor.pv_forecast_tomorrow`: Baseline PV generation forecast for tomorrow.
+
+Both sensors associate with the same `"Energy Management"` device and retrieve their forecasts from configured Solcast sensor inputs using a **two-layer model**.
+
+### Layer 1: Probabilistic Baseline
+For each period in the Solcast forecast (typically 30-minute intervals in `detailedForecast` attribute):
+```text
+baseline_kwh = (pv_estimate10 + confidence * (pv_estimate - pv_estimate10)) * duration_hours
+```
+- `pv_estimate` (P50 estimate in kW)
+- `pv_estimate10` (P10 worst-case estimate in kW)
+- `confidence` (per-period confidence score between 0.0 and 1.0 from `analysis.intervals[]`)
+- `duration_hours` (calculated interval duration, e.g. 0.5 for half-hour periods)
+
+The periods are grouped by local hour (using local time conversion) to create a 24-element array of hourly baseline energy values (in kWh).
+
+### Layer 2: Intraday Reactive Correction
+For today's sensor (`sensor.pv_forecast_today`), a dynamic corrective factor is calculated on each update and hour transition:
+```text
+factor_today = clamp(actual_today / baseline_for_elapsed_pv_on_hours, 0.3, 1.5)
+```
+- `actual_today` is the actual cumulative generation from the beginning of the day (read from `pv_generation_today` configuration input).
+- `baseline_for_elapsed_pv_on_hours` is the sum of baseline forecasts for elapsed hours (hour `0` up to `current_hour - 1`). If this denominator is 0.0, the factor defaults to `1.0`.
+- The factor is clamped between `0.3` and `1.5`.
+
+The factor is applied to correct the forecast for the **remaining hours of the day** (`hour >= current_hour`):
+```text
+corrected_forecast[hour] = baseline[hour] * factor_today
+```
+Elapsed hours retain their uncorrected baseline values. Tomorrow's forecast sensor does not apply the Layer 2 factor.
+
+### Attributes
+- `hourly_forecast`: List of 24 corrected values (in kWh) for the day.
+- `baseline`: List of 24 baseline values (before Layer 2 correction) for the day.
+- `factor_today` (only today's sensor): Current corrective factor value.
