@@ -4,11 +4,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, CONF_DEBUG
+from .utils import setup_ems_logger
 
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EMS from a config entry."""
+    # Set up custom rotating file logger for the integration
+    await setup_ems_logger(hass)
+
     hass.data.setdefault(DOMAIN, {})
     
     # Store settings in memory
