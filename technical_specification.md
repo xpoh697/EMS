@@ -75,6 +75,14 @@ To track and report load energy consumption dynamically, the integration provide
   - `last_total_value`: The last recorded raw cumulative value of the target sensor.
   - `last_hour`: The last hour slot updated.
   - `last_day`: The last calendar day processed (for midnight transitions).
+- **Device Registry Integration**:
+  - Registers a Device in Home Assistant Device Registry using `DeviceInfo`.
+  - **Identifiers**: `{(DOMAIN, entry_id)}`
+  - **Name**: Dynamically set to the title of the config entry (default: `"Energy Management"`).
+  - **Manufacturer**: `"Energy Trader System"`
+  - **Model**: `"EMS Controller"`
+  - **Software Version**: `VERSION` (`0.1.0`)
+  - By registering a device, the Home Assistant UI groups all integration entities under a single device card in the "Devices" (Устройства) tab, and changes the setup button label from "Add Hub" (Добавить хаб) to "Add Device" (Добавить устройство).
 - **Persistence & Restoration**:
   - Implements `RestoreSensor` to reload its state and attributes upon Home Assistant restarts.
   - On restart, the sensor uses `async_get_last_state()` to restore the hourly values of `today`, `last_total_value`, `last_hour`, and `last_day`.

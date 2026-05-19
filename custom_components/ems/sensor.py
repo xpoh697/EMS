@@ -14,6 +14,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
     async_track_state_change_event,
@@ -23,6 +24,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
+    VERSION,
     CONF_TOTAL_LOAD_CONSUMPTION,
     CONF_PV_FORECAST_TODAY,
     CONF_PV_FORECAST_TOMORROW,
@@ -71,6 +73,7 @@ async def async_setup_entry(
             [
                 EmsLoadConsumptionSensor(
                     entry.entry_id,
+                    entry.title,
                     target_sensor_id,
                     statistics_days,
                     fallback_consumption,
@@ -90,12 +93,14 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
     def __init__(
         self,
         entry_id: str,
+        device_name: str,
         target_sensor_id: str,
         statistics_days: int,
         fallback_consumption: float,
     ) -> None:
         """Initialize the load consumption sensor."""
         self._entry_id = entry_id
+        self._device_name = device_name
         self._target_sensor_id = target_sensor_id
         self._statistics_days = statistics_days
         self._fallback_consumption = fallback_consumption
@@ -114,6 +119,17 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         self._averages: dict[int, list[float]] = {}
         for weekday in range(7):
             self._averages[weekday] = [self._fallback_consumption] * 24
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
 
     @property
     def native_value(self) -> float:
