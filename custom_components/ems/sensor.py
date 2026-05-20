@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -972,6 +973,9 @@ class EmsDpSensor(SensorEntity):
         # Throttling/hysteresis helpers
         self._last_calc_time: datetime | None = None
         self._last_calc_soc: float | None = None
+        self._last_calc_pv_today: float | None = None
+        self._last_calc_pv_tomorrow: float | None = None
+        self._calc_duration: float | None = None
         self._reactive_debounce_time: datetime | None = None
 
     @property
@@ -1005,6 +1009,7 @@ class EmsDpSensor(SensorEntity):
             "stats": self._stats,
             "error": self._error_msg,
             "last_calculation": self._last_calc_time.isoformat() if self._last_calc_time else None,
+            "calculation_duration": self._calc_duration,
             "overrides": storage.get_overrides(),
         }
 
@@ -1076,6 +1081,36 @@ class EmsDpSensor(SensorEntity):
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
         if new_state:
+            # Check if it's a PV forecast update and compare with 5% threshold
+            if entity_id in ("sensor.pv_forecast_today", "sensor.pv_forecast_tomorrow"):
+                try:
+                    new_val = float(new_state.state)
+                except (ValueError, TypeError):
+                    new_val = 0.0
+                
+                last_val = (
+                    self._last_calc_pv_today 
+                    if entity_id == "sensor.pv_forecast_today" 
+                    else self._last_calc_pv_tomorrow
+                )
+                
+                if last_val is not None:
+                    if last_val == 0.0 and new_val == 0.0:
+                        change_pct = 0.0
+                    elif last_val == 0.0:
+                        change_pct = 1.0
+                    else:
+                        change_pct = abs(new_val - last_val) / last_val
+                    
+                    if change_pct < 0.05:
+                        ems_log(
+                            self.hass,
+                            _LOGGER,
+                            logging.DEBUG,
+                            f"EMS DP: PV forecast update from {entity_id} ignored (change {change_pct * 100:.1f}% < 5%)"
+                        )
+                        return
+
             was_invalid = not old_state or old_state.state in (None, "unknown", "unavailable")
             is_valid = new_state.state not in (None, "unknown", "unavailable")
             
@@ -1132,6 +1167,8 @@ class EmsDpSensor(SensorEntity):
                 return
 
         self._reactive_debounce_time = now
+
+        start_time = time.perf_counter()
 
         try:
             config = self._entry.data
@@ -1256,8 +1293,26 @@ class EmsDpSensor(SensorEntity):
             self._last_calc_time = dt_util.now()
             self._last_calc_soc = soc
 
+            # Update last calculated PV forecast values
+            pv_today_entity = self.hass.states.get("sensor.pv_forecast_today")
+            if pv_today_entity:
+                try:
+                    self._last_calc_pv_today = float(pv_today_entity.state)
+                except (ValueError, TypeError):
+                    self._last_calc_pv_today = 0.0
+
+            pv_tomorrow_entity = self.hass.states.get("sensor.pv_forecast_tomorrow")
+            if pv_tomorrow_entity:
+                try:
+                    self._last_calc_pv_tomorrow = float(pv_tomorrow_entity.state)
+                except (ValueError, TypeError):
+                    self._last_calc_pv_tomorrow = 0.0
+
+            self._calc_duration = round(time.perf_counter() - start_time, 3)
+
             self.async_write_ha_state()
         except Exception as err:
+            self._calc_duration = None
             ems_log(
                 self.hass,
                 _LOGGER,
