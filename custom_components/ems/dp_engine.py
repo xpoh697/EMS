@@ -28,6 +28,8 @@ class DPConfig:
     battery_max_charge_power: float
     battery_min_soc: int
     battery_capacity: float
+    min_energy_to_discharge: float = 0.0
+    disable_discharge: bool = False
 
 
 def hours_from_now(price_entry: dict) -> float:
@@ -138,7 +140,7 @@ def run_unified_dp(
                 _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
 
             # === DIS: discharge battery to grid ===
-            if (not override or override == "discharge") and sell_price > config.min_sell_price and sell_price > 0:
+            if (override == "discharge" or (not config.disable_discharge and not override)) and sell_price > config.min_sell_price and sell_price > 0:
                 max_exp = min(config.battery_max_discharge_power, usable_energy)
                 for ei in range(1, int(round(max_exp / energy_step)) + 1):
                     exp = ei * energy_step

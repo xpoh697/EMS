@@ -1392,6 +1392,7 @@ class EmsDpSensor(SensorEntity):
                 min_bat_soc,
                 bat_max_power,
                 min_sell_price,
+                storage.min_energy_to_discharge,
                 cycle_cost,
                 buy_prices_today,
                 buy_prices_tomorrow,
@@ -1454,6 +1455,7 @@ class EmsDpSensor(SensorEntity):
         min_bat_soc: float,
         bat_max_power: float,
         min_sell_price: float,
+        min_energy_to_discharge: float,
         cycle_cost: float,
         buy_prices_today: list[float],
         buy_prices_tomorrow: list[float],
@@ -1522,6 +1524,8 @@ class EmsDpSensor(SensorEntity):
             battery_max_charge_power=bat_max_power / 1000.0,
             battery_min_soc=int(min_bat_soc),
             battery_capacity=capacity,
+            min_energy_to_discharge=min_energy_to_discharge,
+            disable_discharge=False,
         )
 
         try:
@@ -1541,6 +1545,34 @@ class EmsDpSensor(SensorEntity):
                 min_end_usable=min_end_usable,
                 config=dp_config,
             )
+
+            # Check if total planned discharge is less than the minimum configured limit
+            if (
+                dp_config.min_energy_to_discharge > 0.0
+                and 0.0 < stats.get("planned_battery_discharge_kwh", 0.0) < dp_config.min_energy_to_discharge
+            ):
+                _LOGGER.info(
+                    "Planned battery discharge (%.2f kWh) is less than minimum limit (%.2f kWh). Re-running DP with discharge disabled.",
+                    stats.get("planned_battery_discharge_kwh", 0.0),
+                    dp_config.min_energy_to_discharge,
+                )
+                dp_config.disable_discharge = True
+                (
+                    chg_h,
+                    dis_h,
+                    pvc_h,
+                    sc_h,
+                    pim_h,
+                    stats,
+                ) = run_unified_dp(
+                    slots=slots,
+                    current_usable=current_usable,
+                    usable_capacity=usable_capacity,
+                    cycle_cost=cycle_cost,
+                    terminal_value_per_kwh=terminal_value,
+                    min_end_usable=min_end_usable,
+                    config=dp_config,
+                )
         except Exception as ex:
             return {
                 "current_action": "idle",
