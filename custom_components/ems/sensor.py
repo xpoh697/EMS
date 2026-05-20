@@ -1415,11 +1415,24 @@ class EmsSchedulerSensor(SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        """Return the state of the scheduler (last plan update time or Active)."""
+        """Return the state of the scheduler (current active mode)."""
+        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
+        overrides = storage.get_overrides()
+
+        # Calculate active override for the current hour
+        now = dt_util.now()
+        today_str = now.strftime("%Y-%m-%d")
+        current_hour = now.hour
+        active_override = overrides.get(today_str, {}).get(str(current_hour))
+
+        if active_override is not None:
+            return active_override
+
         dp_state = self.hass.states.get("sensor.dp")
-        if dp_state is not None:
-            return dp_state.attributes.get("last_calculation")
-        return None
+        dp_val = dp_state.state if dp_state is not None else None
+        if dp_val in (None, "unknown", "unavailable"):
+            return None
+        return dp_val
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

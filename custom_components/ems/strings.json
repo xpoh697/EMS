@@ -95,6 +95,18 @@
           "self_consume": "Self Consumption",
           "paid_import": "Paid Import"
         }
+      },
+      "scheduler": {
+        "name": "Scheduler",
+        "state": {
+          "idle": "Idle",
+          "solar_export": "Solar Export",
+          "discharge": "Grid Export (Discharge)",
+          "pv_charge": "PV Charging",
+          "grid_charge": "Grid Charging",
+          "self_consume": "Self Consumption",
+          "paid_import": "Paid Import"
+        }
       }
     },
     "number": {
