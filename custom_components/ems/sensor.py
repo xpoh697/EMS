@@ -1331,36 +1331,26 @@ class EmsDpSensor(SensorEntity):
         sc_keys = {(h["date"], h["hour"]): h for h in sc_h}
         pim_keys = {(h["date"], h["hour"]): h for h in pim_h}
 
-        usable_energy = current_usable
-        safe_capacity = capacity if capacity > 0.0 else 5.12
-
         for idx, slot in enumerate(slots):
             key = (slot["date"], slot["hour"])
             action = "idle"
             energy = 0.0
-            end_usable = usable_energy
 
             if key in chg_keys:
                 action = "grid_charge"
                 energy = chg_keys[key].get("planned_energy_kwh", 0.0)
-                end_usable = min(usable_capacity, usable_energy + energy)
             elif key in dis_keys:
                 action = "discharge"
                 energy = dis_keys[key].get("planned_energy_kwh", 0.0)
-                end_usable = max(0.0, usable_energy - energy)
             elif key in pvc_keys:
                 action = "pv_charge"
                 energy = pvc_keys[key].get("charge_kwh", 0.0)
-                end_usable = min(usable_capacity, usable_energy + energy)
             elif key in sc_keys:
                 action = "self_consume"
                 energy = sc_keys[key].get("planned_energy_kwh", 0.0)
-                end_usable = max(0.0, usable_energy - energy)
             elif key in pim_keys:
                 action = "paid_import"
                 energy = pim_keys[key].get("planned_grid_import_kwh", 0.0)
-                # Paid import is consumed directly from the grid, battery remains untouched
-                end_usable = usable_energy
             else:
                 if slot["pv_kwh"] > 0.1:
                     action = "solar_export"
@@ -1373,10 +1363,6 @@ class EmsDpSensor(SensorEntity):
             if idx == 0:
                 current_action = action
 
-            # Calculate SOC at the end of the hour
-            end_soc = (end_usable / safe_capacity) * 100 + min_bat_soc
-            end_soc = max(min_bat_soc, min(100.0, end_soc))
-
             schedule.append({
                 "date": slot["date"],
                 "hour": slot["hour"],
@@ -1386,9 +1372,7 @@ class EmsDpSensor(SensorEntity):
                 "consumption_kwh": slot["consumption_kwh"],
                 "action": action,
                 "energy_kwh": round(energy, 2),
-                "soc": round(end_soc, 1),
             })
-            usable_energy = end_usable
 
         return {
             "current_action": current_action,
@@ -1470,8 +1454,75 @@ class EmsSchedulerSensor(SensorEntity):
         current_hour = now.hour
         active_override = overrides.get(today_str, {}).get(str(current_hour))
 
+        # Retrieve configuration details for SOC estimation
+        config = self._entry.data
+        options = self._entry.options
+        from .const import (
+            CONF_BAT_CAPACITY_ENTITY,
+            CONF_BAT_CUR_POWER_ENTITY,
+            CONF_MIN_BAT_SOC,
+            DEFAULT_MIN_BAT_SOC,
+        )
+
+        bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+        bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+        min_bat_soc = storage.min_bat_soc
+
+        # Parse capacity
+        capacity = 5.12
+        if bat_capacity_entity_id:
+            cap_state = self.hass.states.get(bat_capacity_entity_id)
+            if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    capacity = float(cap_state.state)
+                    unit = cap_state.attributes.get("unit_of_measurement")
+                    if unit == "Wh" or capacity > 100.0:
+                        capacity = capacity / 1000.0
+                except (ValueError, TypeError):
+                    pass
+
+        # Parse SOC
+        soc = 50.0
+        if bat_cur_power_entity_id:
+            soc_state = self.hass.states.get(bat_cur_power_entity_id)
+            if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    soc = float(soc_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+        # Simulate SOC progression over the plan
+        usable_capacity = capacity * (1 - min_bat_soc / 100)
+        current_usable = capacity * (soc - min_bat_soc) / 100
+        current_usable = max(0.0, min(current_usable, usable_capacity))
+
+        usable_energy = current_usable
+        safe_capacity = capacity if capacity > 0.0 else 5.12
+
+        dispatched_plan = []
+        for slot in schedule:
+            action = slot.get("action", "idle")
+            energy = slot.get("energy_kwh", 0.0)
+
+            if action in ("grid_charge", "pv_charge"):
+                end_usable = min(usable_capacity, usable_energy + energy)
+            elif action in ("discharge", "self_consume"):
+                end_usable = max(0.0, usable_energy - energy)
+            else:
+                end_usable = usable_energy
+
+            # Calculate SOC at the end of the hour
+            end_soc = (end_usable / safe_capacity) * 100 + min_bat_soc
+            end_soc = max(min_bat_soc, min(100.0, end_soc))
+
+            dispatched_plan.append({
+                **slot,
+                "soc": round(end_soc, 1),
+            })
+            usable_energy = end_usable
+
         return {
-            "current_plan": schedule,
+            "current_plan": dispatched_plan,
             "last_dp_call": last_dp_call,
             "last_override_change": storage.last_override_change,
             "overrides": overrides,
