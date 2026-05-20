@@ -61,6 +61,20 @@ from .dp_engine import run_unified_dp, DPConfig
 
 _LOGGER = logging.getLogger(__name__)
 
+def safe_float_list(val, default_val, length=24) -> list[float]:
+    """Ensure a list is a 24-element float list, applying default values where needed."""
+    if not isinstance(val, list):
+        return [default_val] * length
+    cleaned = []
+    for x in val:
+        try:
+            cleaned.append(float(x) if x is not None else default_val)
+        except (ValueError, TypeError):
+            cleaned.append(default_val)
+    if len(cleaned) < length:
+        cleaned.extend([default_val] * (length - len(cleaned)))
+    return cleaned[:length]
+
 def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float], bool]:
     """Parse Solcast detailedForecast, detailedHourly, and forecasts attributes to compute baseline hourly kWh."""
     hourly_baselines = [0.0] * 24
@@ -1060,9 +1074,20 @@ class EmsDpSensor(SensorEntity):
         """Handle changes in generic sensors immediately."""
         entity_id = event.data.get("entity_id")
         new_state = event.data.get("new_state")
+        old_state = event.data.get("old_state")
         if new_state:
-            ems_log(self.hass, _LOGGER, logging.DEBUG, f"EMS DP trigger: update from {entity_id}")
-            await self.async_update_strategy()
+            was_invalid = not old_state or old_state.state in (None, "unknown", "unavailable")
+            is_valid = new_state.state not in (None, "unknown", "unavailable")
+            
+            # Check if current plan has only 0.0 prices but now we have parsed prices
+            has_no_prices_in_plan = not any(slot.get("buy_price", 0.0) for slot in self._schedule)
+            buy_prices_today = self.hass.data.get(DOMAIN, {}).get("price_buy_today", [])
+            has_prices_now = any(buy_prices_today)
+            
+            force = (was_invalid and is_valid) or (has_no_prices_in_plan and has_prices_now)
+            
+            ems_log(self.hass, _LOGGER, logging.DEBUG, f"EMS DP trigger: update from {entity_id} (force={force})")
+            await self.async_update_strategy(force=force)
 
     async def _async_soc_listener(self, event) -> None:
         """Handle SOC updates with 2% change or 10 min throttle."""
@@ -1107,119 +1132,139 @@ class EmsDpSensor(SensorEntity):
                 return
 
         self._reactive_debounce_time = now
-        config = self._entry.data
-        options = self._entry.options
-        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
 
-        fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
-        min_sell_price = storage.min_sell_price
-        bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
-        bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
-        bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
-        min_bat_soc = storage.min_bat_soc
+        try:
+            config = self._entry.data
+            options = self._entry.options
+            storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
 
-        # Parse capacity
-        capacity = 5.12
-        if bat_capacity_entity_id:
-            cap_state = self.hass.states.get(bat_capacity_entity_id)
-            if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
-                try:
-                    capacity = float(cap_state.state)
-                    unit = cap_state.attributes.get("unit_of_measurement")
-                    if unit == "Wh" or capacity > 100.0:
-                        capacity = capacity / 1000.0
-                except (ValueError, TypeError):
-                    pass
+            fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
+            min_sell_price = storage.min_sell_price
+            bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+            bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+            bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
+            min_bat_soc = storage.min_bat_soc
 
-        # Parse current SOC
-        soc = 50.0
-        if bat_cur_power_entity_id:
-            soc_state = self.hass.states.get(bat_cur_power_entity_id)
-            if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
-                try:
-                    soc = float(soc_state.state)
-                except (ValueError, TypeError):
-                    pass
+            # Parse capacity
+            capacity = 5.12
+            if bat_capacity_entity_id:
+                cap_state = self.hass.states.get(bat_capacity_entity_id)
+                if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
+                    try:
+                        capacity = float(cap_state.state)
+                        unit = cap_state.attributes.get("unit_of_measurement")
+                        if unit == "Wh" or capacity > 100.0:
+                            capacity = capacity / 1000.0
+                    except (ValueError, TypeError):
+                        pass
 
-        # Apply SOC hysteresis
-        effective_soc = soc
-        if (
-            self._state not in ("discharge", "self_consume")
-            and self._last_calc_soc is not None
-            and soc < min_bat_soc + self.SOC_HYSTERESIS
-        ):
-            effective_soc = min(soc, min_bat_soc)
+            # Parse current SOC
+            soc = 50.0
+            if bat_cur_power_entity_id:
+                soc_state = self.hass.states.get(bat_cur_power_entity_id)
+                if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
+                    try:
+                        soc = float(soc_state.state)
+                    except (ValueError, TypeError):
+                        pass
 
-        cycle_cost = self.hass.data.get(DOMAIN, {}).get("bat_degradation_per_kwh", 0.0)
+            # Apply SOC hysteresis
+            effective_soc = soc
+            if (
+                self._state not in ("discharge", "self_consume")
+                and self._last_calc_soc is not None
+                and soc < min_bat_soc + self.SOC_HYSTERESIS
+            ):
+                effective_soc = min(soc, min_bat_soc)
 
-        buy_prices_today = self.hass.data.get(DOMAIN, {}).get("price_buy_today", [0.0] * 24)
-        buy_prices_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_buy_tomorrow", [0.0] * 24)
-        sell_prices_today = self.hass.data.get(DOMAIN, {}).get("price_sell_today", [0.0] * 24)
-        sell_prices_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_sell_tomorrow", [0.0] * 24)
+            cycle_cost = self.hass.data.get(DOMAIN, {}).get("bat_degradation_per_kwh", 0.0)
 
-        pv_today = [0.0] * 24
-        pv_today_state = self.hass.states.get("sensor.pv_forecast_today")
-        if pv_today_state:
-            pv_today = pv_today_state.attributes.get("hourly_forecast", [0.0] * 24)
+            buy_prices_today = self.hass.data.get(DOMAIN, {}).get("price_buy_today", [0.0] * 24)
+            buy_prices_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_buy_tomorrow", [0.0] * 24)
+            sell_prices_today = self.hass.data.get(DOMAIN, {}).get("price_sell_today", [0.0] * 24)
+            sell_prices_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_sell_tomorrow", [0.0] * 24)
 
-        pv_tomorrow = [0.0] * 24
-        pv_tomorrow_state = self.hass.states.get("sensor.pv_forecast_tomorrow")
-        if pv_tomorrow_state:
-            pv_tomorrow = pv_tomorrow_state.attributes.get("hourly_forecast", [0.0] * 24)
+            pv_today = [0.0] * 24
+            pv_today_state = self.hass.states.get("sensor.pv_forecast_today")
+            if pv_today_state:
+                pv_today = pv_today_state.attributes.get("hourly_forecast", [0.0] * 24)
 
-        consumption_today = [fallback_consumption] * 24
-        consumption_tomorrow = [fallback_consumption] * 24
-        load_state = self.hass.states.get("sensor.load_consumption")
-        if load_state:
-            consumption_today = load_state.attributes.get("average_today", [fallback_consumption] * 24)
-            now = dt_util.now()
-            tomorrow_weekday = (now + timedelta(days=1)).weekday()
-            day_keys = [
-                "average_monday", "average_tuesday", "average_wednesday",
-                "average_thursday", "average_friday", "average_saturday",
-                "average_sunday",
-            ]
-            tomorrow_key = day_keys[tomorrow_weekday]
-            consumption_tomorrow = load_state.attributes.get(tomorrow_key, [fallback_consumption] * 24)
+            pv_tomorrow = [0.0] * 24
+            pv_tomorrow_state = self.hass.states.get("sensor.pv_forecast_tomorrow")
+            if pv_tomorrow_state:
+                pv_tomorrow = pv_tomorrow_state.attributes.get("hourly_forecast", [0.0] * 24)
 
-        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
-        overrides = storage.get_overrides()
+            consumption_today = [fallback_consumption] * 24
+            consumption_tomorrow = [fallback_consumption] * 24
+            load_state = self.hass.states.get("sensor.load_consumption")
+            if load_state:
+                consumption_today = load_state.attributes.get("average_today", [fallback_consumption] * 24)
+                now = dt_util.now()
+                tomorrow_weekday = (now + timedelta(days=1)).weekday()
+                day_keys = [
+                    "average_monday", "average_tuesday", "average_wednesday",
+                    "average_thursday", "average_friday", "average_saturday",
+                    "average_sunday",
+                ]
+                tomorrow_key = day_keys[tomorrow_weekday]
+                consumption_tomorrow = load_state.attributes.get(tomorrow_key, [fallback_consumption] * 24)
 
-        result = await self.hass.async_add_executor_job(
-            self._calculate_strategy_sync,
-            effective_soc,
-            capacity,
-            min_bat_soc,
-            bat_max_power,
-            min_sell_price,
-            cycle_cost,
-            buy_prices_today,
-            buy_prices_tomorrow,
-            sell_prices_today,
-            sell_prices_tomorrow,
-            pv_today,
-            pv_tomorrow,
-            consumption_today,
-            consumption_tomorrow,
-            fallback_consumption,
-            overrides,
-        )
+            # Sanitize lists with safe_float_list
+            buy_prices_today = safe_float_list(buy_prices_today, 0.0)
+            buy_prices_tomorrow = safe_float_list(buy_prices_tomorrow, 0.0)
+            sell_prices_today = safe_float_list(sell_prices_today, 0.0)
+            sell_prices_tomorrow = safe_float_list(sell_prices_tomorrow, 0.0)
+            pv_today = safe_float_list(pv_today, 0.0)
+            pv_tomorrow = safe_float_list(pv_tomorrow, 0.0)
+            consumption_today = safe_float_list(consumption_today, fallback_consumption)
+            consumption_tomorrow = safe_float_list(consumption_tomorrow, fallback_consumption)
 
-        self._state = result.get("current_action", "idle")
-        self._charge_hours = result.get("charge_hours", [])
-        self._discharge_hours = result.get("discharge_hours", [])
-        self._pv_charge_hours = result.get("pv_charge_hours", [])
-        self._self_consume_hours = result.get("self_consume_hours", [])
-        self._paid_import_hours = result.get("paid_import_hours", [])
-        self._solar_export_hours = result.get("solar_export_hours", [])
-        self._schedule = result.get("schedule", [])
-        self._stats = result.get("stats", {})
-        self._error_msg = result.get("error")
+            storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
+            overrides = storage.get_overrides()
 
-        self._last_calc_time = dt_util.now()
-        self._last_calc_soc = soc
+            result = await self.hass.async_add_executor_job(
+                self._calculate_strategy_sync,
+                effective_soc,
+                capacity,
+                min_bat_soc,
+                bat_max_power,
+                min_sell_price,
+                cycle_cost,
+                buy_prices_today,
+                buy_prices_tomorrow,
+                sell_prices_today,
+                sell_prices_tomorrow,
+                pv_today,
+                pv_tomorrow,
+                consumption_today,
+                consumption_tomorrow,
+                fallback_consumption,
+                overrides,
+            )
 
-        self.async_write_ha_state()
+            self._state = result.get("current_action", "idle")
+            self._charge_hours = result.get("charge_hours", [])
+            self._discharge_hours = result.get("discharge_hours", [])
+            self._pv_charge_hours = result.get("pv_charge_hours", [])
+            self._self_consume_hours = result.get("self_consume_hours", [])
+            self._paid_import_hours = result.get("paid_import_hours", [])
+            self._solar_export_hours = result.get("solar_export_hours", [])
+            self._schedule = result.get("schedule", [])
+            self._stats = result.get("stats", {})
+            self._error_msg = result.get("error")
+
+            self._last_calc_time = dt_util.now()
+            self._last_calc_soc = soc
+
+            self.async_write_ha_state()
+        except Exception as err:
+            ems_log(
+                self.hass,
+                _LOGGER,
+                logging.ERROR,
+                f"Error in async_update_strategy: {err}",
+                exc_info=True
+            )
 
     def _calculate_strategy_sync(
         self,
