@@ -25,3 +25,8 @@ env/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Custom debate logs
+DEBATE.md
+debate.md
+
