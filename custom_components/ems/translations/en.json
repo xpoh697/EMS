@@ -30,6 +30,8 @@
         "description": "Configure basic sensor entities for the Energy Management System.",
         "data": {
           "total_load_consumption": "Total load consumption sensor",
+          "total_grid_export": "Total grid export sensor",
+          "total_grid_import": "Total grid import sensor",
           "current_house_consumption": "Current house consumption sensor",
           "inverter_modes_list": "Inverter modes list selector",
           "statistics_days": "Number of history days for averaging",
@@ -108,6 +110,9 @@
           "self_consume": "Self Consumption",
           "paid_import": "Paid Import"
         }
+      },
+      "today_profit": {
+        "name": "Today Profit"
       }
     },
     "number": {

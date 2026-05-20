@@ -27,6 +27,8 @@ from .const import (
     DOMAIN,
     VERSION,
     CONF_TOTAL_LOAD_CONSUMPTION,
+    CONF_TOTAL_GRID_EXPORT,
+    CONF_TOTAL_GRID_IMPORT,
     CONF_CURRENT_HOUSE_CONSUMPTION,
     CONF_INVERTER_MODES_LIST,
     CONF_CURRENT_PV_GENERATION,
@@ -257,6 +259,8 @@ async def async_setup_entry(
 
     # Basic settings
     target_sensor_id = options.get(CONF_TOTAL_LOAD_CONSUMPTION, config.get(CONF_TOTAL_LOAD_CONSUMPTION))
+    total_grid_export_id = options.get(CONF_TOTAL_GRID_EXPORT, config.get(CONF_TOTAL_GRID_EXPORT))
+    total_grid_import_id = options.get(CONF_TOTAL_GRID_IMPORT, config.get(CONF_TOTAL_GRID_IMPORT))
     current_house_consumption_id = options.get(CONF_CURRENT_HOUSE_CONSUMPTION, config.get(CONF_CURRENT_HOUSE_CONSUMPTION))
     inverter_modes_list_id = options.get(CONF_INVERTER_MODES_LIST, config.get(CONF_INVERTER_MODES_LIST))
     statistics_days = options.get(CONF_STATISTICS_DAYS, config.get(CONF_STATISTICS_DAYS, DEFAULT_STATISTICS_DAYS))
@@ -499,6 +503,19 @@ async def async_setup_entry(
                 entry.entry_id,
                 entry.title,
                 entry,
+            )
+        )
+
+    if total_grid_export_id and total_grid_import_id and target_sensor_id and price_buy_sensor_id and price_sell_sensor_id:
+        entities.append(
+            EmsTodayProfitSensor(
+                entry_id=entry.entry_id,
+                device_name=entry.title,
+                load_consumption_sensor_id=target_sensor_id,
+                grid_export_sensor_id=total_grid_export_id,
+                grid_import_sensor_id=total_grid_import_id,
+                price_buy_sensor_id=price_buy_sensor_id,
+                price_sell_sensor_id=price_sell_sensor_id,
             )
         )
 
@@ -1935,4 +1952,285 @@ class EmsSchedulerSensor(SensorEntity):
 
     async def _async_override_changed(self, event) -> None:
         """Handle manual override updates."""
+        self.async_write_ha_state()
+
+
+class EmsTodayProfitSensor(RestoreSensor, SensorEntity):
+    """EMS sensor that tracks today's monetary profit."""
+
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        load_consumption_sensor_id: str,
+        grid_export_sensor_id: str,
+        grid_import_sensor_id: str,
+        price_buy_sensor_id: str,
+        price_sell_sensor_id: str,
+    ) -> None:
+        """Initialize the profit sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._load_consumption_sensor_id = load_consumption_sensor_id
+        self._grid_export_sensor_id = grid_export_sensor_id
+        self._grid_import_sensor_id = grid_import_sensor_id
+        self._price_buy_sensor_id = price_buy_sensor_id
+        self._price_sell_sensor_id = price_sell_sensor_id
+
+        self._attr_name = "Today Profit"
+        self._attr_unique_id = f"{entry_id}_today_profit"
+        self.entity_id = "sensor.today_profit"
+
+        # Internal state tracking
+        self._state: float = 0.0
+        self._today_import_kwh: float = 0.0
+        self._today_import_price: float = 0.0
+        self._today_export_kwh: float = 0.0
+        self._today_export_price: float = 0.0
+        self._today_house_consumption_cost: float = 0.0
+
+        self._last_load_value: float | None = None
+        self._last_import_value: float | None = None
+        self._last_export_value: float | None = None
+        self._last_day: int = dt_util.now().day
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        """Return today's total profit."""
+        return self._state
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return the unit of measurement."""
+        if hasattr(self.hass.config, "currency"):
+            return self.hass.config.currency
+        return "EUR"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "today_import_kwh": self._today_import_kwh,
+            "today_import_price": self._today_import_price,
+            "today_export_kwh": self._today_export_kwh,
+            "today_export_price": self._today_export_price,
+            "today_house_consumption_cost": self._today_house_consumption_cost,
+            "last_load_value": self._last_load_value,
+            "last_import_value": self._last_import_value,
+            "last_export_value": self._last_export_value,
+            "last_day": self._last_day,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition and restore historical states."""
+        await super().async_added_to_hass()
+
+        last_state = await self.async_get_last_state()
+        if last_state:
+            try:
+                self._state = float(last_state.state)
+            except (ValueError, TypeError):
+                self._state = 0.0
+
+            # Restore attributes
+            self._today_import_kwh = float(last_state.attributes.get("today_import_kwh", 0.0))
+            self._today_import_price = float(last_state.attributes.get("today_import_price", 0.0))
+            self._today_export_kwh = float(last_state.attributes.get("today_export_kwh", 0.0))
+            self._today_export_price = float(last_state.attributes.get("today_export_price", 0.0))
+            self._today_house_consumption_cost = float(last_state.attributes.get("today_house_consumption_cost", 0.0))
+
+            self._last_load_value = last_state.attributes.get("last_load_value")
+            self._last_import_value = last_state.attributes.get("last_import_value")
+            self._last_export_value = last_state.attributes.get("last_export_value")
+            self._last_day = last_state.attributes.get("last_day", dt_util.now().day)
+        else:
+            self._state = 0.0
+            self._today_import_kwh = 0.0
+            self._today_import_price = 0.0
+            self._today_export_kwh = 0.0
+            self._today_export_price = 0.0
+            self._today_house_consumption_cost = 0.0
+            self._last_load_value = None
+            self._last_import_value = None
+            self._last_export_value = None
+            self._last_day = dt_util.now().day
+
+        # Listen to state changes of source sensors
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [self._load_consumption_sensor_id], self._async_load_changed
+            )
+        )
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [self._grid_export_sensor_id], self._async_export_changed
+            )
+        )
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [self._grid_import_sensor_id], self._async_import_changed
+            )
+        )
+
+        # Midnight reset check cron trigger
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._async_midnight_trigger, hour=0, minute=0, second=0
+            )
+        )
+
+    async def _async_midnight_trigger(self, datetime_now) -> None:
+        """Reset profit metrics at midnight."""
+        now = dt_util.now()
+        ems_log(self.hass, _LOGGER, logging.INFO, "EMS today profit midnight reset triggered")
+        self._reset_today(now.day)
+        self.async_write_ha_state()
+
+    def _get_current_prices(self) -> tuple[float, float]:
+        """Get current buy and sell prices."""
+        buy_price = 0.0
+        sell_price = 0.0
+
+        buy_state = self.hass.states.get(self._price_buy_sensor_id)
+        if buy_state and buy_state.state not in (None, "unknown", "unavailable"):
+            try:
+                buy_price = float(buy_state.state)
+            except (ValueError, TypeError):
+                pass
+
+        sell_state = self.hass.states.get(self._price_sell_sensor_id)
+        if sell_state and sell_state.state not in (None, "unknown", "unavailable"):
+            try:
+                sell_price = float(sell_state.state)
+            except (ValueError, TypeError):
+                pass
+
+        return buy_price, sell_price
+
+    async def _async_load_changed(self, event) -> None:
+        """Handle house consumption sensor updates."""
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in (None, "unknown", "unavailable"):
+            return
+
+        try:
+            new_value = float(new_state.state)
+        except (ValueError, TypeError):
+            return
+
+        now = dt_util.now()
+        if now.day != self._last_day:
+            self._reset_today(now.day)
+
+        if self._last_load_value is None:
+            self._last_load_value = new_value
+            self.async_write_ha_state()
+            return
+
+        delta = new_value - self._last_load_value
+        if delta < 0:
+            self._last_load_value = new_value
+            self.async_write_ha_state()
+            return
+
+        buy_price, _ = self._get_current_prices()
+        self._today_house_consumption_cost = round(self._today_house_consumption_cost + delta * buy_price, 4)
+        self._last_load_value = new_value
+        self._update_profit()
+
+    async def _async_export_changed(self, event) -> None:
+        """Handle grid export sensor updates."""
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in (None, "unknown", "unavailable"):
+            return
+
+        try:
+            new_value = float(new_state.state)
+        except (ValueError, TypeError):
+            return
+
+        now = dt_util.now()
+        if now.day != self._last_day:
+            self._reset_today(now.day)
+
+        if self._last_export_value is None:
+            self._last_export_value = new_value
+            self.async_write_ha_state()
+            return
+
+        delta = new_value - self._last_export_value
+        if delta < 0:
+            self._last_export_value = new_value
+            self.async_write_ha_state()
+            return
+
+        _, sell_price = self._get_current_prices()
+        self._today_export_kwh = round(self._today_export_kwh + delta, 4)
+        self._today_export_price = round(self._today_export_price + delta * sell_price, 4)
+        self._last_export_value = new_value
+        self._update_profit()
+
+    async def _async_import_changed(self, event) -> None:
+        """Handle grid import sensor updates."""
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in (None, "unknown", "unavailable"):
+            return
+
+        try:
+            new_value = float(new_state.state)
+        except (ValueError, TypeError):
+            return
+
+        now = dt_util.now()
+        if now.day != self._last_day:
+            self._reset_today(now.day)
+
+        if self._last_import_value is None:
+            self._last_import_value = new_value
+            self.async_write_ha_state()
+            return
+
+        delta = new_value - self._last_import_value
+        if delta < 0:
+            self._last_import_value = new_value
+            self.async_write_ha_state()
+            return
+
+        buy_price, _ = self._get_current_prices()
+        self._today_import_kwh = round(self._today_import_kwh + delta, 4)
+        self._today_import_price = round(self._today_import_price + delta * buy_price, 4)
+        self._last_import_value = new_value
+        self._update_profit()
+
+    def _reset_today(self, current_day: int) -> None:
+        """Reset daily accumulators."""
+        self._today_import_kwh = 0.0
+        self._today_import_price = 0.0
+        self._today_export_kwh = 0.0
+        self._today_export_price = 0.0
+        self._today_house_consumption_cost = 0.0
+        self._last_day = current_day
+        self._state = 0.0
+
+    def _update_profit(self) -> None:
+        """Recalculate profit and write state."""
+        self._state = round(
+            self._today_house_consumption_cost + self._today_export_price - self._today_import_price,
+            4
+        )
         self.async_write_ha_state()

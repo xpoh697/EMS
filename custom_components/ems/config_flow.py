@@ -9,6 +9,8 @@ import homeassistant.helpers.config_validation as cv
 from .const import (
     DOMAIN,
     CONF_TOTAL_LOAD_CONSUMPTION,
+    CONF_TOTAL_GRID_EXPORT,
+    CONF_TOTAL_GRID_IMPORT,
     CONF_CURRENT_HOUSE_CONSUMPTION,
     CONF_INVERTER_MODES_LIST,
     CONF_CURRENT_PV_GENERATION,
@@ -132,6 +134,28 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             )
         else:
             schema_dict[vol.Required(CONF_TOTAL_LOAD_CONSUMPTION)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        # Required: CONF_TOTAL_GRID_EXPORT
+        val_grid_export = get_value(CONF_TOTAL_GRID_EXPORT)
+        if val_grid_export:
+            schema_dict[vol.Required(CONF_TOTAL_GRID_EXPORT, default=val_grid_export)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Required(CONF_TOTAL_GRID_EXPORT)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        # Required: CONF_TOTAL_GRID_IMPORT
+        val_grid_import = get_value(CONF_TOTAL_GRID_IMPORT)
+        if val_grid_import:
+            schema_dict[vol.Required(CONF_TOTAL_GRID_IMPORT, default=val_grid_import)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Required(CONF_TOTAL_GRID_IMPORT)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
 

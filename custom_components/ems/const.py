@@ -2,10 +2,12 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
+CONF_TOTAL_GRID_EXPORT = "total_grid_export"
+CONF_TOTAL_GRID_IMPORT = "total_grid_import"
 CONF_CURRENT_HOUSE_CONSUMPTION = "current_house_consumption"
 CONF_INVERTER_MODES_LIST = "inverter_modes_list"
 CONF_CURRENT_PV_GENERATION = "current_pv_generation"
