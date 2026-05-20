@@ -15,28 +15,29 @@ To ensure flexibility and modular configuration, the integration must implement:
    - Offers a settings menu to easily navigate between different configuration categories.
    - The categories are:
      1. **Basic settings** (Основные настройки):
-        - **Total load consumption** (Общее потребление нагрузки): cumulative energy sensor (domain: sensor)
-        - **Current house consumption** (Текущее потребление дома): power sensor (domain: sensor)
-        - **Inverter Modes List** (Список режимов инвертора): dropdown select helper (domain: select, input_select)
-        - **Number of history days for averaging** (Количество дней истории для усреднения): positive integer (range: 1 - 365, default: 14)
-        - **Fallback consumption per hour** (Фолбэк потребления в час): decimal value in kWh (range: 0.0 - 100.0, default: 0.5)
-        - **Enable debug logging** (Включить отладочное логирование): boolean flag (default: False)
+        - **Total load consumption** (Общее потребление нагрузки): cumulative energy sensor (domain: sensor) [Required]
+        - **Current house consumption** (Текущее потребление дома): power sensor (domain: sensor) [Optional]
+        - **Inverter Modes List** (Список режимов инвертора): dropdown select helper (domain: select, input_select) [Optional]
+        - **Number of history days for averaging** (Количество дней истории для усреднения): positive integer (range: 1 - 365, default: 14) [Required]
+        - **Fallback consumption per hour** (Фолбэк потребления в час): decimal value in kWh (range: 0.0 - 100.0, default: 0.5) [Required]
+        - **Enable debug logging** (Включить отладочное логирование): boolean flag (default: False) [Required]
      2. **PV Forecast** (Прогноз СЭС / Настройки генерации и прогнозов СЭС):
-        - **Current PV generation** (Текущая генерация СЭС): power sensor (domain: sensor)
-        - **PV generation today** (Генерация СЭС за сегодня): energy sensor (domain: sensor)
-        - **PV Forecast today** (Прогноз СЭС на сегодня): solar forecast sensor (domain: sensor)
-        - **PV Forecast tomorrow** (Прогноз СЭС на завтра): solar forecast sensor (domain: sensor)
+        - **Current PV generation** (Текущая генерация СЭС): power sensor (domain: sensor) [Optional]
+        - **PV generation today** (Генерация СЭС за сегодня): energy sensor (domain: sensor) [Optional]
+        - **PV Forecast today** (Прогноз СЭС на сегодня): solar forecast sensor (domain: sensor) [Required]
+        - **PV Forecast tomorrow** (Прогноз СЭС на завтра): solar forecast sensor (domain: sensor) [Required]
      3. **Financial** (Финансы):
-        - **Price Buy sensor** (Сенсор цены покупки электричества): price sensor (domain: sensor)
-        - **Price Sell Sensor** (Сенсор цены продажи электричества): price sensor (domain: sensor)
-        - **System cost** (Стоимость системы): decimal numeric value (default: 0.0)
+        - **Price Buy sensor** (Сенсор цены покупки электричества): price sensor (domain: sensor) [Required]
+        - **Price Sell Sensor** (Сенсор цены продажи электричества): price sensor (domain: sensor) [Required]
+        - **System cost** (Стоимость системы): decimal numeric value (default: 0.0) [Required]
      4. **Battery optimization** (Оптимизация АКБ):
-        - **Bat price** (Стоимость АКБ): decimal numeric value (default: 0.0)
-        - **Bat cycles** (Количество циклов АКБ): integer numeric value (default: 6000)
-        - **Bat capacity (entity)** (Сенсор емкости АКБ): energy capacity sensor (domain: sensor)
-        - **Bat max power** (Максимальная мощность АКБ): decimal numeric value (default: 3000.0)
-        - **Bat cur power (entity)** (Сенсор текущей мощности АКБ): power sensor (domain: sensor)
-        - **Bat voltage (entity)** (Сенсор напряжения АКБ): voltage sensor (domain: sensor)
+        - **Bat price** (Стоимость АКБ): decimal numeric value (default: 0.0) [Required]
+        - **Bat cycles** (Количество циклов АКБ): integer numeric value (default: 6000) [Required]
+        - **Bat capacity (entity)** (Сенсор емкости АКБ): energy capacity sensor (domain: sensor) [Required]
+        - **Bat max power** (Максимальная мощность АКБ): decimal numeric value (default: 3000.0) [Required]
+        - **Bat SOC (entity)** (Сенсор уровня заряда АКБ / SOC): state of charge percentage sensor (domain: sensor) [Required]
+        - **Bat cur power (entity)** (Сенсор текущей мощности АКБ): power sensor (domain: sensor) [Optional]
+        - **Bat voltage (entity)** (Сенсор напряжения АКБ): voltage sensor (domain: sensor) [Required]
 
 Based on `bat_price`, `bat_cycles`, and `bat_capacity_entity`, the integration dynamically calculates battery degradation cost per kWh of energy throughput using the formula:
 `degradation_cost = bat_price / (bat_cycles * bat_capacity)`. If capacity is reported in Wh, it is automatically converted to kWh. This calculated value is logged to `ems.log` and stored in `hass.data[DOMAIN]["bat_degradation_per_kwh"]`.

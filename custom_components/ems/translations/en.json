@@ -66,6 +66,7 @@
           "bat_capacity_entity": "Battery capacity sensor (entity)",
           "bat_max_power": "Battery max power (W)",
           "bat_cur_power_entity": "Battery current power sensor (entity)",
+          "bat_soc_entity": "Battery State of Charge (SOC) sensor (entity)",
           "bat_voltage": "Battery voltage sensor (entity)",
           "min_bat_soc": "Minimum battery SOC (%)"
         }

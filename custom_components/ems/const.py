@@ -27,6 +27,7 @@ CONF_BAT_CYCLES = "bat_cycles"
 CONF_BAT_CAPACITY_ENTITY = "bat_capacity_entity"
 CONF_BAT_MAX_POWER = "bat_max_power"
 CONF_BAT_CUR_POWER_ENTITY = "bat_cur_power_entity"
+CONF_BAT_SOC_ENTITY = "bat_soc_entity"
 CONF_BAT_VOLTAGE = "bat_voltage"
 CONF_MIN_BAT_SOC = "min_bat_soc"
 

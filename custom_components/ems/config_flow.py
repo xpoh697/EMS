@@ -27,6 +27,7 @@ from .const import (
     CONF_BAT_CAPACITY_ENTITY,
     CONF_BAT_MAX_POWER,
     CONF_BAT_CUR_POWER_ENTITY,
+    CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
     CONF_MIN_BAT_SOC,
     DEFAULT_STATISTICS_DAYS,
@@ -123,16 +124,27 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         schema_dict = {}
 
         # 1. House Consumption Sensors
-        for key in [CONF_TOTAL_LOAD_CONSUMPTION, CONF_CURRENT_HOUSE_CONSUMPTION]:
-            val = get_value(key)
-            if val:
-                schema_dict[vol.Optional(key, default=val)] = selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor")
-                )
-            else:
-                schema_dict[vol.Optional(key)] = selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor")
-                )
+        # Required: CONF_TOTAL_LOAD_CONSUMPTION
+        val_total = get_value(CONF_TOTAL_LOAD_CONSUMPTION)
+        if val_total:
+            schema_dict[vol.Required(CONF_TOTAL_LOAD_CONSUMPTION, default=val_total)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Required(CONF_TOTAL_LOAD_CONSUMPTION)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        # Optional: CONF_CURRENT_HOUSE_CONSUMPTION
+        val_curr = get_value(CONF_CURRENT_HOUSE_CONSUMPTION)
+        if val_curr:
+            schema_dict[vol.Optional(CONF_CURRENT_HOUSE_CONSUMPTION, default=val_curr)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_CURRENT_HOUSE_CONSUMPTION)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
 
         # 2. Inverter Modes List
         val_inv = get_value(CONF_INVERTER_MODES_LIST)
@@ -187,12 +199,8 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         schema_dict = {}
 
         # PV Generation & Forecast Sensors
-        for key in [
-            CONF_CURRENT_PV_GENERATION,
-            CONF_PV_GENERATION_TODAY,
-            CONF_PV_FORECAST_TODAY,
-            CONF_PV_FORECAST_TOMORROW,
-        ]:
+        # Optional: CONF_CURRENT_PV_GENERATION, CONF_PV_GENERATION_TODAY
+        for key in [CONF_CURRENT_PV_GENERATION, CONF_PV_GENERATION_TODAY]:
             val = get_value(key)
             if val:
                 schema_dict[vol.Optional(key, default=val)] = selector.EntitySelector(
@@ -200,6 +208,18 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 )
             else:
                 schema_dict[vol.Optional(key)] = selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                )
+
+        # Required: CONF_PV_FORECAST_TODAY, CONF_PV_FORECAST_TOMORROW
+        for key in [CONF_PV_FORECAST_TODAY, CONF_PV_FORECAST_TOMORROW]:
+            val = get_value(key)
+            if val:
+                schema_dict[vol.Required(key, default=val)] = selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                )
+            else:
+                schema_dict[vol.Required(key)] = selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 )
 
@@ -224,15 +244,15 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
         schema_dict = {}
 
-        # Price Buy & Sell Sensors
+        # Price Buy & Sell Sensors - Required
         for key in [CONF_PRICE_BUY_SENSOR, CONF_PRICE_SELL_SENSOR]:
             val = get_value(key)
             if val:
-                schema_dict[vol.Optional(key, default=val)] = selector.EntitySelector(
+                schema_dict[vol.Required(key, default=val)] = selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 )
             else:
-                schema_dict[vol.Optional(key)] = selector.EntitySelector(
+                schema_dict[vol.Required(key)] = selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 )
 
@@ -284,14 +304,14 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             )
         )
 
-        # 2. Bat Capacity (entity)
+        # 2. Bat Capacity (entity) - Required
         val_cap = get_value(CONF_BAT_CAPACITY_ENTITY)
         if val_cap:
-            schema_dict[vol.Optional(CONF_BAT_CAPACITY_ENTITY, default=val_cap)] = selector.EntitySelector(
+            schema_dict[vol.Required(CONF_BAT_CAPACITY_ENTITY, default=val_cap)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
         else:
-            schema_dict[vol.Optional(CONF_BAT_CAPACITY_ENTITY)] = selector.EntitySelector(
+            schema_dict[vol.Required(CONF_BAT_CAPACITY_ENTITY)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
 
@@ -303,7 +323,18 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             )
         )
 
-        # 3. Bat Current Power (entity)
+        # 3. Bat SOC (entity) - Required
+        val_soc = get_value(CONF_BAT_SOC_ENTITY)
+        if val_soc:
+            schema_dict[vol.Required(CONF_BAT_SOC_ENTITY, default=val_soc)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Required(CONF_BAT_SOC_ENTITY)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        # 4. Bat Current Power (entity) - Optional
         val_cur_pow = get_value(CONF_BAT_CUR_POWER_ENTITY)
         if val_cur_pow:
             schema_dict[vol.Optional(CONF_BAT_CUR_POWER_ENTITY, default=val_cur_pow)] = selector.EntitySelector(
@@ -314,14 +345,14 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 selector.EntitySelectorConfig(domain="sensor")
             )
 
-        # 4. Bat Voltage (entity)
+        # 5. Bat Voltage (entity) - Required
         val_voltage = get_value(CONF_BAT_VOLTAGE)
         if val_voltage:
-            schema_dict[vol.Optional(CONF_BAT_VOLTAGE, default=val_voltage)] = selector.EntitySelector(
+            schema_dict[vol.Required(CONF_BAT_VOLTAGE, default=val_voltage)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
         else:
-            schema_dict[vol.Optional(CONF_BAT_VOLTAGE)] = selector.EntitySelector(
+            schema_dict[vol.Required(CONF_BAT_VOLTAGE)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
 

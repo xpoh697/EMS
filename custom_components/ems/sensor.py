@@ -45,6 +45,7 @@ from .const import (
     CONF_BAT_CAPACITY_ENTITY,
     CONF_BAT_MAX_POWER,
     CONF_BAT_CUR_POWER_ENTITY,
+    CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
     CONF_MIN_BAT_SOC,
     DEFAULT_STATISTICS_DAYS,
@@ -240,6 +241,7 @@ async def async_setup_entry(
     bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
     bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
     bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+    bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
     bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
     min_bat_soc = options.get(CONF_MIN_BAT_SOC, config.get(CONF_MIN_BAT_SOC, DEFAULT_MIN_BAT_SOC))
 
@@ -250,23 +252,23 @@ async def async_setup_entry(
         ems_log(hass, _LOGGER, logging.INFO, f"Total load consumption sensor configured successfully: {target_sensor_id}")
 
     if not current_house_consumption_id:
-        ems_log(hass, _LOGGER, logging.ERROR, "Current house consumption sensor is not configured in settings!")
+        ems_log(hass, _LOGGER, logging.WARNING, "Current house consumption sensor is not configured in settings.")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Current house consumption sensor configured successfully: {current_house_consumption_id}")
 
     if not inverter_modes_list_id:
-        ems_log(hass, _LOGGER, logging.ERROR, "Inverter modes list is not configured in settings!")
+        ems_log(hass, _LOGGER, logging.WARNING, "Inverter modes list is not configured in settings.")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Inverter modes list configured successfully: {inverter_modes_list_id}")
 
     # Log errors or info for PV sensors
     if not current_pv_generation_id:
-        ems_log(hass, _LOGGER, logging.ERROR, "Current PV generation sensor is not configured in settings!")
+        ems_log(hass, _LOGGER, logging.WARNING, "Current PV generation sensor is not configured in settings.")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Current PV generation sensor configured successfully: {current_pv_generation_id}")
 
     if not pv_generation_today_id:
-        ems_log(hass, _LOGGER, logging.ERROR, "PV generation today sensor is not configured in settings!")
+        ems_log(hass, _LOGGER, logging.WARNING, "PV generation today sensor is not configured in settings.")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"PV generation today sensor configured successfully: {pv_generation_today_id}")
 
@@ -299,8 +301,13 @@ async def async_setup_entry(
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Battery capacity entity configured successfully: {bat_capacity_entity_id}")
 
+    if not bat_soc_entity_id:
+        ems_log(hass, _LOGGER, logging.ERROR, "Battery State of Charge (SOC) entity is not configured in settings!")
+    else:
+        ems_log(hass, _LOGGER, logging.INFO, f"Battery SOC entity configured successfully: {bat_soc_entity_id}")
+
     if not bat_cur_power_entity_id:
-        ems_log(hass, _LOGGER, logging.ERROR, "Battery current power entity is not configured in settings!")
+        ems_log(hass, _LOGGER, logging.WARNING, "Battery current power entity is not configured in settings.")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Battery current power entity configured successfully: {bat_cur_power_entity_id}")
 
@@ -440,7 +447,7 @@ async def async_setup_entry(
             )
         )
 
-    if bat_cur_power_entity_id and bat_capacity_entity_id:
+    if bat_soc_entity_id and bat_capacity_entity_id:
         entities.append(
             EmsDpSensor(
                 entry.entry_id,
@@ -1033,13 +1040,13 @@ class EmsDpSensor(SensorEntity):
         options = self._entry.options
         price_buy_sensor_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
         price_sell_sensor_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
-        bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+        bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
 
         # Recalculate on SOC changes with throttling
-        if bat_cur_power_entity_id:
+        if bat_soc_entity_id:
             self.async_on_remove(
                 async_track_state_change_event(
-                    self.hass, [bat_cur_power_entity_id], self._async_soc_listener
+                    self.hass, [bat_soc_entity_id], self._async_soc_listener
                 )
             )
 
@@ -1177,35 +1184,113 @@ class EmsDpSensor(SensorEntity):
             options = self._entry.options
             storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
 
+            # 1. Validate mandatory configuration keys are present
+            required_keys = [
+                CONF_TOTAL_LOAD_CONSUMPTION,
+                CONF_PV_FORECAST_TODAY,
+                CONF_PV_FORECAST_TOMORROW,
+                CONF_PRICE_BUY_SENSOR,
+                CONF_PRICE_SELL_SENSOR,
+                CONF_BAT_CAPACITY_ENTITY,
+                CONF_BAT_SOC_ENTITY,
+                CONF_BAT_VOLTAGE,
+            ]
+            from .utils import ems_log
+            for key in required_keys:
+                entity_id = options.get(key, config.get(key))
+                if not entity_id:
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.ERROR,
+                        f"Required configuration parameter '{key}' is missing! Please configure it in integration settings."
+                    )
+                    self._state = "unavailable"
+                    self._error_msg = f"Missing parameter '{key}'"
+                    self.async_write_ha_state()
+                    return
+
+            total_load_consumption_id = options.get(CONF_TOTAL_LOAD_CONSUMPTION, config.get(CONF_TOTAL_LOAD_CONSUMPTION))
+            bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+            bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
+            bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
+
+            # 2. Check states of required entities
+            for entity_id in [
+                total_load_consumption_id,
+                bat_capacity_entity_id,
+                bat_soc_entity_id,
+                bat_voltage_entity_id,
+            ]:
+                state_obj = self.hass.states.get(entity_id)
+                if not state_obj or state_obj.state in (None, "unknown", "unavailable"):
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.ERROR,
+                        f"Required sensor '{entity_id}' is in state '{state_obj.state if state_obj else 'None'}'. Skipping strategy update."
+                    )
+                    self._state = "unavailable"
+                    self._error_msg = f"Sensor '{entity_id}' is unavailable"
+                    self.async_write_ha_state()
+                    return
+
             fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
             min_sell_price = storage.min_sell_price
-            bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
-            bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
             bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
             min_bat_soc = storage.min_bat_soc
 
             # Parse capacity
             capacity = 5.12
-            if bat_capacity_entity_id:
-                cap_state = self.hass.states.get(bat_capacity_entity_id)
-                if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
-                    try:
-                        capacity = float(cap_state.state)
-                        unit = cap_state.attributes.get("unit_of_measurement")
-                        if unit == "Wh" or capacity > 100.0:
-                            capacity = capacity / 1000.0
-                    except (ValueError, TypeError):
-                        pass
+            cap_state = self.hass.states.get(bat_capacity_entity_id)
+            if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    capacity = float(cap_state.state)
+                    unit = cap_state.attributes.get("unit_of_measurement")
+                    if unit == "Wh" or capacity > 100.0:
+                        capacity = capacity / 1000.0
+                except (ValueError, TypeError):
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.ERROR,
+                        f"Battery capacity sensor '{bat_capacity_entity_id}' has non-numeric state '{cap_state.state}'. Skipping strategy update."
+                    )
+                    self._state = "unavailable"
+                    self._error_msg = "Invalid capacity value"
+                    self.async_write_ha_state()
+                    return
 
             # Parse current SOC
             soc = 50.0
-            if bat_cur_power_entity_id:
-                soc_state = self.hass.states.get(bat_cur_power_entity_id)
-                if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
-                    try:
-                        soc = float(soc_state.state)
-                    except (ValueError, TypeError):
-                        pass
+            soc_state = self.hass.states.get(bat_soc_entity_id)
+            if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    val = float(soc_state.state)
+                    if 0.0 <= val <= 100.0:
+                        soc = val
+                    else:
+                        ems_log(
+                            self.hass,
+                            _LOGGER,
+                            logging.ERROR,
+                            f"Battery SOC value {val}% from '{bat_soc_entity_id}' is outside the valid range [0, 100]. Please verify that 'Battery State of Charge (SOC)' is configured with the correct sensor in integration settings."
+                        )
+                        self._state = "unavailable"
+                        self._error_msg = f"Invalid SOC value {val}%"
+                        self.async_write_ha_state()
+                        return
+                except (ValueError, TypeError):
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.ERROR,
+                        f"Battery SOC sensor '{bat_soc_entity_id}' has non-numeric state '{soc_state.state}'. Skipping strategy update."
+                    )
+                    self._state = "unavailable"
+                    self._error_msg = "Invalid SOC value type"
+                    self.async_write_ha_state()
+                    return
 
             # Apply SOC hysteresis
             effective_soc = soc
@@ -1561,13 +1646,13 @@ class EmsSchedulerSensor(SensorEntity):
         options = self._entry.options
         from .const import (
             CONF_BAT_CAPACITY_ENTITY,
-            CONF_BAT_CUR_POWER_ENTITY,
+            CONF_BAT_SOC_ENTITY,
             CONF_MIN_BAT_SOC,
             DEFAULT_MIN_BAT_SOC,
         )
 
         bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
-        bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+        bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
         bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
         min_bat_soc = storage.min_bat_soc
 
@@ -1586,11 +1671,21 @@ class EmsSchedulerSensor(SensorEntity):
 
         # Parse SOC
         soc = 50.0
-        if bat_cur_power_entity_id:
-            soc_state = self.hass.states.get(bat_cur_power_entity_id)
+        if bat_soc_entity_id:
+            soc_state = self.hass.states.get(bat_soc_entity_id)
             if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
                 try:
-                    soc = float(soc_state.state)
+                    val = float(soc_state.state)
+                    if 0.0 <= val <= 100.0:
+                        soc = val
+                    else:
+                        from .utils import ems_log
+                        ems_log(
+                            self.hass,
+                            _LOGGER,
+                            logging.ERROR,
+                            f"Battery SOC value {val}% from '{bat_soc_entity_id}' is outside the valid range [0, 100]. Please verify that 'Battery State of Charge (SOC)' is configured with the correct sensor in integration settings."
+                        )
                 except (ValueError, TypeError):
                     pass
 
@@ -1650,6 +1745,7 @@ class EmsSchedulerSensor(SensorEntity):
             "last_override_change": storage.last_override_change,
             "overrides": overrides,
             "active_override": active_override,
+            "battery_soc": soc,
         }
 
     async def async_added_to_hass(self) -> None:
