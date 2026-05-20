@@ -1848,20 +1848,35 @@ class EmsSchedulerSensor(SensorEntity):
         safe_capacity = capacity if capacity > 0.0 else 5.12
 
         dispatched_plan = []
-        for slot in schedule:
+
+        # For the first slot (current hour), energy_kwh covers only the
+        # remaining portion of the hour. Normalize it back to a full-hour rate
+        # so that displayed power/amps reflect the actual operating level.
+        now_minute = now.minute
+        now_second = now.second
+        remaining_seconds = (59 - now_minute) * 60 + (60 - now_second)
+        remaining_hour_fraction = max(remaining_seconds / 3600.0, 1 / 3600.0)
+
+        for slot_idx, slot in enumerate(schedule):
             action = slot.get("action", "idle")
             energy = slot.get("energy_kwh", 0.0)
 
             power_w = 0.0
             current_a = 0.0
 
+            # Normalize first slot energy to full-hour rate for power display
+            if slot_idx == 0 and remaining_hour_fraction < 1.0:
+                energy_for_power = energy / remaining_hour_fraction
+            else:
+                energy_for_power = energy
+
             if action in ("grid_charge", "pv_charge"):
                 end_usable = min(usable_capacity, usable_energy + energy)
-                power_w = energy * 1000.0
+                power_w = energy_for_power * 1000.0
                 current_a = power_w / safe_voltage
             elif action in ("discharge", "self_consume"):
                 end_usable = max(0.0, usable_energy - energy)
-                power_w = energy * 1000.0
+                power_w = energy_for_power * 1000.0
                 current_a = power_w / safe_voltage
             else:
                 end_usable = usable_energy
