@@ -518,6 +518,13 @@ async def async_setup_entry(
                 price_sell_sensor_id=price_sell_sensor_id,
             )
         )
+        entities.append(
+            EmsRoiSensor(
+                entry_id=entry.entry_id,
+                device_name=entry.title,
+                entry=entry,
+            )
+        )
 
     if entities:
         async_add_entities(entities)
@@ -2233,4 +2240,202 @@ class EmsTodayProfitSensor(RestoreSensor, SensorEntity):
             self._today_house_consumption_cost + self._today_export_price - self._today_import_price,
             4
         )
+        self.async_write_ha_state()
+
+
+class EmsRoiSensor(RestoreSensor, SensorEntity):
+    """EMS sensor that tracks cumulative ROI and estimated payback date."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        entry,
+    ) -> None:
+        """Initialize the ROI sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._entry = entry
+
+        self._attr_name = "ROI"
+        self._attr_unique_id = f"{entry_id}_roi"
+        self.entity_id = "sensor.roi"
+
+        # Cumulative returned amount (excluding current day)
+        self._historical_returned: float = 0.0
+        # Today's profit contribution from sensor.today_profit (not yet closed day)
+        self._last_today_profit: float = 0.0
+        # Daily history list (up to 30 values) for averages
+        self._daily_history: list[float] = []
+        self._last_day: int = dt_util.now().day
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    def _get_system_cost(self) -> float:
+        """Get current system cost from entry options/data."""
+        options = self._entry.options
+        data = self._entry.data
+        val = options.get(CONF_SYSTEM_COST, data.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST))
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _compute_state_and_attrs(self) -> tuple[float, dict]:
+        """Calculate state (roi_percentage) and attributes."""
+        system_cost = self._get_system_cost()
+        total_returned = round(self._historical_returned + self._last_today_profit, 4)
+
+        remaining_cost = round(system_cost - total_returned, 4) if system_cost > 0.0 else 0.0
+        roi_percentage = round((total_returned / system_cost) * 100, 2) if system_cost > 0.0 else 0.0
+
+        # Average calculations
+        if self._daily_history:
+            avg_daily = round(sum(self._daily_history) / len(self._daily_history), 4)
+        else:
+            avg_daily = 0.0
+
+        avg_weekly = round(avg_daily * 7, 4)
+        avg_monthly = round(avg_daily * 30, 4)
+
+        # Estimated payback date
+        if total_returned >= system_cost and system_cost > 0.0:
+            estimated_payback = "Fully Recouped"
+        elif avg_daily <= 0.0 or system_cost <= 0.0:
+            estimated_payback = "Never"
+        else:
+            days_needed = remaining_cost / avg_daily
+            payback_dt = dt_util.now() + timedelta(days=days_needed)
+            estimated_payback = payback_dt.strftime("%Y-%m-%d")
+
+        unit = "EUR"
+        if hasattr(self.hass, "config") and hasattr(self.hass.config, "currency"):
+            unit = self.hass.config.currency
+
+        attrs = {
+            "total_returned": total_returned,
+            "remaining_cost": remaining_cost,
+            "system_cost": system_cost,
+            "roi_percentage": roi_percentage,
+            "average_daily_profit": avg_daily,
+            "average_weekly_profit": avg_weekly,
+            "average_monthly_profit": avg_monthly,
+            "estimated_payback_date": estimated_payback,
+            "days_in_history": len(self._daily_history),
+            "unit": unit,
+            # Persistence helpers
+            "_historical_returned": self._historical_returned,
+            "_daily_history": self._daily_history,
+            "_last_day": self._last_day,
+        }
+        return roi_percentage, attrs
+
+    @property
+    def native_value(self) -> float:
+        """Return ROI percentage as the sensor state."""
+        roi, _ = self._compute_state_and_attrs()
+        return roi
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        """Return % as unit."""
+        return "%"
+
+    @property
+    def state_class(self):
+        """Return state class."""
+        return SensorStateClass.MEASUREMENT
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        _, attrs = self._compute_state_and_attrs()
+        return attrs
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition and restore historical states."""
+        await super().async_added_to_hass()
+
+        last_state = await self.async_get_last_state()
+        if last_state:
+            self._historical_returned = float(last_state.attributes.get("_historical_returned", 0.0))
+            raw_history = last_state.attributes.get("_daily_history", [])
+            if isinstance(raw_history, list):
+                self._daily_history = [float(x) for x in raw_history]
+            self._last_day = int(last_state.attributes.get("_last_day", dt_util.now().day))
+
+            # Restore last today_profit from the actual today_profit sensor
+            profit_state = self.hass.states.get("sensor.today_profit")
+            if profit_state and profit_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    self._last_today_profit = float(profit_state.state)
+                except (ValueError, TypeError):
+                    self._last_today_profit = 0.0
+
+        # Track changes to today_profit sensor
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, ["sensor.today_profit"], self._async_profit_changed
+            )
+        )
+
+        # Midnight trigger to close the day
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._async_midnight_trigger, hour=0, minute=0, second=0
+            )
+        )
+
+    async def _async_midnight_trigger(self, datetime_now) -> None:
+        """Close current day: archive profit and reset."""
+        now = dt_util.now()
+        if now.day == self._last_day:
+            return
+
+        ems_log(self.hass, _LOGGER, logging.INFO, f"EMS ROI midnight reset: archiving day profit {self._last_today_profit}")
+
+        # Archive yesterday's profit
+        self._historical_returned = round(self._historical_returned + self._last_today_profit, 4)
+        self._daily_history.append(round(self._last_today_profit, 4))
+        # Keep only last 30 days for averages
+        if len(self._daily_history) > 30:
+            self._daily_history = self._daily_history[-30:]
+
+        self._last_today_profit = 0.0
+        self._last_day = now.day
+        self.async_write_ha_state()
+
+    async def _async_profit_changed(self, event) -> None:
+        """Handle sensor.today_profit state changes."""
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in (None, "unknown", "unavailable"):
+            return
+
+        try:
+            new_profit = float(new_state.state)
+        except (ValueError, TypeError):
+            return
+
+        now = dt_util.now()
+        # Handle day rollover in case midnight trigger lagged
+        if now.day != self._last_day:
+            self._historical_returned = round(self._historical_returned + self._last_today_profit, 4)
+            self._daily_history.append(round(self._last_today_profit, 4))
+            if len(self._daily_history) > 30:
+                self._daily_history = self._daily_history[-30:]
+            self._last_today_profit = 0.0
+            self._last_day = now.day
+
+        self._last_today_profit = new_profit
         self.async_write_ha_state()

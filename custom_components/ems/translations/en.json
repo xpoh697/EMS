@@ -113,6 +113,9 @@
       },
       "today_profit": {
         "name": "Today Profit"
+      },
+      "roi": {
+        "name": "ROI"
       }
     },
     "number": {
