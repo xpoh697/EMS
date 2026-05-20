@@ -6,6 +6,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,14 +23,17 @@ class EmsScheduleStorage:
         self.entry_id = entry_id
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY.format(entry_id=entry_id))
         self._overrides: dict[str, dict[str, str]] = {}  # date -> hour -> action
+        self.last_override_change: str | None = None
 
     async def async_load(self) -> None:
         """Load data from JSON storage."""
         data = await self._store.async_load()
         if data is None:
             self._overrides = {}
+            self.last_override_change = None
         else:
             self._overrides = data.get("overrides", {})
+            self.last_override_change = data.get("last_override_change")
         _LOGGER.debug(
             "EMS Schedule Storage loaded: %d dates with overrides for entry %s",
             len(self._overrides),
@@ -40,6 +44,7 @@ class EmsScheduleStorage:
         """Save data to JSON storage."""
         await self._store.async_save({
             "overrides": self._overrides,
+            "last_override_change": self.last_override_change,
         })
 
     def get_overrides(self) -> dict[str, dict[str, str]]:
@@ -55,6 +60,7 @@ class EmsScheduleStorage:
         if date_str not in self._overrides:
             self._overrides[date_str] = {}
         self._overrides[date_str][str(hour)] = action
+        self.last_override_change = dt_util.now().isoformat()
         await self.async_save()
         _LOGGER.info("EMS Override set: %s hour %d -> %s", date_str, hour, action)
 
@@ -64,12 +70,14 @@ class EmsScheduleStorage:
             del self._overrides[date_str][str(hour)]
             if not self._overrides[date_str]:
                 del self._overrides[date_str]
+            self.last_override_change = dt_util.now().isoformat()
             await self.async_save()
             _LOGGER.info("EMS Override cleared: %s hour %d", date_str, hour)
 
     async def async_clear_all_overrides(self) -> None:
         """Clear all manual overrides."""
         self._overrides = {}
+        self.last_override_change = dt_util.now().isoformat()
         await self.async_save()
         _LOGGER.info("EMS All manual overrides cleared")
 

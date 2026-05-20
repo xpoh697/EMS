@@ -432,6 +432,13 @@ async def async_setup_entry(
                 entry,
             )
         )
+        entities.append(
+            EmsSchedulerSensor(
+                entry.entry_id,
+                entry.title,
+                entry,
+            )
+        )
 
     if entities:
         async_add_entities(entities)
@@ -1378,3 +1385,89 @@ class EmsDpSensor(SensorEntity):
             "stats": stats,
             "error": None,
         }
+
+
+class EmsSchedulerSensor(SensorEntity):
+    """EMS Scheduler State and Overrides Sensor."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
+        """Initialize the scheduler sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._entry = entry
+        self._attr_name = "Scheduler"
+        self._attr_unique_id = f"{entry_id}_scheduler"
+        self.entity_id = "sensor.scheduler"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the state of the scheduler (last plan update time or Active)."""
+        dp_state = self.hass.states.get("sensor.dp")
+        if dp_state is not None:
+            return dp_state.attributes.get("last_calculation")
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
+        dp_state = self.hass.states.get("sensor.dp")
+
+        schedule = []
+        last_dp_call = None
+        if dp_state is not None:
+            schedule = dp_state.attributes.get("schedule", [])
+            last_dp_call = dp_state.attributes.get("last_calculation")
+
+        overrides = storage.get_overrides()
+
+        # Calculate active override for the current hour
+        now = dt_util.now()
+        today_str = now.strftime("%Y-%m-%d")
+        current_hour = now.hour
+        active_override = overrides.get(today_str, {}).get(str(current_hour))
+
+        return {
+            "current_plan": schedule,
+            "last_dp_call": last_dp_call,
+            "last_override_change": storage.last_override_change,
+            "overrides": overrides,
+            "active_override": active_override,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition."""
+        await super().async_added_to_hass()
+
+        # Listen for state changes of sensor.dp to update plan/scheduler state
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, ["sensor.dp"], self._async_dp_changed
+            )
+        )
+
+        # Listen for manual override updates
+        self.async_on_remove(
+            self.hass.bus.async_listen("ems_schedule_updated", self._async_override_changed)
+        )
+
+    async def _async_dp_changed(self, event) -> None:
+        """Handle DP sensor changes."""
+        self.async_write_ha_state()
+
+    async def _async_override_changed(self, event) -> None:
+        """Handle manual override updates."""
+        self.async_write_ha_state()
