@@ -78,6 +78,45 @@ def safe_float_list(val, default_val, length=24) -> list[float]:
         cleaned.extend([default_val] * (length - len(cleaned)))
     return cleaned[:length]
 
+def map_dp_to_physical(
+    action: str | None,
+    sell_price: float,
+    pv_kwh: float,
+    min_sell_price: float,
+    cheap_ahead: bool,
+) -> tuple[str | None, str]:
+    """Map a DP algorithmic action to a physical inverter mode, returning (mode, reason)."""
+    price_cond = "sell_price > min_sell_price" if sell_price > min_sell_price else "sell_price <= min_sell_price"
+    pv_cond = "pv_kwh > 0.01" if pv_kwh > 0.01 else "pv_kwh <= 0.01"
+    cheap_cond = f"cheap_ahead={cheap_ahead}"
+    reason = f"{price_cond} | {pv_cond} | {cheap_cond}"
+
+    if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency"):
+        return action, "direct_mapping"
+
+    # Direct mapping for idle
+    if action == "idle":
+        return "idle", f"idle_bypass | {reason}"
+
+    if action == "discharge":
+        if sell_price > min_sell_price:
+            return "sale_pv_bat", reason
+        return "stop_sale", reason
+
+    if action in ("grid_charge", "paid_import"):
+        return "buy", reason
+
+    # Actions: pv_charge, self_consume, solar_export
+    if sell_price > min_sell_price:
+        if action == "solar_export" and pv_kwh > 0.01:
+            return "sale_pv_no_bat", reason
+        return "sale_pv", reason
+
+    # sell_price <= min_sell_price
+    if cheap_ahead:
+        return "no_pv_sale_no_bat", reason
+    return "stop_sale", reason
+
 def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float], bool]:
     """Parse Solcast detailedForecast, detailedHourly, and forecasts attributes to compute baseline hourly kWh."""
     hourly_baselines = [0.0] * 24
@@ -1547,6 +1586,24 @@ class EmsDpSensor(SensorEntity):
                         "pv_kwh": slot["pv_kwh"],
                     })
 
+            # Calculate cheap_ahead for the slot (next 6 hours, ONLY negative price)
+            cheap_ahead = False
+            if action != "self_consume":
+                horizon_end = min(idx + 7, len(slots))
+                for f_idx in range(idx + 1, horizon_end):
+                    future_p_buy = slots[f_idx]["buy_price"]
+                    if future_p_buy < 0.0:
+                        cheap_ahead = True
+                        break
+
+            physical_mode, mapping_reason = map_dp_to_physical(
+                action=action,
+                sell_price=slot["sell_price"],
+                pv_kwh=slot["pv_kwh"],
+                min_sell_price=min_sell_price,
+                cheap_ahead=cheap_ahead,
+            )
+
             if idx == 0:
                 current_action = action
 
@@ -1558,6 +1615,8 @@ class EmsDpSensor(SensorEntity):
                 "pv_kwh": slot["pv_kwh"],
                 "consumption_kwh": slot["consumption_kwh"],
                 "action": action,
+                "physical_mode": physical_mode,
+                "mapping_reason": mapping_reason,
                 "energy_kwh": round(energy, 2),
             })
 
@@ -1612,14 +1671,40 @@ class EmsSchedulerSensor(SensorEntity):
         current_hour = now.hour
         active_override = overrides.get(today_str, {}).get(str(current_hour))
 
-        if active_override is not None:
-            return active_override
-
         dp_state = self.hass.states.get("sensor.dp")
-        dp_val = dp_state.state if dp_state is not None else None
-        if dp_val in (None, "unknown", "unavailable"):
+
+        if active_override is not None:
+            schedule = dp_state.attributes.get("schedule", []) if dp_state is not None else []
+            current_slot = schedule[0] if schedule else {}
+            sell_price = current_slot.get("sell_price", 0.0)
+            pv_kwh = current_slot.get("pv_kwh", 0.0)
+
+            cheap_ahead = False
+            if active_override != "self_consume" and schedule:
+                horizon_end = min(7, len(schedule))
+                for f_idx in range(1, horizon_end):
+                    future_p_buy = schedule[f_idx].get("buy_price", 99.0)
+                    if future_p_buy < 0.0:
+                        cheap_ahead = True
+                        break
+
+            physical_mode, _ = map_dp_to_physical(
+                action=active_override,
+                sell_price=sell_price,
+                pv_kwh=pv_kwh,
+                min_sell_price=storage.min_sell_price,
+                cheap_ahead=cheap_ahead,
+            )
+            return physical_mode
+
+        if dp_state is None or dp_state.state in ("unknown", "unavailable"):
             return None
-        return dp_val
+
+        schedule = dp_state.attributes.get("schedule", [])
+        if not schedule:
+            return None
+
+        return schedule[0].get("physical_mode", dp_state.state)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -1739,12 +1824,49 @@ class EmsSchedulerSensor(SensorEntity):
             })
             usable_energy = end_usable
 
+        # Determine raw_mode and mapping_reason for the current state
+        raw_mode = None
+        mapping_reason = None
+
+        if dp_state is not None and dp_state.state not in (None, "unknown", "unavailable"):
+            raw_mode = dp_state.state
+
+        if schedule:
+            raw_mode = schedule[0].get("action", raw_mode)
+            mapping_reason = schedule[0].get("mapping_reason")
+
+        if active_override is not None:
+            raw_mode = active_override
+            current_slot = schedule[0] if schedule else {}
+            sell_price = current_slot.get("sell_price", 0.0)
+            pv_kwh = current_slot.get("pv_kwh", 0.0)
+
+            cheap_ahead = False
+            if active_override != "self_consume" and schedule:
+                horizon_end = min(7, len(schedule))
+                for f_idx in range(1, horizon_end):
+                    future_p_buy = schedule[f_idx].get("buy_price", 99.0)
+                    if future_p_buy < 0.0:
+                        cheap_ahead = True
+                        break
+
+            _, override_reason = map_dp_to_physical(
+                action=active_override,
+                sell_price=sell_price,
+                pv_kwh=pv_kwh,
+                min_sell_price=storage.min_sell_price,
+                cheap_ahead=cheap_ahead,
+            )
+            mapping_reason = f"override: {active_override} | {override_reason}"
+
         return {
             "current_plan": dispatched_plan,
             "last_dp_call": last_dp_call,
             "last_override_change": storage.last_override_change,
             "overrides": overrides,
             "active_override": active_override,
+            "raw_mode": raw_mode,
+            "mapping_reason": mapping_reason,
             "battery_soc": soc,
         }
 

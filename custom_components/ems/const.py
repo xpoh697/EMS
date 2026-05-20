@@ -146,5 +146,17 @@ INVERTER_MODES = {
         is_grid_bypass=True,
         curtail_pv=False,
         calibration_limit_soc=100.0
+    ),
+    "idle": InverterModeClass(
+        name="idle",
+        pv_to_house=True,
+        charge_from_pv=False,
+        charge_from_grid=False,
+        discharge_to_house=False,
+        discharge_to_grid=False,
+        export_pv_to_grid=True,
+        is_grid_bypass=True,
+        curtail_pv=False,
+        calibration_limit_soc=100.0
     )
 }
