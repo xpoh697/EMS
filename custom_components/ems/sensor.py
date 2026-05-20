@@ -1331,26 +1331,36 @@ class EmsDpSensor(SensorEntity):
         sc_keys = {(h["date"], h["hour"]): h for h in sc_h}
         pim_keys = {(h["date"], h["hour"]): h for h in pim_h}
 
+        usable_energy = current_usable
+        safe_capacity = capacity if capacity > 0.0 else 5.12
+
         for idx, slot in enumerate(slots):
             key = (slot["date"], slot["hour"])
             action = "idle"
             energy = 0.0
+            end_usable = usable_energy
 
             if key in chg_keys:
                 action = "grid_charge"
                 energy = chg_keys[key].get("planned_energy_kwh", 0.0)
+                end_usable = min(usable_capacity, usable_energy + energy)
             elif key in dis_keys:
                 action = "discharge"
                 energy = dis_keys[key].get("planned_energy_kwh", 0.0)
+                end_usable = max(0.0, usable_energy - energy)
             elif key in pvc_keys:
                 action = "pv_charge"
                 energy = pvc_keys[key].get("charge_kwh", 0.0)
+                end_usable = min(usable_capacity, usable_energy + energy)
             elif key in sc_keys:
                 action = "self_consume"
                 energy = sc_keys[key].get("planned_energy_kwh", 0.0)
+                end_usable = max(0.0, usable_energy - energy)
             elif key in pim_keys:
                 action = "paid_import"
                 energy = pim_keys[key].get("planned_grid_import_kwh", 0.0)
+                # Paid import is consumed directly from the grid, battery remains untouched
+                end_usable = usable_energy
             else:
                 if slot["pv_kwh"] > 0.1:
                     action = "solar_export"
@@ -1363,6 +1373,10 @@ class EmsDpSensor(SensorEntity):
             if idx == 0:
                 current_action = action
 
+            # Calculate SOC at the end of the hour
+            end_soc = (end_usable / safe_capacity) * 100 + min_bat_soc
+            end_soc = max(min_bat_soc, min(100.0, end_soc))
+
             schedule.append({
                 "date": slot["date"],
                 "hour": slot["hour"],
@@ -1372,7 +1386,9 @@ class EmsDpSensor(SensorEntity):
                 "consumption_kwh": slot["consumption_kwh"],
                 "action": action,
                 "energy_kwh": round(energy, 2),
+                "soc": round(end_soc, 1),
             })
+            usable_energy = end_usable
 
         return {
             "current_action": current_action,
