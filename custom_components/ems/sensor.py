@@ -1232,7 +1232,6 @@ class EmsDpSensor(SensorEntity):
                 CONF_PRICE_SELL_SENSOR,
                 CONF_BAT_CAPACITY_ENTITY,
                 CONF_BAT_SOC_ENTITY,
-                CONF_BAT_VOLTAGE,
             ]
             from .utils import ems_log
             for key in required_keys:
@@ -1259,7 +1258,6 @@ class EmsDpSensor(SensorEntity):
                 total_load_consumption_id,
                 bat_capacity_entity_id,
                 bat_soc_entity_id,
-                bat_voltage_entity_id,
             ]:
                 state_obj = self.hass.states.get(entity_id)
                 if not state_obj or state_obj.state in (None, "unknown", "unavailable"):
@@ -1808,7 +1806,7 @@ class EmsSchedulerSensor(SensorEntity):
 
         # Parse voltage
         voltage = 51.2
-        if bat_voltage_entity_id:
+        if bat_voltage_entity_id and bat_voltage_entity_id != bat_capacity_entity_id:
             volt_state = self.hass.states.get(bat_voltage_entity_id)
             if volt_state and volt_state.state not in (None, "unknown", "unavailable"):
                 try:
@@ -1839,7 +1837,7 @@ class EmsSchedulerSensor(SensorEntity):
                 current_a = power_w / safe_voltage
             elif action in ("discharge", "self_consume"):
                 end_usable = max(0.0, usable_energy - energy)
-                power_w = -energy * 1000.0
+                power_w = energy * 1000.0
                 current_a = power_w / safe_voltage
             else:
                 end_usable = usable_energy

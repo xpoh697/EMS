@@ -345,14 +345,14 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 selector.EntitySelectorConfig(domain="sensor")
             )
 
-        # 5. Bat Voltage (entity) - Required
+        # 5. Bat Voltage (entity) - Optional
         val_voltage = get_value(CONF_BAT_VOLTAGE)
         if val_voltage:
-            schema_dict[vol.Required(CONF_BAT_VOLTAGE, default=val_voltage)] = selector.EntitySelector(
+            schema_dict[vol.Optional(CONF_BAT_VOLTAGE, default=val_voltage)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
         else:
-            schema_dict[vol.Required(CONF_BAT_VOLTAGE)] = selector.EntitySelector(
+            schema_dict[vol.Optional(CONF_BAT_VOLTAGE)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
 
