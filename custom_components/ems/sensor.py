@@ -1109,13 +1109,14 @@ class EmsDpSensor(SensorEntity):
         self._reactive_debounce_time = now
         config = self._entry.data
         options = self._entry.options
+        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
 
         fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
-        min_sell_price = options.get(CONF_MIN_SELL_PRICE, config.get(CONF_MIN_SELL_PRICE, DEFAULT_MIN_SELL_PRICE))
+        min_sell_price = storage.min_sell_price
         bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
         bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
         bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
-        min_bat_soc = options.get(CONF_MIN_BAT_SOC, config.get(CONF_MIN_BAT_SOC, DEFAULT_MIN_BAT_SOC))
+        min_bat_soc = storage.min_bat_soc
 
         # Parse capacity
         capacity = 5.12

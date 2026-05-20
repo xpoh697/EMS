@@ -96,6 +96,14 @@
           "paid_import": "Paid Import"
         }
       }
+    },
+    "number": {
+      "min_bat_soc": {
+        "name": "Minimum battery SOC"
+      },
+      "min_sell_price": {
+        "name": "Minimum sell price"
+      }
     }
   }
 }

@@ -18,7 +18,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Initialize schedule storage manager
     from .storage import EmsScheduleStorage
     storage = EmsScheduleStorage(hass, entry.entry_id)
-    await storage.async_load()
+    await storage.async_load(entry)
 
     # Store settings and storage in memory
     hass.data[DOMAIN][entry.entry_id] = {
@@ -37,14 +37,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register options update listener to reload when settings change
     entry.async_on_unload(entry.add_update_listener(async_update_options_listener))
     
-    # Forward entry setups to the sensor platform
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+    # Forward entry setups to platforms
+    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "number"])
     
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor", "number"])
     if unload_ok:
         if entry.entry_id in hass.data.get(DOMAIN, {}):
             hass.data[DOMAIN].pop(entry.entry_id)
