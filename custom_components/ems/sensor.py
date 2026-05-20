@@ -1889,6 +1889,16 @@ class EmsSchedulerSensor(SensorEntity):
             )
             mapping_reason = f"override: {active_override} | {override_reason}"
 
+        current_power = 0.0
+        current_amps = 0.0
+        current_target_soc = soc
+
+        if dispatched_plan:
+            current_slot = dispatched_plan[0]
+            current_power = current_slot.get("power_w", 0.0)
+            current_amps = current_slot.get("current_a", 0.0)
+            current_target_soc = current_slot.get("soc", soc)
+
         return {
             "current_plan": dispatched_plan,
             "last_dp_call": last_dp_call,
@@ -1898,6 +1908,9 @@ class EmsSchedulerSensor(SensorEntity):
             "raw_mode": raw_mode,
             "mapping_reason": mapping_reason,
             "battery_soc": soc,
+            "power": current_power,
+            "target_soc": current_target_soc,
+            "amps": current_amps,
         }
 
     async def async_added_to_hass(self) -> None:
