@@ -1466,6 +1466,7 @@ class EmsSchedulerSensor(SensorEntity):
 
         bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
         bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
+        bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
         min_bat_soc = storage.min_bat_soc
 
         # Parse capacity
@@ -1491,7 +1492,18 @@ class EmsSchedulerSensor(SensorEntity):
                 except (ValueError, TypeError):
                     pass
 
-        # Simulate SOC progression over the plan
+        # Parse voltage
+        voltage = 51.2
+        if bat_voltage_entity_id:
+            volt_state = self.hass.states.get(bat_voltage_entity_id)
+            if volt_state and volt_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    voltage = float(volt_state.state)
+                except (ValueError, TypeError):
+                    pass
+        safe_voltage = voltage if voltage > 0.0 else 51.2
+
+        # Simulate SOC, power and current progression over the plan
         usable_capacity = capacity * (1 - min_bat_soc / 100)
         current_usable = capacity * (soc - min_bat_soc) / 100
         current_usable = max(0.0, min(current_usable, usable_capacity))
@@ -1504,10 +1516,17 @@ class EmsSchedulerSensor(SensorEntity):
             action = slot.get("action", "idle")
             energy = slot.get("energy_kwh", 0.0)
 
+            power_w = 0.0
+            current_a = 0.0
+
             if action in ("grid_charge", "pv_charge"):
                 end_usable = min(usable_capacity, usable_energy + energy)
+                power_w = energy * 1000.0
+                current_a = power_w / safe_voltage
             elif action in ("discharge", "self_consume"):
                 end_usable = max(0.0, usable_energy - energy)
+                power_w = -energy * 1000.0
+                current_a = power_w / safe_voltage
             else:
                 end_usable = usable_energy
 
@@ -1518,6 +1537,8 @@ class EmsSchedulerSensor(SensorEntity):
             dispatched_plan.append({
                 **slot,
                 "soc": round(end_soc, 1),
+                "power_w": round(power_w, 1),
+                "current_a": round(current_a, 1),
             })
             usable_energy = end_usable
 
