@@ -22,7 +22,7 @@ const MODE_COLORS = {
   'sale_pv_no_bat': '#ff8c00',     // Orange (Export PV)
   'sale_pv_bat': '#ff4500',        // Orange-Red (Discharge / export bat)
   'buy': '#2196f3',                // Blue (Charge / buy)
-  'stop_sale': '#f44336',          // Red (Stop Sale)
+  'stop_sale': '#7da882',          // Faded Green (Stop Sale)
   'bat_emergency': '#e91e63',      // Pink (Emergency)
   'no_pv_sale_no_bat': '#607d8b',  // Blue-Grey (Wait)
   'default': '#727272'
