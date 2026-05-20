@@ -1,4 +1,5 @@
 """Constants for the Energy Management System (EMS) integration."""
+from dataclasses import dataclass
 
 DOMAIN = "ems"
 VERSION = "0.1.0"
@@ -45,3 +46,105 @@ DEFAULT_MIN_BAT_SOC = 20.0
 
 # Hysteresis configuration
 SOC_HYSTERESIS = 2.0
+
+@dataclass
+class InverterModeClass:
+    """Defines algorithmic behavior for a specific inverter mode."""
+    name: str
+    pv_to_house: bool         # Солнце идет на покрытие потребления дома
+    charge_from_pv: bool      # Заряд АКБ от солнечных панелей
+    charge_from_grid: bool    # Заряд АКБ напрямую из сети
+    discharge_to_house: bool  # Разряд АКБ для покрытия потребления дома
+    discharge_to_grid: bool   # Разряд АКБ на продажу в сеть (Арбитраж)
+    export_pv_to_grid: bool   # Продажа излишков солнца в сеть
+    is_grid_bypass: bool      # Питание дома напрямую из сети (байпас)
+    curtail_pv: bool          # Принудительное ограничение (зажим) генерации панелей
+    calibration_limit_soc: float # Лимит SOC, выше которого генерация не используется для калибровки точности
+
+# Глобальный реестр режимов для симуляции и логики
+INVERTER_MODES = {
+    "buy": InverterModeClass(
+        name="buy",
+        pv_to_house=True,
+        charge_from_pv=True,
+        charge_from_grid=True,
+        discharge_to_house=False,
+        discharge_to_grid=False,
+        export_pv_to_grid=False,
+        is_grid_bypass=True,
+        curtail_pv=False,
+        calibration_limit_soc=100.0
+    ),
+    "no_pv_sale_no_bat": InverterModeClass(
+        name="no_pv_sale_no_bat",
+        pv_to_house=True,
+        charge_from_pv=False,
+        charge_from_grid=False,
+        discharge_to_house=False,
+        discharge_to_grid=False,
+        export_pv_to_grid=False,
+        is_grid_bypass=False,
+        curtail_pv=True,
+        calibration_limit_soc=0.0
+    ),
+    "sale_pv_no_bat": InverterModeClass(
+        name="sale_pv_no_bat",
+        pv_to_house=True,
+        charge_from_pv=False,
+        charge_from_grid=False,
+        discharge_to_house=False,
+        discharge_to_grid=False,
+        export_pv_to_grid=True,
+        is_grid_bypass=False,
+        curtail_pv=False,
+        calibration_limit_soc=100.0
+    ),
+    "sale_pv_bat": InverterModeClass(
+        name="sale_pv_bat",
+        pv_to_house=True,
+        charge_from_pv=False,
+        charge_from_grid=False,
+        discharge_to_house=True,
+        discharge_to_grid=True,
+        export_pv_to_grid=True,
+        is_grid_bypass=False,
+        curtail_pv=False,
+        calibration_limit_soc=100.0
+    ),
+    "stop_sale": InverterModeClass(
+        name="stop_sale",
+        pv_to_house=True,
+        charge_from_pv=True,
+        charge_from_grid=False,
+        discharge_to_house=True,
+        discharge_to_grid=False,
+        export_pv_to_grid=False,
+        is_grid_bypass=False,
+        curtail_pv=True,
+        calibration_limit_soc=90.0
+    ),
+    "sale_pv": InverterModeClass(
+        name="sale_pv",
+        pv_to_house=True,
+        charge_from_pv=True,
+        charge_from_grid=False,
+        discharge_to_house=True,
+        discharge_to_grid=False,
+        export_pv_to_grid=True,
+        is_grid_bypass=False,
+        curtail_pv=False,
+        calibration_limit_soc=100.0
+    ),
+    "bat_emergency": InverterModeClass(
+        name="bat_emergency",
+        pv_to_house=True,
+        charge_from_pv=True,
+        charge_from_grid=False,
+        discharge_to_house=False,
+        discharge_to_grid=False,
+        export_pv_to_grid=False,
+        is_grid_bypass=True,
+        curtail_pv=False,
+        calibration_limit_soc=100.0
+    )
+}
