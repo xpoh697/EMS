@@ -26,6 +26,10 @@ def ems_log(
             logger.debug(message, *args, **kwargs)
     else:
         logger.log(level, message, *args, **kwargs)
+        # For WARNING and above, also write to standard Home Assistant log
+        if level in (logging.WARNING, logging.ERROR, logging.CRITICAL):
+            std_logger = logging.getLogger(f"homeassistant.{logger.name}")
+            std_logger.log(level, message, *args, **kwargs)
 
 def _setup_handler_executor(log_dir: str, log_file: str) -> RotatingFileHandler:
     """Create directory and RotatingFileHandler in the executor thread."""

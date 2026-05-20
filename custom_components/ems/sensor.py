@@ -61,25 +61,51 @@ from .dp_engine import run_unified_dp, DPConfig
 
 _LOGGER = logging.getLogger(__name__)
 
-def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> list[float]:
-    """Parse Solcast detailedForecast and analysis intervals to compute baseline hourly kWh."""
+def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float], bool]:
+    """Parse Solcast detailedForecast, detailedHourly, and forecasts attributes to compute baseline hourly kWh."""
     hourly_baselines = [0.0] * 24
     if not state_obj:
-        return hourly_baselines
+        return hourly_baselines, False
 
     attrs = state_obj.attributes
-    detailed_forecast = attrs.get("detailedForecast")
-    if not isinstance(detailed_forecast, list):
-        # Fallback: if detailedForecast is not present, check if there's a simple state value
+    forecast_list = None
+    matched_attr = None
+
+    # Check for different Solcast forecast list attributes
+    for attr_name in ("detailedForecast", "detailedHourly", "forecasts"):
+        val = attrs.get(attr_name)
+        if isinstance(val, list) and len(val) > 0:
+            forecast_list = val
+            matched_attr = attr_name
+            break
+
+    if forecast_list is None:
+        # Fallback: if no detailed forecast attribute is present, check if there's a simple state value
         try:
             total_val = float(state_obj.state)
         except (ValueError, TypeError):
             total_val = 0.0
-        # Distribute total_val over daylight hours (e.g. 7:00 to 18:00, 12 hours)
+
+        # Log a warning to notify the user that fallback is being used
+        ems_log(
+            hass,
+            _LOGGER,
+            logging.WARNING,
+            f"Detailed PV forecast attributes not found on {state_obj.entity_id}. "
+            f"Using hardcoded solar bell curve to distribute daily total of {total_val} kWh."
+        )
+
+        # Distribute total_val over daylight hours using a solar bell curve (sum of weights = 1.0)
+        solar_weights = {
+            6: 0.02, 7: 0.05, 8: 0.08, 9: 0.10, 10: 0.12, 11: 0.13,
+            12: 0.13, 13: 0.12, 14: 0.10, 15: 0.07, 16: 0.04, 17: 0.02,
+            18: 0.02,
+        }
         if total_val > 0.0:
-            for h in range(7, 19):
-                hourly_baselines[h] = round(total_val / 12.0, 4)
-        return hourly_baselines
+            for h in range(24):
+                weight = solar_weights.get(h, 0.0)
+                hourly_baselines[h] = round(total_val * weight, 4)
+        return hourly_baselines, True
 
     analysis = attrs.get("analysis", {})
     intervals = []
@@ -87,21 +113,31 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> list[float]:
         intervals = analysis.get("intervals", [])
 
     # Group slots by local hour
-    slot_duration = 0.5
-    if len(detailed_forecast) > 0:
-        # Try to calculate duration from the first two periods
+    # Default slot duration: 1.0 for hourly forecast, 0.5 for half-hourly
+    slot_duration = 1.0 if matched_attr == "detailedHourly" else 0.5
+    if len(forecast_list) > 0:
+        # Try to calculate duration dynamically from the first two periods
         try:
-            start_str = detailed_forecast[0].get("period_start")
-            if len(detailed_forecast) > 1:
-                next_start_str = detailed_forecast[1].get("period_start")
-                start_dt = dt_util.parse_datetime(start_str)
-                next_dt = dt_util.parse_datetime(next_start_str)
-                if start_dt and next_dt:
-                    slot_duration = abs((next_dt - start_dt).total_seconds()) / 3600.0
+            first_slot = forecast_list[0]
+            if isinstance(first_slot, dict):
+                start_str = first_slot.get("period_start")
+                if len(forecast_list) > 1:
+                    second_slot = forecast_list[1]
+                    if isinstance(second_slot, dict):
+                        next_start_str = second_slot.get("period_start")
+                        start_dt = dt_util.parse_datetime(start_str)
+                        next_dt = dt_util.parse_datetime(next_start_str)
+                        if start_dt and next_dt:
+                            calculated_duration = abs((next_dt - start_dt).total_seconds()) / 3600.0
+                            if calculated_duration > 0.0:
+                                slot_duration = calculated_duration
         except Exception:
             pass
 
-    for i, slot in enumerate(detailed_forecast):
+    for i, slot in enumerate(forecast_list):
+        if not isinstance(slot, dict):
+            continue
+
         period_start = slot.get("period_start")
         if not period_start:
             continue
@@ -113,9 +149,9 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> list[float]:
             local_dt = dt_util.as_local(parsed_dt)
             local_hour = local_dt.hour
         except Exception:
-            if len(detailed_forecast) == 48:
+            if len(forecast_list) == 48:
                 local_hour = min(23, max(0, i // 2))
-            elif len(detailed_forecast) == 24:
+            elif len(forecast_list) == 24:
                 local_hour = min(23, max(0, i))
             else:
                 continue
@@ -126,7 +162,7 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> list[float]:
             pv_estimate = 0.0
 
         try:
-            pv_estimate10 = float(slot.get("pv_estimate10", slot.get("estimate10", 0.0)))
+            pv_estimate10 = float(slot.get("pv_estimate10", slot.get("estimate10", pv_estimate)))
         except (ValueError, TypeError):
             pv_estimate10 = 0.0
 
@@ -150,7 +186,8 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> list[float]:
         if 0 <= local_hour < 24:
             hourly_baselines[local_hour] += baseline_kwh
 
-    return [round(val, 4) for val in hourly_baselines]
+    return [round(val, 4) for val in hourly_baselines], False
+
 
 
 async def async_setup_entry(
@@ -664,6 +701,7 @@ class EmsPvForecastTodaySensor(SensorEntity):
         self._baselines: list[float] = [0.0] * 24
         self._forecasts: list[float] = [0.0] * 24
         self._factor: float = 1.0
+        self._is_fallback: bool = False
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -690,6 +728,7 @@ class EmsPvForecastTodaySensor(SensorEntity):
             "factor_today": self._factor,
             "source_sensor": self._source_forecast_id,
             "actual_sensor": self._actual_generation_id,
+            "forecast_type": "fallback" if self._is_fallback else "forecast",
         }
 
     async def async_added_to_hass(self) -> None:
@@ -728,7 +767,7 @@ class EmsPvForecastTodaySensor(SensorEntity):
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Source PV forecast sensor {self._source_forecast_id} not found!")
             return
 
-        self._baselines = parse_solcast_forecast(self.hass, state_obj)
+        self._baselines, self._is_fallback = parse_solcast_forecast(self.hass, state_obj)
 
         # Get actual today generation
         actual_today = 0.0
@@ -807,6 +846,7 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
         # Internal state
         self._state: float = 0.0
         self._baselines: list[float] = [0.0] * 24
+        self._is_fallback: bool = False
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -831,6 +871,7 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
             "hourly_forecast": self._baselines,  # Same as baseline for tomorrow
             "baseline": self._baselines,
             "source_sensor": self._source_forecast_id,
+            "forecast_type": "fallback" if self._is_fallback else "forecast",
         }
 
     async def async_added_to_hass(self) -> None:
@@ -860,7 +901,7 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Source PV forecast sensor {self._source_forecast_id} not found!")
             return
 
-        self._baselines = parse_solcast_forecast(self.hass, state_obj)
+        self._baselines, self._is_fallback = parse_solcast_forecast(self.hass, state_obj)
         self._state = round(sum(self._baselines), 4)
 
         ems_log(
