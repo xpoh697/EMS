@@ -14,9 +14,17 @@ const MODE_COLORS = {
   'discharge': '#ff4500',          // Orange-Red (Discharging)
   'self_consume': '#4caf50',       // Green (Self Consume)
   'idle': '#808080',               // Grey (Idle)
+  'idel': '#808080',               // Grey (Idle fallback)
   'pv_charge': '#00bcd4',          // Cyan (PV charging battery)
   'paid_import': '#ffb300',        // Amber (Paid Import)
   'solar_export': '#ff8c00',       // Orange (Solar Export)
+  'sale_pv': '#4caf50',            // Green (Normal)
+  'sale_pv_no_bat': '#ff8c00',     // Orange (Export PV)
+  'sale_pv_bat': '#ff4500',        // Orange-Red (Discharge / export bat)
+  'buy': '#2196f3',                // Blue (Charge / buy)
+  'stop_sale': '#f44336',          // Red (Stop Sale)
+  'bat_emergency': '#e91e63',      // Pink (Emergency)
+  'no_pv_sale_no_bat': '#607d8b',  // Blue-Grey (Wait)
   'default': '#727272'
 };
 
@@ -25,17 +33,34 @@ const MODE_ICONS = {
   'discharge': 'mdi:battery-arrow-up',
   'self_consume': 'mdi:home-lightning-bolt',
   'idle': 'mdi:sleep',
+  'idel': 'mdi:sleep',
   'pv_charge': 'mdi:solar-power-variant',
   'paid_import': 'mdi:transmission-tower',
   'solar_export': 'mdi:solar-power',
+  'sale_pv': 'mdi:solar-power-variant',
+  'sale_pv_no_bat': 'mdi:solar-power',
+  'sale_pv_bat': 'mdi:battery-arrow-up',
+  'buy': 'mdi:battery-arrow-down',
+  'stop_sale': 'mdi:home-lightning-bolt',
+  'bat_emergency': 'mdi:alert-octagon',
+  'no_pv_sale_no_bat': 'mdi:clock-outline',
   'default': 'mdi:help-circle'
 };
 
 const MODE_LABELS = {
+  'sale_pv': 'Normal',
+  'sale_pv_no_bat': 'Export PV',
+  'sale_pv_bat': 'Discharge',
+  'buy': 'Charge',
+  'stop_sale': 'Stop Sale',
+  'bat_emergency': 'Emergency',
+  'no_pv_sale_no_bat': 'Wait',
+  'idel': 'Idle',
+  'idle': 'Idle',
+  // keep fallbacks for raw DP modes
   'grid_charge': 'Grid Charge',
   'discharge': 'Discharge',
   'self_consume': 'Self Consume',
-  'idle': 'Idle',
   'pv_charge': 'PV Charge',
   'paid_import': 'Paid Import',
   'solar_export': 'Solar Export'
@@ -617,7 +642,7 @@ class EmsSchedulerCard extends HTMLElement {
                        attrs.overrides[slot.date] && 
                        attrs.overrides[slot.date][slot.hour] !== undefined;
       hourlyData[key] = {
-        mode: slot.action,
+        mode: slot.physical_mode || slot.action || 'idle',
         buy_price: slot.buy_price,
         sell_price: slot.sell_price,
         gen: slot.pv_kwh,
@@ -850,7 +875,7 @@ class EmsSchedulerCard extends HTMLElement {
     
     const reasonEl = this.shadowRoot.getElementById('info-reason');
     if (reasonEl) {
-      reasonEl.innerText = isManual ? 'Manual Override' : 'Optimized by DP Engine';
+      reasonEl.innerText = isManual ? 'Manual Override' : (slot.mapping_reason || 'Optimized by DP Engine');
     }
 
     const forecastEl = this.shadowRoot.getElementById('info-forecast-soc');
