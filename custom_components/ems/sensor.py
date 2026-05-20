@@ -951,6 +951,7 @@ class EmsDpSensor(SensorEntity):
         # Throttling/hysteresis helpers
         self._last_calc_time: datetime | None = None
         self._last_calc_soc: float | None = None
+        self._reactive_debounce_time: datetime | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -971,6 +972,7 @@ class EmsDpSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
+        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
         return {
             "charge_hours": self._charge_hours,
             "discharge_hours": self._discharge_hours,
@@ -982,6 +984,7 @@ class EmsDpSensor(SensorEntity):
             "stats": self._stats,
             "error": self._error_msg,
             "last_calculation": self._last_calc_time.isoformat() if self._last_calc_time else None,
+            "overrides": storage.get_overrides(),
         }
 
     async def async_added_to_hass(self) -> None:
@@ -989,7 +992,7 @@ class EmsDpSensor(SensorEntity):
         await super().async_added_to_hass()
 
         # Initial calculation
-        await self.async_update_strategy()
+        await self.async_update_strategy(force=True)
 
         # Recalculate on every hour transition
         self.async_on_remove(
@@ -1012,7 +1015,7 @@ class EmsDpSensor(SensorEntity):
                 )
             )
 
-        # Listen for tariff, forecast and load profile changes
+        # Listen for tariff and forecast changes
         generic_listeners = []
         if price_buy_sensor_id:
             generic_listeners.append(price_buy_sensor_id)
@@ -1020,8 +1023,7 @@ class EmsDpSensor(SensorEntity):
             generic_listeners.append(price_sell_sensor_id)
         generic_listeners.extend([
             "sensor.pv_forecast_today",
-            "sensor.pv_forecast_tomorrow",
-            "sensor.load_consumption"
+            "sensor.pv_forecast_tomorrow"
         ])
 
         self.async_on_remove(
@@ -1030,10 +1032,22 @@ class EmsDpSensor(SensorEntity):
             )
         )
 
+        # Listen for manual override updates
+        self.async_on_remove(
+            self.hass.bus.async_listen("ems_schedule_updated", self._async_force_update)
+        )
+
     async def _async_hourly_trigger(self, datetime_now) -> None:
         """Handle hourly recalculation."""
         ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: hourly recalculation triggered")
-        await self.async_update_strategy()
+        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
+        storage.cleanup_old_dates(dt_util.now().strftime("%Y-%m-%d"))
+        await self.async_update_strategy(force=True)
+
+    async def _async_force_update(self, event) -> None:
+        """Force recalculation when overrides change."""
+        ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP trigger: manual overrides changed")
+        await self.async_update_strategy(force=True)
 
     async def _async_generic_listener(self, event) -> None:
         """Handle changes in generic sensors immediately."""
@@ -1069,8 +1083,23 @@ class EmsDpSensor(SensorEntity):
             )
             await self.async_update_strategy()
 
-    async def async_update_strategy(self) -> None:
+    async def async_update_strategy(self, force: bool = False) -> None:
         """Gather states and call DP execution inside executor pool."""
+        now = dt_util.now()
+
+        # Debounce/cooldown check
+        if not force and self._reactive_debounce_time is not None:
+            cooldown_rem = (now - self._reactive_debounce_time).total_seconds()
+            if cooldown_rem < 60:
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.DEBUG,
+                    f"EMS DP: update debounced (cooldown: {60 - cooldown_rem:.1f}s remaining)"
+                )
+                return
+
+        self._reactive_debounce_time = now
         config = self._entry.data
         options = self._entry.options
 
@@ -1104,6 +1133,15 @@ class EmsDpSensor(SensorEntity):
                 except (ValueError, TypeError):
                     pass
 
+        # Apply SOC hysteresis
+        effective_soc = soc
+        if (
+            self._state not in ("discharge", "self_consume")
+            and self._last_calc_soc is not None
+            and soc < min_bat_soc + self.SOC_HYSTERESIS
+        ):
+            effective_soc = min(soc, min_bat_soc)
+
         cycle_cost = self.hass.data.get(DOMAIN, {}).get("bat_degradation_per_kwh", 0.0)
 
         buy_prices_today = self.hass.data.get(DOMAIN, {}).get("price_buy_today", [0.0] * 24)
@@ -1136,9 +1174,12 @@ class EmsDpSensor(SensorEntity):
             tomorrow_key = day_keys[tomorrow_weekday]
             consumption_tomorrow = load_state.attributes.get(tomorrow_key, [fallback_consumption] * 24)
 
+        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
+        overrides = storage.get_overrides()
+
         result = await self.hass.async_add_executor_job(
             self._calculate_strategy_sync,
-            soc,
+            effective_soc,
             capacity,
             min_bat_soc,
             bat_max_power,
@@ -1153,6 +1194,7 @@ class EmsDpSensor(SensorEntity):
             consumption_today,
             consumption_tomorrow,
             fallback_consumption,
+            overrides,
         )
 
         self._state = result.get("current_action", "idle")
@@ -1188,6 +1230,7 @@ class EmsDpSensor(SensorEntity):
         consumption_today: list[float],
         consumption_tomorrow: list[float],
         fallback_consumption: float,
+        overrides: dict[str, dict[str, str]],
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
         from .dp_engine import run_unified_dp, DPConfig
@@ -1200,6 +1243,7 @@ class EmsDpSensor(SensorEntity):
         slots = []
         # Today
         for h in range(current_hour, 24):
+            override = overrides.get(today_str, {}).get(str(h))
             slots.append({
                 "date": today_str,
                 "hour": h,
@@ -1207,11 +1251,13 @@ class EmsDpSensor(SensorEntity):
                 "sell_price": sell_prices_today[h] if h < len(sell_prices_today) else 0.0,
                 "pv_kwh": pv_today[h] if h < len(pv_today) else 0.0,
                 "consumption_kwh": consumption_today[h] if h < len(consumption_today) else fallback_consumption,
+                "override": override,
             })
         # Tomorrow
         has_tomorrow_prices = any(buy_prices_tomorrow) or any(sell_prices_tomorrow)
         if has_tomorrow_prices:
             for h in range(24):
+                override = overrides.get(tomorrow_str, {}).get(str(h))
                 slots.append({
                     "date": tomorrow_str,
                     "hour": h,
@@ -1219,6 +1265,7 @@ class EmsDpSensor(SensorEntity):
                     "sell_price": sell_prices_tomorrow[h] if h < len(sell_prices_tomorrow) else 0.0,
                     "pv_kwh": pv_tomorrow[h] if h < len(pv_tomorrow) else 0.0,
                     "consumption_kwh": consumption_tomorrow[h] if h < len(consumption_tomorrow) else fallback_consumption,
+                    "override": override,
                 })
 
         usable_capacity = capacity * (1 - min_bat_soc / 100)

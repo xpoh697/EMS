@@ -114,26 +114,31 @@ def run_unified_dp(
         consumption_kwh = slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0)
         pv_surplus = max(0.0, pv_kwh - consumption_kwh)
         pv_deficit = max(0.0, consumption_kwh - pv_kwh)
+        override = slot.get("override")
 
         for state_idx, current_value in enumerate(dp[slot_idx - 1]):
             if current_value == neg_inf:
                 continue
 
             usable_energy = state_idx * energy_step
+            state_updated = False
 
             def _update(nsi: int, rwd: float, act: int, amt: float) -> None:
+                nonlocal state_updated
                 val = current_value + rwd
                 if val > dp[slot_idx][nsi]:
                     dp[slot_idx][nsi] = val
                     prev_state[slot_idx][nsi] = state_idx
                     prev_type[slot_idx][nsi] = act
                     prev_amount[slot_idx][nsi] = amt
+                state_updated = True
 
             # === SOL: battery idle, PV surplus -> grid ===
-            _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
+            if not override or override == "idle":
+                _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
 
             # === DIS: discharge battery to grid ===
-            if sell_price > config.min_sell_price and sell_price > 0:
+            if (not override or override == "discharge") and sell_price > config.min_sell_price and sell_price > 0:
                 max_exp = min(config.battery_max_discharge_power, usable_energy)
                 for ei in range(1, int(round(max_exp / energy_step)) + 1):
                     exp = ei * energy_step
@@ -144,7 +149,7 @@ def run_unified_dp(
 
             # === PV_CHARGE: PV surplus -> battery, overflow -> grid ===
             avail_cap = usable_capacity - usable_energy
-            if pv_surplus > 0 and avail_cap >= energy_step:
+            if (not override or override == "grid_charge") and pv_surplus > 0 and avail_cap >= energy_step:
                 max_pvc = min(pv_surplus, avail_cap, config.battery_max_charge_power)
                 for ci in range(1, int(max_pvc / energy_step) + 1):
                     chg = ci * energy_step
@@ -154,7 +159,7 @@ def run_unified_dp(
                     _update(nsi, reward, ACT_PV_CHARGE, chg)
 
             # === GRID_CHARGE: charge battery from grid ===
-            if avail_cap >= energy_step:
+            if (not override or override == "grid_charge") and avail_cap >= energy_step:
                 max_gc = min(config.battery_max_charge_power, avail_cap)
                 for ci in range(1, int(max_gc / energy_step) + 1):
                     chg = ci * energy_step
@@ -162,7 +167,7 @@ def run_unified_dp(
                     _update(nsi, sell_price * pv_surplus - buy_price * (chg + pv_deficit) - cycle_cost * chg, ACT_GRID_CHARGE, chg)
 
             # === SELF_CONSUME: battery covers consumption deficit ===
-            if pv_deficit >= energy_step and usable_energy >= energy_step:
+            if (not override or override == "self_consume") and pv_deficit >= energy_step and usable_energy >= energy_step:
                 max_sc = min(usable_energy, pv_deficit)
                 for sci in range(1, int(round(max_sc / energy_step)) + 1):
                     sc = sci * energy_step
@@ -171,8 +176,13 @@ def run_unified_dp(
                     _update(nsi, -buy_price * remaining_deficit, ACT_SELF_CONSUME, sc)
 
             # === PAID_IMPORT: home from grid, PV curtailed, battery untouched ===
-            if buy_price < 0 and consumption_kwh >= energy_step:
+            if not override and buy_price < 0 and consumption_kwh >= energy_step:
                 _update(state_idx, -buy_price * consumption_kwh, ACT_PAID_IMPORT, 0.0)
+
+            # Fallback to SOL if override was blocked by physical limits (e.g. Empty battery discharging)
+            if not state_updated:
+                _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
+
 
     # Terminal value with reserve enforcement
     min_end_idx = max(0, int(round(min_end_usable / energy_step)))
