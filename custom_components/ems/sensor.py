@@ -56,6 +56,7 @@ from .const import (
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
+    SOC_HYSTERESIS,
 )
 from .utils import ems_log, calculate_battery_degradation, parse_price_sensor
 from .dp_engine import run_unified_dp, DPConfig
@@ -948,6 +949,7 @@ class EmsDpSensor(SensorEntity):
     """EMS Dynamic Programming Strategy Sensor."""
 
     _attr_has_entity_name = True
+    SOC_HYSTERESIS = SOC_HYSTERESIS
 
     def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
         """Initialize the DP strategy sensor."""
