@@ -9,7 +9,7 @@
  *   title: Бойлер   (опционально)
  */
 
-const CARD_VERSION = "1.4.2";
+const CARD_VERSION = "1.4.3";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -244,6 +244,24 @@ const STYLES = `
 const fmt1 = (v) => (v != null && !isNaN(+v)) ? (+v).toFixed(1) : "–";
 const stateOn = (s) => s && s.state === "on";
 
+const getTempColor = (t) => {
+  if (t == null || isNaN(parseFloat(t))) return "var(--primary-text-color)";
+  const temp = parseFloat(t);
+  if (temp <= 20) return "rgb(33, 150, 243)";
+  if (temp >= 45) {
+    const pct = Math.min(1.0, (temp - 45) / (80 - 45));
+    const r = Math.round(244 + (168 - 244) * pct);
+    const g = Math.round(67 + (16 - 67) * pct);
+    const b = Math.round(54 + (50 - 54) * pct);
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+  const pct = (temp - 20) / (45 - 20);
+  const r = Math.round(33 + (244 - 33) * pct);
+  const g = Math.round(150 + (67 - 150) * pct);
+  const b = Math.round(243 + (54 - 243) * pct);
+  return `rgb(${r}, ${g}, ${b})`;
+};
+
 // ── Card ───────────────────────────────────────────────────────────────────
 class BoilerCard extends HTMLElement {
 
@@ -472,13 +490,13 @@ class BoilerCard extends HTMLElement {
     // ── Gas tile ──────────────────────────────────────────────────────────
     const gasTemp   = gasS?.attributes?.current_temperature ?? gasS?.state ?? "–";
     const gasTarget = gasS?.attributes?.temperature ?? "–";
-    this._setTile(this._tGas, "st-on", fmt1(gasTemp) + " °C", "цель: " + fmt1(gasTarget) + " °C");
+    this._setTile(this._tGas, "st-on", fmt1(gasTemp) + " °C", "цель: " + fmt1(gasTarget) + " °C", gasTemp);
 
     // ── Elec tile ─────────────────────────────────────────────────────────
     const elecTemp = fmt1(tmpS?.state);
     const elecPowVal = (powS?.state != null && !isNaN(+powS.state)) ? Math.round(+powS.state) : "–";
     const elecCls  = elecS?.state === "on" ? "st-on" : "st-off";
-    this._setTile(this._tElec, elecCls, elecTemp + " °C", "мощность: " + elecPowVal + " Вт");
+    this._setTile(this._tElec, elecCls, elecTemp + " °C", "мощность: " + elecPowVal + " Вт", tmpS?.state);
 
     // ── Pump & Valve Schema Elements ──────────────────────────────────────
     const pumpOn   = stateOn(pumpS);
@@ -552,10 +570,12 @@ class BoilerCard extends HTMLElement {
   }
 
   // ── DOM helpers ──────────────────────────────────────────────────────────
-  _setTile(tile, stClass, value, sub) {
+  _setTile(tile, stClass, value, sub, rawTemp) {
     // Remove all st-* classes, add the new one
     tile.className = "tile " + stClass;
-    tile.querySelector(".t-value").textContent = value;
+    const valueEl = tile.querySelector(".t-value");
+    valueEl.textContent = value;
+    valueEl.style.color = getTempColor(rawTemp);
     tile.querySelector(".t-sub").textContent   = sub;
   }
 
