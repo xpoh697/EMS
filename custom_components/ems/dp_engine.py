@@ -164,8 +164,7 @@ def run_unified_dp(
             # === DIS: discharge battery to grid ===
             if (override_action == "discharge" or (not config.disable_discharge and not override_action)) and sell_price >= config.min_discharge_price and sell_price > 0:
                 max_exp = min(config.battery_max_discharge_power, usable_energy)
-                min_exp_val = config.min_energy_to_discharge
-                min_ei = max(1, int(round(min_exp_val / energy_step)))
+                min_ei = 1
                 max_ei = int(round(max_exp / energy_step))
                 for ei in range(min_ei, max_ei + 1):
                     exp = ei * energy_step
@@ -270,6 +269,22 @@ def run_unified_dp(
 
     for slot, act, amount in zip(slots, types_by_slot, amounts_by_slot, strict=False):
         start_usable = usable_energy
+
+        # Apply post-processing filter for small grid discharges (exporters)
+        if act == ACT_DIS and amount > 0:
+            total_consumption = slot["consumption_kwh"] + slot.get("ev_kwh", 0.0)
+            home_deficit = max(0.0, total_consumption - slot["pv_kwh"])
+            battery_to_home = min(amount, home_deficit)
+            battery_to_grid = max(0.0, amount - battery_to_home)
+
+            if battery_to_grid > 0.0 and battery_to_grid < config.min_energy_to_discharge:
+                # If grid export portion is below limit, switch to self-consumption or idle
+                amount = round(battery_to_home, 2)
+                if amount > 0.0:
+                    act = ACT_SELF_CONSUME
+                else:
+                    act = ACT_SOL
+                    amount = 0.0
 
         if act == ACT_DIS and amount > 0:
             end_usable = usable_energy - amount
