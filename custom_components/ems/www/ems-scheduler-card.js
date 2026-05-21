@@ -251,22 +251,18 @@ class EmsSchedulerCard extends HTMLElement {
         }
 
         .hour-bar.manual-glow .bar-content {
-          border-style: dashed !important;
+          border-style: solid !important;
           border-width: 2px !important;
-          box-shadow: 0 0 12px rgba(255, 255, 255, 0.15) !important;
+          box-shadow: inset 0 0 12px rgba(255, 255, 255, 0.3) !important;
         }
 
         .manual-indicator {
           position: absolute;
-          top: -6px;
-          right: -6px;
-          color: #ffeb3b;
-          --mdc-icon-size: 16px;
-          background: rgba(0,0,0,0.65);
-          border-radius: 50%;
-          padding: 3px;
+          top: 3px;
+          right: 5px;
+          color: #ffffff;
+          --mdc-icon-size: 14px;
           z-index: 20;
-          box-shadow: 0 0 6px rgba(255,235,59,0.6);
           pointer-events: none;
         }
         .h-icon { --mdc-icon-size: 18px; margin-top: 5px; margin-bottom: 1px; }
