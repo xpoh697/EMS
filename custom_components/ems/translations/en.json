@@ -145,6 +145,12 @@
       },
       "min_sell_price": {
         "name": "Minimum sell price"
+      },
+      "min_discharge_price": {
+        "name": "Min discharge price"
+      },
+      "min_energy_to_discharge": {
+        "name": "Min energy to discharge"
       }
     }
   }

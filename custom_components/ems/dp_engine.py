@@ -24,6 +24,7 @@ class DPConfig:
     """Configuration parameters needed by the DP engine."""
 
     min_sell_price: float
+    min_discharge_price: float
     battery_max_discharge_power: float
     battery_max_charge_power: float
     battery_min_soc: int
@@ -161,9 +162,12 @@ def run_unified_dp(
                 _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
 
             # === DIS: discharge battery to grid ===
-            if (override_action == "discharge" or (not config.disable_discharge and not override_action)) and sell_price > config.min_sell_price and sell_price > 0:
+            if (override_action == "discharge" or (not config.disable_discharge and not override_action)) and sell_price >= config.min_discharge_price and sell_price > 0:
                 max_exp = min(config.battery_max_discharge_power, usable_energy)
-                for ei in range(1, int(round(max_exp / energy_step)) + 1):
+                min_exp_val = config.min_energy_to_discharge
+                min_ei = max(1, int(round(min_exp_val / energy_step)))
+                max_ei = int(round(max_exp / energy_step))
+                for ei in range(min_ei, max_ei + 1):
                     exp = ei * energy_step
                     nsi = min(max_energy_idx, max(0, int(round((usable_energy - exp) / energy_step))))
                     to_grid = max(0.0, exp + pv_kwh - consumption_kwh)

@@ -26,6 +26,7 @@ class EmsScheduleStorage:
         self.last_override_change: str | None = None
         self.min_bat_soc: float = 20.0
         self.min_sell_price: float = 0.0
+        self.min_discharge_price: float = 0.0
         self.min_energy_to_discharge: float = 0.0
 
     async def async_load(self, entry: ConfigEntry | None = None) -> None:
@@ -35,14 +36,17 @@ class EmsScheduleStorage:
         # Fallbacks from config entry if available (migration of settings)
         fallback_min_bat_soc = 20.0
         fallback_min_sell_price = 0.0
+        fallback_min_discharge_price = 0.0
         fallback_min_energy_to_discharge = 0.0
         if entry is not None:
             from .const import (
                 CONF_MIN_BAT_SOC,
                 CONF_MIN_SELL_PRICE,
+                CONF_MIN_DISCHARGE_PRICE,
                 CONF_MIN_ENERGY_TO_DISCHARGE,
                 DEFAULT_MIN_BAT_SOC,
                 DEFAULT_MIN_SELL_PRICE,
+                DEFAULT_MIN_DISCHARGE_PRICE,
                 DEFAULT_MIN_ENERGY_TO_DISCHARGE,
             )
             fallback_min_bat_soc = entry.options.get(
@@ -50,6 +54,9 @@ class EmsScheduleStorage:
             )
             fallback_min_sell_price = entry.options.get(
                 CONF_MIN_SELL_PRICE, entry.data.get(CONF_MIN_SELL_PRICE, DEFAULT_MIN_SELL_PRICE)
+            )
+            fallback_min_discharge_price = entry.options.get(
+                CONF_MIN_DISCHARGE_PRICE, entry.data.get(CONF_MIN_DISCHARGE_PRICE, DEFAULT_MIN_DISCHARGE_PRICE)
             )
             fallback_min_energy_to_discharge = entry.options.get(
                 CONF_MIN_ENERGY_TO_DISCHARGE, entry.data.get(CONF_MIN_ENERGY_TO_DISCHARGE, DEFAULT_MIN_ENERGY_TO_DISCHARGE)
@@ -60,12 +67,17 @@ class EmsScheduleStorage:
             self.last_override_change = None
             self.min_bat_soc = fallback_min_bat_soc
             self.min_sell_price = fallback_min_sell_price
+            self.min_discharge_price = fallback_min_discharge_price
             self.min_energy_to_discharge = fallback_min_energy_to_discharge
         else:
             self._overrides = data.get("overrides", {})
             self.last_override_change = data.get("last_override_change")
             self.min_bat_soc = data.get("min_bat_soc", fallback_min_bat_soc)
             self.min_sell_price = data.get("min_sell_price", fallback_min_sell_price)
+            try:
+                self.min_discharge_price = float(data.get("min_discharge_price", fallback_min_discharge_price))
+            except (ValueError, TypeError):
+                self.min_discharge_price = fallback_min_discharge_price
             self.min_energy_to_discharge = data.get("min_energy_to_discharge", fallback_min_energy_to_discharge)
         _LOGGER.debug(
             "EMS Schedule Storage loaded: %d dates with overrides for entry %s",
@@ -80,6 +92,7 @@ class EmsScheduleStorage:
             "last_override_change": self.last_override_change,
             "min_bat_soc": self.min_bat_soc,
             "min_sell_price": self.min_sell_price,
+            "min_discharge_price": self.min_discharge_price,
             "min_energy_to_discharge": self.min_energy_to_discharge,
         })
 

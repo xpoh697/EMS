@@ -85,13 +85,15 @@ def map_dp_to_physical(
     sell_price: float,
     pv_kwh: float,
     min_sell_price: float,
+    min_discharge_price: float,
     cheap_ahead: bool,
 ) -> tuple[str | None, str]:
     """Map a DP algorithmic action to a physical inverter mode, returning (mode, reason)."""
     price_cond = "sell_price > min_sell_price" if sell_price > min_sell_price else "sell_price <= min_sell_price"
+    discharge_price_cond = "sell_price >= min_discharge_price" if sell_price >= min_discharge_price else "sell_price < min_discharge_price"
     pv_cond = "pv_kwh > 0.01" if pv_kwh > 0.01 else "pv_kwh <= 0.01"
     cheap_cond = f"cheap_ahead={cheap_ahead}"
-    reason = f"{price_cond} | {pv_cond} | {cheap_cond}"
+    reason = f"{price_cond} | {discharge_price_cond} | {pv_cond} | {cheap_cond}"
 
     if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency"):
         return action, "direct_mapping"
@@ -101,7 +103,7 @@ def map_dp_to_physical(
         return "idle", f"idle_bypass | {reason}"
 
     if action == "discharge":
-        if sell_price > min_sell_price:
+        if sell_price >= min_discharge_price:
             return "sale_pv_bat", reason
         return "stop_sale", reason
 
@@ -1307,6 +1309,7 @@ class EmsDpSensor(SensorEntity):
 
             fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
             min_sell_price = storage.min_sell_price
+            min_discharge_price = storage.min_discharge_price
             bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
             min_bat_soc = storage.min_bat_soc
 
@@ -1443,6 +1446,7 @@ class EmsDpSensor(SensorEntity):
                 min_bat_soc,
                 bat_max_power,
                 min_sell_price,
+                min_discharge_price,
                 storage.min_energy_to_discharge,
                 cycle_cost,
                 buy_prices_today,
@@ -1506,6 +1510,7 @@ class EmsDpSensor(SensorEntity):
         min_bat_soc: float,
         bat_max_power: float,
         min_sell_price: float,
+        min_discharge_price: float,
         min_energy_to_discharge: float,
         cycle_cost: float,
         buy_prices_today: list[float],
@@ -1571,6 +1576,7 @@ class EmsDpSensor(SensorEntity):
 
         dp_config = DPConfig(
             min_sell_price=min_sell_price,
+            min_discharge_price=min_discharge_price,
             battery_max_discharge_power=bat_max_power / 1000.0,
             battery_max_charge_power=bat_max_power / 1000.0,
             battery_min_soc=int(min_bat_soc),
@@ -1684,6 +1690,7 @@ class EmsDpSensor(SensorEntity):
                 sell_price=slot["sell_price"],
                 pv_kwh=slot["pv_kwh"],
                 min_sell_price=min_sell_price,
+                min_discharge_price=min_discharge_price,
                 cheap_ahead=cheap_ahead,
             )
 
@@ -1779,6 +1786,7 @@ class EmsSchedulerSensor(SensorEntity):
                 sell_price=sell_price,
                 pv_kwh=pv_kwh,
                 min_sell_price=storage.min_sell_price,
+                min_discharge_price=storage.min_discharge_price,
                 cheap_ahead=cheap_ahead,
             )
             return physical_mode
@@ -1956,6 +1964,7 @@ class EmsSchedulerSensor(SensorEntity):
                 sell_price=sell_price,
                 pv_kwh=pv_kwh,
                 min_sell_price=storage.min_sell_price,
+                min_discharge_price=storage.min_discharge_price,
                 cheap_ahead=cheap_ahead,
             )
             mapping_reason = f"override: {active_override} | {override_reason}"

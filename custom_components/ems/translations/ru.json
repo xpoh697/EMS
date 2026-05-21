@@ -145,6 +145,12 @@
       },
       "min_sell_price": {
         "name": "Минимальная цена продажи"
+      },
+      "min_discharge_price": {
+        "name": "Минимальная цена разряда"
+      },
+      "min_energy_to_discharge": {
+        "name": "Минимальная энергия для разряда"
       }
     }
   }

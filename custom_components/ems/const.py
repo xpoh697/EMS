@@ -23,6 +23,7 @@ CONF_PRICE_BUY_SENSOR = "price_buy_sensor"
 CONF_PRICE_SELL_SENSOR = "price_sell_sensor"
 CONF_SYSTEM_COST = "system_cost"
 CONF_MIN_SELL_PRICE = "min_sell_price"
+CONF_MIN_DISCHARGE_PRICE = "min_discharge_price"
 CONF_MIN_ENERGY_TO_DISCHARGE = "min_energy_to_discharge"
 
 # Battery optimization configuration keys
@@ -43,6 +44,7 @@ DEFAULT_DEBUG = False
 
 DEFAULT_SYSTEM_COST = 0.0
 DEFAULT_MIN_SELL_PRICE = 0.0
+DEFAULT_MIN_DISCHARGE_PRICE = 0.0
 DEFAULT_MIN_ENERGY_TO_DISCHARGE = 0.0
 DEFAULT_BAT_PRICE = 0.0
 DEFAULT_BAT_CYCLES = 6000

@@ -24,6 +24,7 @@ async def async_setup_entry(
     async_add_entities([
         EmsMinBatSocNumber(entry.entry_id, entry.title, storage),
         EmsMinSellPriceNumber(entry.entry_id, entry.title, storage),
+        EmsMinDischargePriceNumber(entry.entry_id, entry.title, storage),
         EmsMinEnergyToDischargeNumber(entry.entry_id, entry.title, storage),
     ])
 
@@ -159,6 +160,51 @@ class EmsMinEnergyToDischargeNumber(NumberEntity):
         """Update the minimum energy to discharge value."""
         clamped_value = float(max(self.native_min_value, min(value, self.native_max_value)))
         self._storage.min_energy_to_discharge = clamped_value
+        await self._storage.async_save()
+        self.async_write_ha_state()
+        # Fire event to trigger immediate DP recalculation
+        self.hass.bus.async_fire("ems_schedule_updated")
+
+
+class EmsMinDischargePriceNumber(NumberEntity):
+    """EMS Minimum Discharge Price number entity."""
+
+    _attr_has_entity_name = True
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 10.0
+    _attr_native_step = 0.01
+    _attr_mode = NumberMode.BOX
+    _attr_icon = "mdi:currency-usd"
+
+    def __init__(self, entry_id: str, device_name: str, storage: Any) -> None:
+        """Initialize the number entity."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._storage = storage
+        self._attr_name = "Min Discharge Price"
+        self._attr_unique_id = f"{entry_id}_min_discharge_price"
+        self.entity_id = "number.ems_min_discharge_price"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        """Return the current minimum discharge price."""
+        return self._storage.min_discharge_price
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the minimum discharge price value."""
+        clamped_value = float(max(self.native_min_value, min(value, self.native_max_value)))
+        self._storage.min_discharge_price = clamped_value
         await self._storage.async_save()
         self.async_write_ha_state()
         # Fire event to trigger immediate DP recalculation

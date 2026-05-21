@@ -278,11 +278,20 @@ class BoilerController:
             elapsed = 0
             success = True
             try:
+                # Начальный статус перед циклом
+                cal_data["status_desc"] = "Нагрев 5 мин"
+                cal_data["time_left"] = duration
+                self.calibration_sensor.set_calibration_state(phase, cal_data)
+
                 while elapsed < duration:
                     await asyncio.sleep(10)
                     elapsed += 10
                     t_curr = self._get_system_temp()
                     _LOGGER.info("[%s] Heating in progress... Elapsed: %ss/%ss, Current Temp: %s°C", phase, elapsed, duration, t_curr)
+                    
+                    cal_data["status_desc"] = "Нагрев 5 мин"
+                    cal_data["time_left"] = max(0, duration - elapsed)
+                    self.calibration_sensor.set_calibration_state(phase, cal_data)
             except Exception as ex:
                 _LOGGER.error("Error during calibration heating loop: %s", ex)
                 success = False
@@ -295,6 +304,11 @@ class BoilerController:
             timeout = 5400  # 90 минут в секундах
             elapsed = 0
             try:
+                # Начальный статус перед циклом
+                cal_data["status_desc"] = f"Нагрев до {t_target:.1f}°C"
+                cal_data["time_left"] = None
+                self.calibration_sensor.set_calibration_state(phase, cal_data)
+
                 while elapsed < timeout:
                     await asyncio.sleep(10)
                     elapsed += 10
@@ -305,6 +319,10 @@ class BoilerController:
                         t_curr = self._get_elec_temp()
                         
                     _LOGGER.info("[%s] Heating in progress... Elapsed: %ss/%ss, Current Temp: %s°C, Target Temp: %s°C", phase, elapsed, timeout, t_curr, t_target)
+                    
+                    cal_data["status_desc"] = f"Нагрев до {t_target:.1f}°C"
+                    cal_data["time_left"] = None
+                    self.calibration_sensor.set_calibration_state(phase, cal_data)
                     
                     if t_curr is not None and t_curr >= t_target:
                         success = True
@@ -318,20 +336,37 @@ class BoilerController:
 
         if not success:
             _LOGGER.error("Calibration phase %s aborted: safety timeout (90 min) reached or heating failed.", phase)
-            self.calibration_sensor.set_calibration_state("idle")
+            self.calibration_sensor.set_calibration_state("idle", {})
             return
 
-        # 4. Запуск 3-минутного периода стабилизации температуры (тепловая инерция)
-        _LOGGER.info("Heating target reached. Starting 3-minute stabilization delay...")
+        # 4. Стабилизация: 10 минут (600 секунд) для всех фаз
+        stab_duration = 600.0
+        stab_minutes = int(stab_duration // 60)
+        _LOGGER.info("Heating target reached. Starting %s-minute stabilization delay...", stab_minutes)
         cal_data["heating_ended_at"] = dt_util.now().isoformat()
+        cal_data["stabilization_duration"] = stab_duration
+        cal_data["status_desc"] = f"Стабилизация {stab_minutes} мин"
+        cal_data["time_left"] = int(stab_duration)
         self.calibration_sensor.set_calibration_state(phase, cal_data)
-        
-        await self._async_stabilize_and_finalize(phase, cal_data, 180.0)
+
+        await self._async_stabilize_and_finalize(phase, cal_data, stab_duration)
 
     async def _async_stabilize_and_finalize(self, phase: str, cal_data: dict, wait_seconds: float):
         """Ожидание стабилизации температуры и финальный расчет коэффициентов."""
         if wait_seconds > 0:
-            await asyncio.sleep(wait_seconds)
+            elapsed = 0
+            total_wait = wait_seconds
+            original_duration = float(cal_data.get("stabilization_duration", 600.0))
+            stab_minutes = int(original_duration // 60)
+            
+            while elapsed < total_wait:
+                cal_data["status_desc"] = f"Стабилизация {stab_minutes} мин"
+                cal_data["time_left"] = int(max(0, total_wait - elapsed))
+                self.calibration_sensor.set_calibration_state(phase, cal_data)
+                
+                step = min(10.0, total_wait - elapsed)
+                await asyncio.sleep(step)
+                elapsed += step
             
         _LOGGER.info("Stabilization delay completed. Performing mathematical final calculations...")
 
@@ -346,7 +381,7 @@ class BoilerController:
         
         if t_end is None:
             _LOGGER.error("Calibration final calculation failed: unable to read final stabilized temperature.")
-            self.calibration_sensor.set_calibration_state("idle")
+            self.calibration_sensor.set_calibration_state("idle", {})
             return
             
         date_str = dt_util.now().date().isoformat()
@@ -357,13 +392,13 @@ class BoilerController:
             v_end = self._get_gas_meter()
             if v_end is None or v_start is None:
                 _LOGGER.error("Gas calibration final calculations failed: gas meter state is unavailable.")
-                self.calibration_sensor.set_calibration_state("idle")
+                self.calibration_sensor.set_calibration_state("idle", {})
                 return
                 
             delta_v = v_end - v_start
             if delta_v <= 0.001:
                 _LOGGER.error("Gas calibration failed: delta gas meter too small (%s m³). Div by zero safety override triggered.", delta_v)
-                self.calibration_sensor.set_calibration_state("idle")
+                self.calibration_sensor.set_calibration_state("idle", {})
                 return
                 
             efficiency = round((t_end - t_start) / delta_v, 4)
@@ -375,13 +410,13 @@ class BoilerController:
             e_end = self._get_elec_energy()
             if e_end is None or e_start is None:
                 _LOGGER.error("Electric calibration final calculations failed: energy meter state is unavailable.")
-                self.calibration_sensor.set_calibration_state("idle")
+                self.calibration_sensor.set_calibration_state("idle", {})
                 return
                 
             delta_e = e_end - e_start
             if delta_e <= 0.001:
                 _LOGGER.error("Electric calibration failed: delta energy too small (%s kWh). Div by zero safety override triggered.", delta_e)
-                self.calibration_sensor.set_calibration_state("idle")
+                self.calibration_sensor.set_calibration_state("idle", {})
                 return
                 
             efficiency = round((t_end - t_start) / delta_e, 4)
@@ -390,7 +425,7 @@ class BoilerController:
 
         # Сохранение результатов и сброс в IDLE
         self.calibration_sensor.update_calibration_coefficient(phase, update_data)
-        self.calibration_sensor.set_calibration_state("idle")
+        self.calibration_sensor.set_calibration_state("idle", {})
         _LOGGER.info("Calibration phase %s completed successfully.", phase)
 
     async def async_recover_calibration(self, calibration_data: dict):
@@ -406,7 +441,8 @@ class BoilerController:
             ended_dt = dt_util.parse_datetime(calibration_data["heating_ended_at"])
             if ended_dt:
                 elapsed = (dt_util.now() - ended_dt).total_seconds()
-                remaining = 180.0 - elapsed
+                stab_total = float(calibration_data.get("stabilization_duration", 600.0))
+                remaining = stab_total - elapsed
                 if remaining > 0:
                     _LOGGER.info("Resuming stabilization delay for phase %s: %s seconds remaining.", phase, round(remaining, 1))
                     self.hass.async_create_task(self._async_stabilize_and_finalize(phase, calibration_data, remaining))
@@ -419,7 +455,7 @@ class BoilerController:
         # Если HA перезапустился прямо в процессе нагрева - аварийно выключаем нагреватели ради безопасности
         _LOGGER.warning("Home Assistant restarted during heating phase of %s. Emergency safety cooldown triggered.", phase)
         await self._actuate_heating(phase, turn_on=False)
-        self.calibration_sensor.set_calibration_state("idle")
+        self.calibration_sensor.set_calibration_state("idle", {})
 
     # =========================================================================
     # Helpers: Readings and Actuation
