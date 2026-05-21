@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.1.7"
+VERSION = "0.2.8"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -34,6 +34,7 @@ CONF_BAT_CUR_POWER_ENTITY = "bat_cur_power_entity"
 CONF_BAT_SOC_ENTITY = "bat_soc_entity"
 CONF_BAT_VOLTAGE = "bat_voltage"
 CONF_MIN_BAT_SOC = "min_bat_soc"
+CONF_BAT_SOC_EMERGENCY = "bat_soc_emergency"
 
 # Default values
 DEFAULT_STATISTICS_DAYS = 14
@@ -47,6 +48,7 @@ DEFAULT_BAT_PRICE = 0.0
 DEFAULT_BAT_CYCLES = 6000
 DEFAULT_BAT_MAX_POWER = 3000.0
 DEFAULT_MIN_BAT_SOC = 20.0
+DEFAULT_BAT_SOC_EMERGENCY = 10.0
 
 # Hysteresis configuration
 SOC_HYSTERESIS = 2.0

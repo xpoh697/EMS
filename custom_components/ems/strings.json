@@ -70,7 +70,25 @@
           "bat_cur_power_entity": "Battery current power sensor (entity)",
           "bat_soc_entity": "Battery State of Charge (SOC) sensor (entity)",
           "bat_voltage": "Battery voltage sensor (entity)",
-          "min_bat_soc": "Minimum battery SOC (%)"
+          "min_bat_soc": "Minimum battery SOC (%)",
+          "bat_soc_emergency": "Emergency battery SOC threshold (%)"
+        }
+      },
+      "boiler": {
+        "title": "Boiler Configuration",
+        "description": "Configure the physical entities for the Boiler interlock system.",
+        "data": {
+          "gas_boiler_climate": "Gas Boiler Climate Entity",
+          "gas_boiler_meter": "Gas Meter Sensor (m³)",
+          "elec_boiler_heater": "Electric Boiler Switch",
+          "elec_boiler_power": "Electric Boiler Power Sensor (kW/W)",
+          "elec_boiler_energy": "Electric Boiler Energy Sensor (kWh)",
+          "elec_boiler_temp": "Electric Boiler Temperature Sensor",
+          "circulation_pump": "Circulation Pump Switch",
+          "bypass_valve": "Bypass Valve Switch (On=Open, Off=Closed)",
+          "gas_boiler_capacity": "Gas Boiler Capacity (L)",
+          "elec_boiler_capacity": "Electric Boiler Capacity (L)",
+          "gas_cost_m3": "Cost per 1 m³ of gas"
         }
       }
     }
@@ -81,7 +99,8 @@
         "basic_settings": "Basic settings",
         "pv_forecast": "PV Forecast",
         "financial": "Financial",
-        "battery_optimization": "Battery optimization"
+        "battery_optimization": "Battery optimization",
+        "boiler": "Boiler Configuration"
       }
     }
   },
@@ -96,7 +115,8 @@
           "pv_charge": "PV Charging",
           "grid_charge": "Grid Charging",
           "self_consume": "Self Consumption",
-          "paid_import": "Paid Import"
+          "paid_import": "Paid Import",
+          "bat_emergency": "Battery Emergency"
         }
       },
       "scheduler": {
@@ -108,7 +128,8 @@
           "pv_charge": "PV Charging",
           "grid_charge": "Grid Charging",
           "self_consume": "Self Consumption",
-          "paid_import": "Paid Import"
+          "paid_import": "Paid Import",
+          "bat_emergency": "Battery Emergency"
         }
       },
       "today_profit": {

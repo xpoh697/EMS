@@ -32,6 +32,7 @@ from .const import (
     CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
     CONF_MIN_BAT_SOC,
+    CONF_BAT_SOC_EMERGENCY,
     DEFAULT_STATISTICS_DAYS,
     DEFAULT_FALLBACK_CONSUMPTION,
     DEFAULT_DEBUG,
@@ -41,6 +42,7 @@ from .const import (
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
+    DEFAULT_BAT_SOC_EMERGENCY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,6 +91,8 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_financial()
             if category == "battery_optimization":
                 return await self.async_step_battery_optimization()
+            if category == "boiler":
+                return await self.async_step_boiler()
 
         return self.async_show_form(
             step_id="init",
@@ -100,6 +104,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                             {"value": "pv_forecast", "label": "PV Forecast"},
                             {"value": "financial", "label": "Financial"},
                             {"value": "battery_optimization", "label": "Battery optimization"},
+                            {"value": "boiler", "label": "Boiler Configuration"},
                         ],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
@@ -308,6 +313,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         bat_price = self._user_input.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE)
         bat_cycles = self._user_input.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES)
         bat_max_power = self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)
+        bat_soc_emergency = self._user_input.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY)
 
         schema_dict = {}
 
@@ -380,7 +386,73 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 selector.EntitySelectorConfig(domain="sensor")
             )
 
+        # 6. Bat SOC Emergency level
+        schema_dict[vol.Required(CONF_BAT_SOC_EMERGENCY, default=bat_soc_emergency)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                max=100.0,
+                step=0.1,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
         return self.async_show_form(
             step_id="battery_optimization",
+            data_schema=vol.Schema(schema_dict)
+        )
+
+    async def async_step_boiler(self, user_input=None):
+        """Handle the Boiler settings step."""
+        if user_input is not None:
+            self._user_input.update(user_input)
+            return self.async_create_entry(title="", data=self._user_input)
+
+        def get_value(key):
+            val = self._user_input.get(key)
+            if not val or val == "undefined":
+                return None
+            return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
+
+        schema_dict = {}
+
+        keys_domains = {
+            "gas_boiler_climate": "climate",
+            "gas_boiler_meter": "sensor",
+            "elec_boiler_heater": "switch",
+            "elec_boiler_power": "sensor",
+            "elec_boiler_energy": "sensor",
+            "elec_boiler_temp": "sensor",
+            "circulation_pump": "switch",
+            "bypass_valve": ["switch", "input_boolean"]
+        }
+
+        for key, domain in keys_domains.items():
+            val = get_value(key)
+            if val:
+                schema_dict[vol.Required(key, default=val)] = selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain=domain)
+                )
+            else:
+                schema_dict[vol.Required(key)] = selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain=domain)
+                )
+
+        # Безопасное получение числовых значений
+        gas_cap = self._user_input.get("gas_boiler_capacity", 100)
+        elec_cap = self._user_input.get("elec_boiler_capacity", 100)
+        gas_cost = self._user_input.get("gas_cost_m3", 0.0)
+
+        schema_dict[vol.Required("gas_boiler_capacity", default=gas_cap)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, step=1, mode=selector.NumberSelectorMode.BOX)
+        )
+        schema_dict[vol.Required("elec_boiler_capacity", default=elec_cap)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, step=1, mode=selector.NumberSelectorMode.BOX)
+        )
+        schema_dict[vol.Required("gas_cost_m3", default=gas_cost)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0.0, step=0.01, mode=selector.NumberSelectorMode.BOX)
+        )
+
+        return self.async_show_form(
+            step_id="boiler",
             data_schema=vol.Schema(schema_dict)
         )

@@ -4,7 +4,7 @@
  */
 
 console.info(
-  "%c EMS SCHEDULER %c v0.1.0 ",
+  "%c EMS SCHEDULER %c v0.2.0 ",
   "color: white; background: #2196f3; font-weight: bold; border-radius: 4px 0 0 4px; padding: 2px 6px;",
   "color: white; background: #28a745; font-weight: bold; border-radius: 0 4px 4px 0; padding: 2px 6px;"
 );
@@ -222,6 +222,7 @@ class EmsSchedulerCard extends HTMLElement {
           cursor: pointer;
           position: relative;
           background: transparent;
+          overflow: visible;
         }
         .bar-content {
           padding: 2px 1px;
@@ -250,18 +251,23 @@ class EmsSchedulerCard extends HTMLElement {
         }
 
         .hour-bar.manual-glow .bar-content {
-          box-shadow: inset 0 0 8px rgba(255, 255, 255, 0.4);
+          border-style: dashed !important;
+          border-width: 2px !important;
+          box-shadow: 0 0 12px rgba(255, 255, 255, 0.15) !important;
         }
 
         .manual-indicator {
           position: absolute;
-          top: 4px;
-          right: 4px;
-          color: white;
-          --mdc-icon-size: 14px;
-          background: rgba(0,0,0,0.3);
+          top: -6px;
+          right: -6px;
+          color: #ffeb3b;
+          --mdc-icon-size: 16px;
+          background: rgba(0,0,0,0.65);
           border-radius: 50%;
-          padding: 2px;
+          padding: 3px;
+          z-index: 20;
+          box-shadow: 0 0 6px rgba(255,235,59,0.6);
+          pointer-events: none;
         }
         .h-icon { --mdc-icon-size: 18px; margin-top: 5px; margin-bottom: 1px; }
         .h-time { font-size: 0.85rem; font-weight: 900; color: white; line-height: 1; }
@@ -431,6 +437,38 @@ class EmsSchedulerCard extends HTMLElement {
         .btn-clear { background: rgba(255,255,255,0.05); color: #ff5252; border: 1px solid rgba(255,82,82,0.2); }
         .btn:active { transform: scale(0.95); }
         .version-tag { position: absolute; bottom: 4px; right: 8px; font-size: 0.5rem; opacity: 0.3; color: var(--secondary-text); pointer-events: none; }
+
+        /* SOC Slider styles */
+        .soc-slider-group {
+          display: none;
+          flex-direction: column;
+          gap: 10px;
+          margin-top: 4px;
+          padding: 14px 16px;
+          background: rgba(255,255,255,0.04);
+          border: 1px solid rgba(255,255,255,0.1);
+          border-radius: 16px;
+          animation: fadeIn 0.2s ease;
+        }
+        .soc-slider-group.visible { display: flex; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+        .soc-slider-label-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        .soc-slider-val {
+          font-size: 1.1rem;
+          font-weight: 900;
+          color: #03a9f4;
+          font-family: 'Roboto Mono', monospace;
+        }
+        input[type=range] {
+          width: 100%;
+          accent-color: #03a9f4;
+          cursor: pointer;
+          height: 6px;
+        }
       </style>
       <ha-card>
         <div class="header">
@@ -514,12 +552,24 @@ class EmsSchedulerCard extends HTMLElement {
               </div>
               <div class="form-group">
                 <span class="form-label">Mode Override</span>
-                <select id="modal-mode">
+                <select id="modal-mode" onchange="this.getRootNode().host._onModeChange(this.value)">
                   <option value="grid_charge">Grid Charge</option>
                   <option value="discharge">Discharge</option>
                   <option value="self_consume">Self Consume</option>
                   <option value="idle">Idle</option>
+                  <option value="sale_pv">Normal</option>
+                  <option value="sale_pv_no_bat">PV Export</option>
+                  <option value="stop_sale">Stop Sale</option>
+                  <option value="no_pv_sale_no_bat">Wait</option>
                 </select>
+                <div class="soc-slider-group" id="soc-slider-group">
+                  <div class="soc-slider-label-row">
+                    <span class="form-label" style="margin:0">Target SOC</span>
+                    <span class="soc-slider-val" id="soc-slider-val">80%</span>
+                  </div>
+                  <input type="range" id="soc-slider" min="20" max="100" step="0.5" value="80"
+                    oninput="this.getRootNode().host._onSocSliderInput(this.value)">
+                </div>
               </div>
             </div>
             <div class="modal-footer">
@@ -528,7 +578,7 @@ class EmsSchedulerCard extends HTMLElement {
             </div>
           </div>
         </div>
-        <div id="v-tag" class="version-tag">v0.1.0</div>
+        <div id="v-tag" class="version-tag">v0.2.0</div>
       </ha-card>
     `;
     this._initialized = true;
@@ -638,11 +688,17 @@ class EmsSchedulerCard extends HTMLElement {
     const hourlyData = {};
     plan.forEach(slot => {
       const key = `${slot.date} ${String(slot.hour).padStart(2, '0')}:00`;
-      const isManual = attrs.overrides && 
-                       attrs.overrides[slot.date] && 
-                       attrs.overrides[slot.date][slot.hour] !== undefined;
+      const isManual = attrs.overrides &&
+                       attrs.overrides[slot.date] &&
+                       (attrs.overrides[slot.date][slot.hour] !== undefined ||
+                        attrs.overrides[slot.date][String(slot.hour)] !== undefined);
+      const rawOverride = isManual
+        ? (attrs.overrides[slot.date][String(slot.hour)] ?? attrs.overrides[slot.date][slot.hour])
+        : null;
+      // Parse override action part (may be "action:target_soc")
+      const overrideAction = rawOverride ? rawOverride.split(':')[0] : null;
       hourlyData[key] = {
-        mode: slot.physical_mode || slot.action || 'idle',
+        mode: overrideAction || slot.physical_mode || slot.action || 'idle',
         buy_price: slot.buy_price,
         sell_price: slot.sell_price,
         gen: slot.pv_kwh,
@@ -721,7 +777,11 @@ class EmsSchedulerCard extends HTMLElement {
     };
 
     const currentKeysStr = sortedKeys.join(',');
-    if (container._lastKeys !== currentKeysStr) {
+    const overridesStr = JSON.stringify(
+      Object.fromEntries(sortedKeys.map(k => [k, data[k].mode + (data[k].is_manual ? '*' : '')]))
+    );
+    const fullCacheKey = currentKeysStr + '|' + overridesStr;
+    if (container._lastKeys !== fullCacheKey) {
       let html = '';
       let currentDayLabel = '';
       sortedKeys.forEach((key, idx) => {
@@ -750,12 +810,12 @@ class EmsSchedulerCard extends HTMLElement {
 
         html += `
           <div class="hour-bar ${idx === 0 ? 'active' : ''} ${isManual ? 'manual-glow' : ''}" data-ts="${key}" data-mode="${hourData.mode}" id="hb-${key.replace(/[: ]/g, '-')}">
+            ${isManual ? `<ha-icon class="manual-indicator" icon="mdi:hand-back-right"></ha-icon>` : ''}
             <div class="bar-content" style="border-color: ${modeColor}; background-color: ${bgColor};">
               <div class="h-soc-top-left" style="color: ${socInfo.color};">
                 <ha-icon icon="${socInfo.icon}"></ha-icon>
                 <span class="h-soc-percent">${socInfo.percent ? socInfo.percent + '%' : ''}</span>
               </div>
-              ${isManual ? `<ha-icon class="manual-indicator" icon="mdi:hand-back-right"></ha-icon>` : ''}
               <ha-icon class="h-icon" style="color:${modeColor}" icon="${MODE_ICONS[hourData.mode] || MODE_ICONS.default}"></ha-icon>
               <span class="h-time">${key.split(' ')[1]}</span>
               <div class="h-prices">
@@ -769,7 +829,7 @@ class EmsSchedulerCard extends HTMLElement {
       });
       if (html !== '') html += '</div>';
       container.innerHTML = html;
-      container._lastKeys = currentKeysStr;
+      container._lastKeys = fullCacheKey;
 
       container.querySelectorAll('.hour-bar').forEach(bar => {
         bar.addEventListener('click', () => this._openModal(bar.getAttribute('data-ts'), bar.getAttribute('data-mode')));
@@ -788,8 +848,8 @@ class EmsSchedulerCard extends HTMLElement {
           if (!bar.querySelector('.manual-indicator')) {
             const ind = document.createElement('ha-icon');
             ind.className = 'manual-indicator';
-            ind.icon = 'mdi:hand-back-right';
-            content.appendChild(ind);
+            ind.setAttribute('icon', 'mdi:hand-back-right');
+            bar.appendChild(ind);
           }
         } else {
           bar.classList.remove('manual-glow');
@@ -810,7 +870,7 @@ class EmsSchedulerCard extends HTMLElement {
         }
         if (icon) {
           icon.style.color = modeColor;
-          icon.icon = MODE_ICONS[hourData.mode] || MODE_ICONS.default;
+          icon.setAttribute('icon', MODE_ICONS[hourData.mode] || MODE_ICONS.default);
         }
         if (modeLabel) {
           modeLabel.style.color = modeColor;
@@ -852,10 +912,40 @@ class EmsSchedulerCard extends HTMLElement {
     this.shadowRoot.getElementById('modal-title').innerText = timestamp;
     
     const overrides = attrs.overrides || {};
-    const isManual = overrides[dateStr] && overrides[dateStr][hourVal] !== undefined;
-    const activeOverride = isManual ? overrides[dateStr][hourVal] : slot.action;
-    
-    this.shadowRoot.getElementById('modal-mode').value = activeOverride;
+    const isManual = overrides[dateStr] &&
+                     (overrides[dateStr][hourVal] !== undefined || overrides[dateStr][String(hourVal)] !== undefined);
+    const rawOverride = isManual ?
+                       (overrides[dateStr][hourVal] !== undefined ? overrides[dateStr][hourVal] : overrides[dateStr][String(hourVal)]) :
+                       null;
+    // Parse override: may be "action:target_soc"
+    const overrideParts = rawOverride ? rawOverride.split(':', 2) : null;
+    const activeOverrideAction = overrideParts ? overrideParts[0] : slot.action;
+    const activeOverrideSoc = (overrideParts && overrideParts.length > 1) ? parseFloat(overrideParts[1]) : null;
+
+    this.shadowRoot.getElementById('modal-mode').value = activeOverrideAction;
+
+    // Get min SOC from number.ems_min_bat_soc entity
+    const minSocEntity = this._hass.states['number.ems_min_bat_soc'];
+    const minSocVal = minSocEntity ? (parseFloat(minSocEntity.state) || 20.0) : 20.0;
+
+    // Pre-set slider
+    const slider = this.shadowRoot.getElementById('soc-slider');
+    const sliderGroup = this.shadowRoot.getElementById('soc-slider-group');
+    const sliderVal = this.shadowRoot.getElementById('soc-slider-val');
+    if (slider) {
+      slider.min = minSocVal;
+      const defaultSoc = activeOverrideSoc !== null ? activeOverrideSoc : 80.0;
+      slider.value = Math.max(minSocVal, Math.min(100, defaultSoc));
+      if (sliderVal) sliderVal.innerText = parseFloat(slider.value).toFixed(1) + '%';
+    }
+    // Show/hide slider based on current mode
+    if (sliderGroup) {
+      if (activeOverrideAction === 'grid_charge' || activeOverrideAction === 'discharge') {
+        sliderGroup.classList.add('visible');
+      } else {
+        sliderGroup.classList.remove('visible');
+      }
+    }
 
     const currency = attrs.unit_of_measurement || 'PLN';
 
@@ -913,17 +1003,42 @@ class EmsSchedulerCard extends HTMLElement {
     const dateStr = parts[0];
     const hourVal = parseInt(parts[1].split(':')[0], 10);
 
+    const serviceData = {
+      date: dateStr,
+      hour: hourVal,
+      action: action
+    };
+
+    // Include target_soc for grid_charge / discharge
+    if (action === 'grid_charge' || action === 'discharge') {
+      const slider = this.shadowRoot.getElementById('soc-slider');
+      if (slider) {
+        serviceData.target_soc = parseFloat(slider.value);
+      }
+    }
+
     try {
-      await this._hass.callService('ems', 'set_manual_override', {
-        date: dateStr,
-        hour: hourVal,
-        action: action
-      });
+      await this._hass.callService('ems', 'set_manual_override', serviceData);
       this._closeModal();
     } catch (e) {
       console.error('[EmsCard] Set override failed', e);
       alert('Failed to set override: ' + e.message);
     }
+  }
+
+  _onModeChange(value) {
+    const sliderGroup = this.shadowRoot.getElementById('soc-slider-group');
+    if (!sliderGroup) return;
+    if (value === 'grid_charge' || value === 'discharge') {
+      sliderGroup.classList.add('visible');
+    } else {
+      sliderGroup.classList.remove('visible');
+    }
+  }
+
+  _onSocSliderInput(value) {
+    const sliderVal = this.shadowRoot.getElementById('soc-slider-val');
+    if (sliderVal) sliderVal.innerText = parseFloat(value).toFixed(1) + '%';
   }
 
   _handleMoreInfo(entityId) {

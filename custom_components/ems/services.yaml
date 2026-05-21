@@ -1,0 +1,97 @@
+set_manual_override:
+  name: Set manual override
+  description: Sets a manual operating mode/override for a specific date and hour slot.
+  fields:
+    date:
+      name: Date
+      description: Target date in YYYY-MM-DD format (defaults to current date).
+      required: false
+      example: "2026-05-20"
+      selector:
+        text:
+    hour:
+      name: Hour
+      description: Target hour slot (0 to 23).
+      required: true
+      example: 14
+      selector:
+        number:
+          min: 0
+          max: 23
+          step: 1
+          mode: box
+    action:
+      name: Action
+      description: The manual action to schedule for this slot.
+      required: true
+      example: self_consume
+      selector:
+        select:
+          options:
+            - label: Grid charge
+              value: grid_charge
+            - label: Discharge
+              value: discharge
+            - label: Self consume
+              value: self_consume
+            - label: Idle
+              value: idle
+    target_soc:
+      name: Target SOC
+      description: Target State of Charge (%) for grid_charge or discharge actions. If omitted or exceeds battery power limits, it will be auto-calculated.
+      required: false
+      example: 80
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.5
+          mode: slider
+
+clear_manual_override:
+  name: Clear manual override
+  description: Clears a manual operating mode/override for a specific date and hour slot.
+  fields:
+    date:
+      name: Date
+      description: Target date in YYYY-MM-DD format (defaults to current date).
+      required: false
+      example: "2026-05-20"
+      selector:
+        text:
+    hour:
+      name: Hour
+      description: Target hour slot (0 to 23).
+      required: true
+      example: 14
+      selector:
+        number:
+          min: 0
+          max: 23
+          step: 1
+          mode: box
+
+clear_all_overrides:
+  name: Clear all overrides
+  description: Clears all manual operating mode/override entries from storage.
+
+start_calibration:
+  name: Start Boiler Calibration
+  description: Starts one of the manually triggered heating calibration phases to determine efficiency.
+  fields:
+    phase:
+      name: Calibration Phase
+      description: The active calibration phase to start.
+      required: true
+      example: gas_only
+      selector:
+        select:
+          options:
+            - label: Gas heating only
+              value: gas_only
+            - label: Gas heating with circulation pump
+              value: gas_with_pump
+            - label: Electric heating only
+              value: elec_only
+            - label: Electric heating with circulation pump
+              value: elec_with_pump

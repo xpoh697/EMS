@@ -85,7 +85,8 @@ class EmsScheduleStorage:
 
     def get_overrides(self) -> dict[str, dict[str, str]]:
         """Return all manual overrides."""
-        return self._overrides
+        import copy
+        return copy.deepcopy(self._overrides)
 
     def get_hour_override(self, date_str: str, hour: int) -> str | None:
         """Get override action for a specific hour."""
@@ -128,3 +129,73 @@ class EmsScheduleStorage:
         if dates_to_remove:
             self.hass.async_create_task(self.async_save())
             _LOGGER.debug("EMS Cleaned up old overrides: %s", dates_to_remove)
+
+
+# ---------------------------------------------------------------------------
+# Calibration coefficient persistent storage
+# ---------------------------------------------------------------------------
+
+CALIBRATION_STORAGE_VERSION = 1
+CALIBRATION_STORAGE_KEY = "ems_calibration_{entry_id}"
+
+_CALIBRATION_DEFAULTS: dict = {
+    "gas_only":       {"efficiency_c_per_m3": 0.0, "last_calibrated": None},
+    "gas_with_pump":  {"efficiency_c_per_m3": 0.0, "last_calibrated": None},
+    "elec_only":      {"efficiency_c_per_kwh": 0.0, "last_calibrated": None},
+    "elec_with_pump": {"efficiency_c_per_kwh": 0.0, "last_calibrated": None},
+    "standby_losses": {
+        "gas_hourly_loss_c": 0.0,
+        "elec_hourly_loss_c": 0.0,
+        "last_calibrated": None,
+    },
+}
+
+
+class EmsCalibrationStore:
+    """Persistent JSON storage for boiler calibration coefficients.
+
+    Uses homeassistant.helpers.storage.Store so data is written immediately
+    to disk on every update — immune to hot config-entry reloads that cause
+    RestoreSensor to return stale values.
+    """
+
+    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
+        self.hass = hass
+        self.entry_id = entry_id
+        self._store = Store(
+            hass,
+            CALIBRATION_STORAGE_VERSION,
+            CALIBRATION_STORAGE_KEY.format(entry_id=entry_id),
+        )
+        self._data: dict = {}
+
+    async def async_load(self) -> None:
+        """Load calibration coefficients from JSON file (or use defaults)."""
+        raw = await self._store.async_load()
+        import copy
+        if raw is None:
+            self._data = copy.deepcopy(_CALIBRATION_DEFAULTS)
+            _LOGGER.debug("EMS CalibrationStore: no saved data found, using defaults.")
+        else:
+            # Merge stored values into defaults so new keys are always present
+            self._data = copy.deepcopy(_CALIBRATION_DEFAULTS)
+            for key in _CALIBRATION_DEFAULTS:
+                if key in raw:
+                    self._data[key].update(raw[key])
+            _LOGGER.debug("EMS CalibrationStore loaded for entry %s.", self.entry_id)
+
+    async def async_save(self) -> None:
+        """Persist calibration coefficients to disk immediately."""
+        await self._store.async_save(self._data)
+
+    def get_all(self) -> dict:
+        """Return a shallow copy of all stored calibration data."""
+        import copy
+        return copy.deepcopy(self._data)
+
+    def update_phase(self, phase: str, data: dict) -> None:
+        """Update coefficients for a specific phase in memory (call async_save to persist)."""
+        if phase in self._data:
+            self._data[phase].update(data)
+        else:
+            _LOGGER.warning("EmsCalibrationStore: unknown phase '%s', skipping.", phase)

@@ -92,6 +92,11 @@ def parse_price_sensor(state_obj) -> tuple[list[float], list[float]]:
 
     attrs = state_obj.attributes
 
+    from datetime import timedelta
+    now = dt_util.now()
+    today_date = now.date()
+    tomorrow_date = (now + timedelta(days=1)).date()
+
     # Parse today's prices
     today_data = attrs.get("price_today")
     if isinstance(today_data, list):
@@ -105,9 +110,10 @@ def parse_price_sensor(state_obj) -> tuple[list[float], list[float]]:
                     parsed_dt = dt_util.parse_datetime(start_str)
                     if parsed_dt:
                         local_dt = dt_util.as_local(parsed_dt)
-                        hour = local_dt.hour
-                        if 0 <= hour < 24:
-                            price_today[hour] = round(float(price_val), 6)
+                        if local_dt.date() == today_date:
+                            hour = local_dt.hour
+                            if 0 <= hour < 24:
+                                price_today[hour] = round(float(price_val), 6)
                 except Exception:
                     pass
 
@@ -124,9 +130,10 @@ def parse_price_sensor(state_obj) -> tuple[list[float], list[float]]:
                     parsed_dt = dt_util.parse_datetime(start_str)
                     if parsed_dt:
                         local_dt = dt_util.as_local(parsed_dt)
-                        hour = local_dt.hour
-                        if 0 <= hour < 24:
-                            price_tomorrow[hour] = round(float(price_val), 6)
+                        if local_dt.date() == tomorrow_date:
+                            hour = local_dt.hour
+                            if 0 <= hour < 24:
+                                price_tomorrow[hour] = round(float(price_val), 6)
                 except Exception:
                     pass
 

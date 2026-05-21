@@ -4,10 +4,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from aiohttp import web
+import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.components import frontend
+from homeassistant.components import frontend, websocket_api
 from homeassistant.components.http import HomeAssistantView
 
 from .const import DOMAIN, CONF_DEBUG, VERSION
@@ -23,14 +24,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     
     # Initialize schedule storage manager
-    from .storage import EmsScheduleStorage
+    from .storage import EmsScheduleStorage, EmsCalibrationStore
     storage = EmsScheduleStorage(hass, entry.entry_id)
     await storage.async_load(entry)
 
-    # Store settings and storage in memory
+    # Initialize calibration storage manager
+    calibration_store = EmsCalibrationStore(hass, entry.entry_id)
+    await calibration_store.async_load()
+
+    # Initialize Boiler Controller
+    from .boiler_controller import BoilerController
+    boiler_config = entry.options if entry.options else entry.data
+    boiler_controller = BoilerController(hass, boiler_config)
+    await boiler_controller.async_setup()
+
+    # Store settings and storage in memory.
+    # entry.options (Options Flow) overwrites entry.data for same keys —
+    # this is intentional: boiler entity IDs live in options, not data.
     hass.data[DOMAIN][entry.entry_id] = {
         **entry.data,
+        **entry.options,          # <-- FIX: merge options so WS API finds entity IDs
         "storage": storage,
+        "calibration_store": calibration_store,
+        "boiler_controller": boiler_controller,
     }
     
     # Cache debug flag for fast utility access
@@ -56,17 +72,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .services import async_setup_services
     await async_setup_services(hass, entry)
 
+    # Register WebSocket API (once per HA start, not per entry)
+    if not hass.data[DOMAIN].get("_ws_registered"):
+        websocket_api.async_register_command(hass, ws_get_boiler_config)
+        hass.data[DOMAIN]["_ws_registered"] = True
+
     # Register options update listener to reload when settings change
     entry.async_on_unload(entry.add_update_listener(async_update_options_listener))
     
     # Forward entry setups to platforms
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "number"])
+    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "number", "select"])
     
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor", "number"])
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor", "number", "select"])
     if unload_ok:
         if entry.entry_id in hass.data.get(DOMAIN, {}):
             hass.data[DOMAIN].pop(entry.entry_id)
@@ -83,18 +104,59 @@ async def async_update_options_listener(hass: HomeAssistant, entry: ConfigEntry)
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-async def _async_register_card(hass: HomeAssistant) -> None:
-    """Register the Lovelace card with a cache-busting version query string."""
-    card_url = f"/api/{DOMAIN}/static/ems-scheduler-card.js?v={VERSION}"
+# ---------------------------------------------------------------------------
+# WebSocket API
+# ---------------------------------------------------------------------------
 
-    # Try to register as a Lovelace resource (Storage Mode)
-    registered_as_resource = await _async_register_lovelace_resource(hass, card_url)
-    if not registered_as_resource:
-        # Fallback for YAML mode
-        frontend.add_extra_js_url(hass, card_url)
-        _LOGGER.debug("Registered card via extra_js_url fallback: %s", card_url)
-    else:
-        _LOGGER.debug("Registered card via Lovelace resource: %s", card_url)
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ems/get_boiler_config",
+        vol.Optional("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_boiler_config(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Return boiler entity_ids so the JS card does not need manual YAML config."""
+    entry_id = msg.get("entry_id")
+
+    if not entry_id:
+        entries = hass.config_entries.async_entries(DOMAIN)
+        if not entries:
+            connection.send_error(msg["id"], "not_found", "No EMS integration configured")
+            return
+        entry_id = entries[0].entry_id
+
+    ems_data = hass.data.get(DOMAIN, {})
+    if entry_id not in ems_data:
+        connection.send_error(msg["id"], "not_ready", "EMS integration is still loading, try again in a moment")
+        return
+
+    config = ems_data[entry_id]
+    connection.send_result(msg["id"], {
+        "entry_id": entry_id,
+        "gas_climate":  config.get("gas_boiler_climate"),
+        "elec_heater":  config.get("elec_boiler_heater"),
+        "elec_power":   config.get("elec_boiler_power"),
+        "elec_temp":    config.get("elec_boiler_temp"),
+        "pump":         config.get("circulation_pump"),
+        "valve":        config.get("bypass_valve"),
+        "mode_select":  f"select.ems_boiler_mode",
+    })
+
+
+async def _async_register_card(hass: HomeAssistant) -> None:
+    """Register the Lovelace cards with a cache-busting version query string."""
+    cards = ["ems-scheduler-card.js", "boiler-card.js"]
+    for card_name in cards:
+        card_url = f"/api/{DOMAIN}/static/{card_name}?v={VERSION}"
+        # Try to register as a Lovelace resource (Storage Mode)
+        registered_as_resource = await _async_register_lovelace_resource(hass, card_url)
+        if not registered_as_resource:
+            # Fallback for YAML mode
+            frontend.add_extra_js_url(hass, card_url)
+            _LOGGER.debug("Registered card via extra_js_url fallback: %s", card_url)
+        else:
+            _LOGGER.debug("Registered card via Lovelace resource: %s", card_url)
 
 
 async def _async_register_lovelace_resource(hass: HomeAssistant, url: str) -> bool:
@@ -113,7 +175,9 @@ async def _async_register_lovelace_resource(hass: HomeAssistant, url: str) -> bo
     existing = None
     try:
         for item in resources.async_items():
-            if "ems-scheduler-card.js" in item.get("url", ""):
+            existing_url = item.get("url") or ""
+            base_url = url.split("?")[0]
+            if base_url in existing_url:
                 existing = item
                 break
     except Exception:
@@ -146,7 +210,7 @@ class CardStaticView(HomeAssistantView):
 
     async def get(self, request, filename: str):
         """Handle GET request for static files."""
-        if filename != "ems-scheduler-card.js":
+        if filename not in ["ems-scheduler-card.js", "boiler-card.js"]:
             return web.Response(status=404)
 
         file_path = self._www_path / filename

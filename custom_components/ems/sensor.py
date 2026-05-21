@@ -526,6 +526,14 @@ async def async_setup_entry(
             )
         )
 
+    # Always register calibration sensor
+    entities.append(
+        EmsBoilerCalibrationSensor(
+            entry.entry_id,
+            entry.title,
+        )
+    )
+
     if entities:
         async_add_entities(entities)
 
@@ -1019,6 +1027,7 @@ class EmsDpSensor(SensorEntity):
     """EMS Dynamic Programming Strategy Sensor."""
 
     _attr_has_entity_name = True
+    _attr_should_poll = False
     SOC_HYSTERESIS = SOC_HYSTERESIS
 
     def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
@@ -1352,6 +1361,26 @@ class EmsDpSensor(SensorEntity):
                     self._error_msg = "Invalid SOC value type"
                     self.async_write_ha_state()
                     return
+
+            # Check bat_emergency: if SOC is at or below emergency threshold, force bat_emergency state
+            bat_soc_emergency_val = options.get("bat_soc_emergency", config.get("bat_soc_emergency", 10.0))
+            try:
+                bat_soc_emergency_val = float(bat_soc_emergency_val)
+            except (ValueError, TypeError):
+                bat_soc_emergency_val = 10.0
+
+            if isinstance(soc, (int, float)) and soc <= bat_soc_emergency_val:
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.WARNING,
+                    f"Battery SOC {soc}% is at or below emergency threshold {bat_soc_emergency_val}%. Forcing 'bat_emergency' state."
+                )
+                self._last_calc_soc = soc  # prevent listener from getting stuck
+                self._state = "bat_emergency"
+                self._error_msg = None
+                self.async_write_ha_state()
+                return
 
             # Apply SOC hysteresis
             effective_soc = soc
@@ -1692,6 +1721,7 @@ class EmsSchedulerSensor(SensorEntity):
     """EMS Scheduler State and Overrides Sensor."""
 
     _attr_has_entity_name = True
+    _attr_should_poll = False
 
     def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
         """Initialize the scheduler sensor."""
@@ -1728,13 +1758,15 @@ class EmsSchedulerSensor(SensorEntity):
         dp_state = self.hass.states.get("sensor.dp")
 
         if active_override is not None:
+            # Parse override action (may be "action:target_soc" format)
+            active_override_action = active_override.split(":", 1)[0]
             schedule = dp_state.attributes.get("schedule", []) if dp_state is not None else []
             current_slot = schedule[0] if schedule else {}
             sell_price = current_slot.get("sell_price", 0.0)
             pv_kwh = current_slot.get("pv_kwh", 0.0)
 
             cheap_ahead = False
-            if active_override != "self_consume" and schedule:
+            if active_override_action != "self_consume" and schedule:
                 horizon_end = min(7, len(schedule))
                 for f_idx in range(1, horizon_end):
                     future_p_buy = schedule[f_idx].get("buy_price", 99.0)
@@ -1743,7 +1775,7 @@ class EmsSchedulerSensor(SensorEntity):
                         break
 
             physical_mode, _ = map_dp_to_physical(
-                action=active_override,
+                action=active_override_action,
                 sell_price=sell_price,
                 pv_kwh=pv_kwh,
                 min_sell_price=storage.min_sell_price,
@@ -1905,13 +1937,13 @@ class EmsSchedulerSensor(SensorEntity):
             mapping_reason = schedule[0].get("mapping_reason")
 
         if active_override is not None:
-            raw_mode = active_override
+            raw_mode = active_override.split(":", 1)[0]
             current_slot = schedule[0] if schedule else {}
             sell_price = current_slot.get("sell_price", 0.0)
             pv_kwh = current_slot.get("pv_kwh", 0.0)
 
             cheap_ahead = False
-            if active_override != "self_consume" and schedule:
+            if raw_mode != "self_consume" and schedule:
                 horizon_end = min(7, len(schedule))
                 for f_idx in range(1, horizon_end):
                     future_p_buy = schedule[f_idx].get("buy_price", 99.0)
@@ -1920,7 +1952,7 @@ class EmsSchedulerSensor(SensorEntity):
                         break
 
             _, override_reason = map_dp_to_physical(
-                action=active_override,
+                action=raw_mode,
                 sell_price=sell_price,
                 pv_kwh=pv_kwh,
                 min_sell_price=storage.min_sell_price,
@@ -2453,4 +2485,148 @@ class EmsRoiSensor(RestoreSensor, SensorEntity):
             self._last_day = now.day
 
         self._last_today_profit = new_profit
+        self.async_write_ha_state()
+
+
+class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
+    """EMS sensor that tracks boiler calibration status and stores calibration coefficients."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, entry_id: str, device_name: str) -> None:
+        """Initialize the calibration sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+
+        self._attr_name = "Boiler Calibration"
+        self._attr_unique_id = f"{entry_id}_boiler_calibration"
+        self.entity_id = "sensor.boiler_calibration"
+
+        # Default states
+        self._state: str = "idle"
+        self._gas_only = {"efficiency_c_per_m3": 0.0, "last_calibrated": None}
+        self._gas_with_pump = {"efficiency_c_per_m3": 0.0, "last_calibrated": None}
+        self._elec_only = {"efficiency_c_per_kwh": 0.0, "last_calibrated": None}
+        self._elec_with_pump = {"efficiency_c_per_kwh": 0.0, "last_calibrated": None}
+        self._standby_losses = {
+            "gas_hourly_loss_c": 0.0,
+            "elec_hourly_loss_c": 0.0,
+            "last_calibrated": None,
+        }
+        self._calibration_data = {}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return the current calibration phase/state."""
+        return self._state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "last_updated": dt_util.now().isoformat(),
+            "gas_only": self._gas_only,
+            "gas_with_pump": self._gas_with_pump,
+            "elec_only": self._elec_only,
+            "elec_with_pump": self._elec_with_pump,
+            "standby_losses": self._standby_losses,
+            "calibration_data": self._calibration_data,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition and restore historical states."""
+        await super().async_added_to_hass()
+
+        # Try to restore from store first
+        store = self.hass.data[DOMAIN][self._entry_id].get("calibration_store")
+        store_loaded = False
+        if store:
+            data = store.get_all()
+            # If we have some actual calibration done, load them
+            has_data = any(
+                data[k].get("last_calibrated") is not None
+                for k in ["gas_only", "gas_with_pump", "elec_only", "elec_with_pump", "standby_losses"]
+            )
+            if has_data:
+                self._gas_only = data.get("gas_only", self._gas_only)
+                self._gas_with_pump = data.get("gas_with_pump", self._gas_with_pump)
+                self._elec_only = data.get("elec_only", self._elec_only)
+                self._elec_with_pump = data.get("elec_with_pump", self._elec_with_pump)
+                self._standby_losses = data.get("standby_losses", self._standby_losses)
+                store_loaded = True
+
+        last_state = await self.async_get_last_state()
+        if last_state:
+            self._state = "idle"
+            attrs = last_state.attributes
+            if "calibration_data" in attrs:
+                self._calibration_data = attrs["calibration_data"]
+
+            # If store didn't have calibrated data, fallback to last_state (which may migrate old states)
+            if not store_loaded:
+                if "gas_only" in attrs:
+                    self._gas_only = attrs["gas_only"]
+                if "gas_with_pump" in attrs:
+                    self._gas_with_pump = attrs["gas_with_pump"]
+                if "elec_only" in attrs:
+                    self._elec_only = attrs["elec_only"]
+                if "elec_with_pump" in attrs:
+                    self._elec_with_pump = attrs["elec_with_pump"]
+                if "standby_losses" in attrs:
+                    self._standby_losses = attrs["standby_losses"]
+
+                # Populate the store so it is saved for future loads
+                if store:
+                    store.update_phase("gas_only", self._gas_only)
+                    store.update_phase("gas_with_pump", self._gas_with_pump)
+                    store.update_phase("elec_only", self._elec_only)
+                    store.update_phase("elec_with_pump", self._elec_with_pump)
+                    store.update_phase("standby_losses", self._standby_losses)
+                    self.hass.async_create_task(store.async_save())
+
+        # Register reference in controller if available
+        controller = self.hass.data[DOMAIN][self._entry_id].get("boiler_controller")
+        if controller:
+            controller.calibration_sensor = self
+            if self._calibration_data and self._calibration_data.get("phase"):
+                self.hass.async_create_task(controller.async_recover_calibration(self._calibration_data))
+
+    def update_calibration_coefficient(self, phase: str, data: dict) -> None:
+        """Update coefficients in the sensor and write state to HA."""
+        store_phase = phase
+        if phase == "gas_only":
+            self._gas_only.update(data)
+        elif phase == "gas_with_pump":
+            self._gas_with_pump.update(data)
+        elif phase == "elec_only":
+            self._elec_only.update(data)
+        elif phase == "elec_with_pump":
+            self._elec_with_pump.update(data)
+        elif phase == "overnight_loss":
+            self._standby_losses.update(data)
+            store_phase = "standby_losses"
+
+        # Update in store and persist to disk immediately
+        store = self.hass.data[DOMAIN][self._entry_id].get("calibration_store")
+        if store:
+            store.update_phase(store_phase, data)
+            self.hass.async_create_task(store.async_save())
+
+        self.async_write_ha_state()
+
+    def set_calibration_state(self, state: str, calibration_data: dict = None) -> None:
+        """Set active calibration phase and update transient data."""
+        self._state = state
+        self._calibration_data = calibration_data or {}
         self.async_write_ha_state()
