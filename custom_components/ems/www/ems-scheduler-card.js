@@ -4,7 +4,7 @@
  */
 
 console.info(
-  "%c EMS SCHEDULER %c v0.2.0 ",
+  "%c EMS SCHEDULER %c v0.3.0 ",
   "color: white; background: #2196f3; font-weight: bold; border-radius: 4px 0 0 4px; padding: 2px 6px;",
   "color: white; background: #28a745; font-weight: bold; border-radius: 0 4px 4px 0; padding: 2px 6px;"
 );
@@ -103,6 +103,9 @@ class EmsSchedulerCard extends HTMLElement {
   constructor() {
     super();
     this._initialized = false;
+    this._activeTab = 'plan';
+    this._selectedDay = 'today';
+    this._lastStatsKey = null;
   }
 
   set hass(hass) {
@@ -465,6 +468,136 @@ class EmsSchedulerCard extends HTMLElement {
           cursor: pointer;
           height: 6px;
         }
+
+        /* Tabs */
+        .tabs-row {
+          display: flex;
+          gap: 0;
+          margin-bottom: 20px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          padding-bottom: 0;
+        }
+        .tab-btn {
+          background: transparent;
+          border: none;
+          color: var(--secondary-text);
+          font-family: var(--font-family);
+          font-size: 0.95rem;
+          font-weight: 800;
+          padding: 8px 20px;
+          cursor: pointer;
+          position: relative;
+          transition: color 0.25s ease;
+          letter-spacing: 0.02em;
+        }
+        .tab-btn.active {
+          color: #03a9f4;
+        }
+        .tab-btn.active::after {
+          content: '';
+          position: absolute;
+          bottom: -1px;
+          left: 0;
+          width: 100%;
+          height: 2px;
+          background: #03a9f4;
+          box-shadow: 0 0 10px rgba(3, 169, 244, 0.8);
+          border-radius: 2px 2px 0 0;
+        }
+        .hidden { display: none !important; }
+
+        /* Stats View */
+        .stats-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 14px;
+        }
+        .stats-title {
+          font-size: 0.85rem;
+          font-weight: 900;
+          color: #4dabf5;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+        }
+        .day-select {
+          background: rgba(255, 255, 255, 0.05);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 12px;
+          padding: 6px 32px 6px 12px;
+          color: var(--primary-text);
+          font-family: var(--font-family);
+          font-size: 0.78rem;
+          font-weight: 700;
+          cursor: pointer;
+          outline: none;
+          appearance: none;
+          background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22white%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E");
+          background-repeat: no-repeat;
+          background-position: right 8px center;
+          background-size: 14px;
+          transition: border-color 0.2s;
+        }
+        .day-select:hover { border-color: rgba(255, 255, 255, 0.25); }
+        .day-select option { background: #1e1e1e; color: white; }
+        .chart-container {
+          position: relative;
+          background: rgba(255, 255, 255, 0.02);
+          border: 1px solid rgba(255, 255, 255, 0.05);
+          border-radius: 20px;
+          padding: 16px 12px 8px 4px;
+        }
+        .chart-legend {
+          display: flex;
+          gap: 16px;
+          justify-content: center;
+          margin-top: 8px;
+        }
+        .legend-item {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 0.72rem;
+          font-weight: 700;
+          color: rgba(255,255,255,0.6);
+        }
+        .legend-color {
+          width: 16px;
+          height: 6px;
+          border-radius: 3px;
+        }
+        .chart-tooltip {
+          position: absolute;
+          background: rgba(22, 22, 30, 0.97);
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 12px;
+          padding: 10px 14px;
+          pointer-events: none;
+          opacity: 0;
+          transition: opacity 0.15s ease;
+          z-index: 100;
+          font-size: 0.75rem;
+          color: white;
+          box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+          backdrop-filter: blur(6px);
+          min-width: 150px;
+        }
+        .tooltip-hour {
+          font-weight: 900;
+          margin-bottom: 5px;
+          padding-bottom: 4px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          color: #03a9f4;
+          font-size: 0.8rem;
+        }
+        .tooltip-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          margin: 3px 0;
+        }
+        .tooltip-label { opacity: 0.55; font-weight: 600; }
+        .tooltip-val { font-weight: 800; font-family: 'Roboto Mono', monospace; }
       </style>
       <ha-card>
         <div class="header">
@@ -472,27 +605,64 @@ class EmsSchedulerCard extends HTMLElement {
           <div id="status-badge" class="status-badge">AI Operational</div>
         </div>
 
-        <div class="stats-panel">
-          <div class="hero-row">
-            <div id="soc-hero" class="hero-badge" onclick="this.getRootNode().host._handleMoreInfo()">
-              <span id="soc-val" class="hero-val">--</span>
-              <span class="hero-label">Battery SOC</span>
+        <div class="tabs-row">
+          <button class="tab-btn active" id="tab-plan-btn">Plan</button>
+          <button class="tab-btn" id="tab-stats-btn">Statistics</button>
+        </div>
+
+        <!-- Plan View -->
+        <div id="plan-view">
+          <div class="stats-panel">
+            <div class="hero-row">
+              <div id="soc-hero" class="hero-badge" onclick="this.getRootNode().host._handleMoreInfo()">
+                <span id="soc-val" class="hero-val">--</span>
+                <span class="hero-label">Battery SOC</span>
+              </div>
+              <div id="profit-hero" class="hero-badge" onclick="this.getRootNode().host._handleMoreInfo(this.getAttribute('data-entity'))">
+                <span id="profit-val" class="hero-val">--</span>
+                <span id="profit-label" class="hero-label">Est. Value</span>
+              </div>
             </div>
-            <div id="profit-hero" class="hero-badge" onclick="this.getRootNode().host._handleMoreInfo(this.getAttribute('data-entity'))">
-              <span id="profit-val" class="hero-val">--</span>
-              <span id="profit-label" class="hero-label">Est. Value</span>
+            <div class="stats-grid" id="stats-container">
+              <div class="stat-card" id="dp-advice-card" onclick="this.getRootNode().host._handleMoreInfo('sensor.dp')">
+                <span class="stat-label">Degradation / Value</span>
+                <div class="stat-value" id="proj-morning">--</div>
+              </div>
             </div>
           </div>
+          <div id="timeline-container"></div>
+        </div>
 
-          <div class="stats-grid" id="stats-container">
-            <div class="stat-card" id="dp-advice-card" onclick="this.getRootNode().host._handleMoreInfo('sensor.dp')">
-              <span class="stat-label">Degradation / Value</span>
-              <div class="stat-value" id="proj-morning">--</div>
+        <!-- Statistics View -->
+        <div id="stats-view" class="hidden">
+          <div class="stats-header">
+            <span class="stats-title">Load Consumption Profile</span>
+            <select id="day-select" class="day-select">
+              <option value="today">Today / Avg Today</option>
+              <option value="monday">Monday Average</option>
+              <option value="tuesday">Tuesday Average</option>
+              <option value="wednesday">Wednesday Average</option>
+              <option value="thursday">Thursday Average</option>
+              <option value="friday">Friday Average</option>
+              <option value="saturday">Saturday Average</option>
+              <option value="sunday">Sunday Average</option>
+            </select>
+          </div>
+          <div class="chart-container">
+            <div id="chart-tooltip" class="chart-tooltip"></div>
+            <div id="chart-svg-container"></div>
+            <div class="chart-legend">
+              <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(to bottom, #03a9f4, rgba(3,169,244,0.1));"></div>
+                <span>Actual Today</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #ffe082;"></div>
+                <span>Average Profile</span>
+              </div>
             </div>
           </div>
         </div>
-
-        <div id="timeline-container"></div>
 
         <!-- Hourly Modal -->
         <div id="modal" class="modal-overlay">
@@ -574,9 +744,47 @@ class EmsSchedulerCard extends HTMLElement {
             </div>
           </div>
         </div>
-        <div id="v-tag" class="version-tag">v0.2.0</div>
+        <div id="v-tag" class="version-tag">v0.3.0</div>
       </ha-card>
     `;
+
+    // Tab switching
+    const planBtn = this.shadowRoot.getElementById('tab-plan-btn');
+    const statsBtn = this.shadowRoot.getElementById('tab-stats-btn');
+    const planView = this.shadowRoot.getElementById('plan-view');
+    const statsView = this.shadowRoot.getElementById('stats-view');
+
+    if (planBtn && statsBtn && planView && statsView) {
+      planBtn.addEventListener('click', () => {
+        this._activeTab = 'plan';
+        planBtn.classList.add('active');
+        statsBtn.classList.remove('active');
+        planView.classList.remove('hidden');
+        statsView.classList.add('hidden');
+        this._updateUI();
+      });
+      statsBtn.addEventListener('click', () => {
+        this._activeTab = 'stats';
+        statsBtn.classList.add('active');
+        planBtn.classList.remove('active');
+        statsView.classList.remove('hidden');
+        planView.classList.add('hidden');
+        this._updateUI();
+      });
+    }
+
+    // Day dropdown
+    const daySelect = this.shadowRoot.getElementById('day-select');
+    if (daySelect) {
+      daySelect.addEventListener('change', (e) => {
+        this._selectedDay = e.target.value;
+        // Reset cache key so chart redraws immediately
+        const container = this.shadowRoot.getElementById('chart-svg-container');
+        if (container) container._lastStatsKey = null;
+        this._updateUI();
+      });
+    }
+
     this._initialized = true;
   }
 
@@ -706,7 +914,11 @@ class EmsSchedulerCard extends HTMLElement {
       };
     });
 
-    this._renderTimeline(hourlyData);
+    if (this._activeTab === 'plan') {
+      this._renderTimeline(hourlyData);
+    } else if (this._activeTab === 'stats') {
+      this._drawStatsChart();
+    }
   }
 
   _updateExtraIndicators() {
@@ -890,6 +1102,164 @@ class EmsSchedulerCard extends HTMLElement {
         bar.setAttribute('data-mode', hourData.mode);
       });
     }
+  }
+
+  _drawStatsChart() {
+    if (!this._hass) return;
+
+    const consumptionEntityId = this._resolveConfigValue('consumption_entity', 'sensor.load_consumption');
+    const consumptionState = this._hass.states[consumptionEntityId];
+
+    let actual = Array(24).fill(0);
+    let average = Array(24).fill(0);
+
+    if (consumptionState && consumptionState.attributes) {
+      const attrs = consumptionState.attributes;
+      if (Array.isArray(attrs.today)) {
+        actual = attrs.today.map(v => parseFloat(v) || 0);
+      }
+      const avgKey = this._selectedDay === 'today' ? 'average_today' : `average_${this._selectedDay}`;
+      const avgData = attrs[avgKey] || attrs.average_today;
+      if (Array.isArray(avgData)) {
+        average = avgData.map(v => parseFloat(v) || 0);
+      }
+    }
+
+    // Normalize arrays to exactly 24 entries
+    while (actual.length < 24) actual.push(0);
+    actual = actual.slice(0, 24);
+    while (average.length < 24) average.push(0);
+    average = average.slice(0, 24);
+
+    const container = this.shadowRoot.getElementById('chart-svg-container');
+    if (!container) return;
+
+    // Cache key guard
+    const statsKey = [this._selectedDay, actual.join(','), average.join(',')].join('|');
+    if (container._lastStatsKey === statsKey) return;
+    container._lastStatsKey = statsKey;
+
+    // Safe max scale: never 0
+    const maxVal = Math.max(1.0, ...actual, ...average);
+
+    // Chart dimensions
+    const W = 540, H = 260;
+    const padL = 42, padR = 12, padT = 18, padB = 38;
+    const chartW = W - padL - padR;
+    const chartH = H - padT - padB;
+    const barW = Math.floor(chartW / 24) - 2;
+    const barSpacing = Math.floor(chartW / 24);
+
+    // Grid lines + Y labels
+    let gridHtml = '';
+    const gridCount = 4;
+    for (let i = 0; i <= gridCount; i++) {
+      const frac = i / gridCount;
+      const val = maxVal * frac;
+      const y = padT + chartH - chartH * frac;
+      gridHtml += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>`;
+      gridHtml += `<text x="${padL - 4}" y="${(y + 3).toFixed(1)}" fill="rgba(255,255,255,0.35)" font-size="8" text-anchor="end" font-weight="700">${val.toFixed(1)}</text>`;
+    }
+
+    // X axis labels (every 3 hours)
+    let xLabelsHtml = '';
+    for (let i = 0; i < 24; i += 3) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      xLabelsHtml += `<text x="${x.toFixed(1)}" y="${H - padB + 13}" fill="rgba(255,255,255,0.4)" font-size="8" text-anchor="middle" font-weight="700">${String(i).padStart(2,'0')}:00</text>`;
+    }
+
+    // Bars (actual today)
+    let barsHtml = '<defs><linearGradient id="bar-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#03a9f4" stop-opacity="0.85"/><stop offset="100%" stop-color="#03a9f4" stop-opacity="0.08"/></linearGradient></defs>';
+    for (let i = 0; i < 24; i++) {
+      const val = actual[i];
+      const bh = (val / maxVal) * chartH;
+      const x = padL + i * barSpacing + (barSpacing - barW) / 2;
+      const y = padT + chartH - bh;
+      if (bh > 0.5) {
+        barsHtml += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW}" height="${bh.toFixed(1)}" fill="url(#bar-grad)" rx="3" ry="3"/>`;
+      }
+    }
+
+    // Average profile line
+    let points = [];
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      const y = padT + chartH - (average[i] / maxVal) * chartH;
+      points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    const linePath = `M ${points.join(' L ')}`;
+
+    // Dot markers on average line
+    let dotsHtml = '';
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      const y = padT + chartH - (average[i] / maxVal) * chartH;
+      dotsHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="#ffe082" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
+    }
+
+    // Invisible hover zones
+    let hoverHtml = '';
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing;
+      const actVal = actual[i].toFixed(2);
+      const avgVal = average[i].toFixed(2);
+      const hourStr = String(i).padStart(2, '0') + ':00';
+      hoverHtml += `<rect class="hov" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" data-hour="${hourStr}" data-act="${actVal}" data-avg="${avgVal}" style="cursor:crosshair"/>`;
+    }
+
+    container.innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;overflow:visible;">
+        <!-- Grid -->
+        ${gridHtml}
+        <!-- X axis -->
+        <line x1="${padL}" y1="${padT + chartH}" x2="${W - padR}" y2="${padT + chartH}" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+        ${xLabelsHtml}
+        <!-- Bars -->
+        ${barsHtml}
+        <!-- Average Line glow -->
+        <filter id="line-glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        <path d="${linePath}" fill="none" stroke="#ffe082" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" filter="url(#line-glow)"/>
+        <!-- Dots -->
+        ${dotsHtml}
+        <!-- Hover Zones -->
+        ${hoverHtml}
+      </svg>
+    `;
+
+    // Tooltip logic
+    const tooltip = this.shadowRoot.getElementById('chart-tooltip');
+    if (!tooltip) return;
+    const chartContainer = this.shadowRoot.querySelector('.chart-container');
+
+    container.querySelectorAll('.hov').forEach(zone => {
+      zone.addEventListener('mousemove', (e) => {
+        const hour = zone.getAttribute('data-hour');
+        const act = zone.getAttribute('data-act');
+        const avg = zone.getAttribute('data-avg');
+        tooltip.innerHTML = `
+          <div class="tooltip-hour">${hour}</div>
+          <div class="tooltip-row">
+            <span class="tooltip-label">Actual:</span>
+            <span class="tooltip-val" style="color:#03a9f4">${act} kWh</span>
+          </div>
+          <div class="tooltip-row">
+            <span class="tooltip-label">Avg Profile:</span>
+            <span class="tooltip-val" style="color:#ffe082">${avg} kWh</span>
+          </div>
+        `;
+        if (chartContainer) {
+          const rect = chartContainer.getBoundingClientRect();
+          let left = e.clientX - rect.left + 16;
+          let top = e.clientY - rect.top - 80;
+          if (left + 160 > rect.width) left = e.clientX - rect.left - 170;
+          if (top < 0) top = e.clientY - rect.top + 16;
+          tooltip.style.left = `${left}px`;
+          tooltip.style.top = `${top}px`;
+        }
+        tooltip.style.opacity = '1';
+      });
+      zone.addEventListener('mouseleave', () => { tooltip.style.opacity = '0'; });
+    });
   }
 
   _openModal(timestamp, currentMode) {
