@@ -106,6 +106,8 @@ class EmsSchedulerCard extends HTMLElement {
     this._activeTab = 'plan';
     this._selectedDay = 'today';
     this._lastStatsKey = null;
+    this._consumptionEntityId = 'sensor.load_consumption_2'; // fallback until WS resolves
+    this._wsConfigFetched = false;
   }
 
   set hass(hass) {
@@ -113,6 +115,7 @@ class EmsSchedulerCard extends HTMLElement {
     if (!this._initialized && this.shadowRoot) {
       this._updateContent();
     } else if (this._initialized) {
+      this._fetchWsConfig();
       this._updateUI();
     }
   }
@@ -123,6 +126,30 @@ class EmsSchedulerCard extends HTMLElement {
       this.attachShadow({ mode: 'open' });
       this._initLayout();
     }
+    // Allow explicit override via YAML config
+    if (config.consumption_entity) {
+      this._consumptionEntityId = config.consumption_entity;
+      this._wsConfigFetched = true;
+    }
+  }
+
+  _fetchWsConfig() {
+    if (this._wsConfigFetched || !this._hass) return;
+    this._wsConfigFetched = true; // mark early to prevent parallel calls
+    this._hass.connection.sendMessagePromise({
+      type: 'ems/get_boiler_config'
+    }).then(result => {
+      if (result && result.consumption_entity) {
+        this._consumptionEntityId = result.consumption_entity;
+        console.info('[EmsCard] consumption_entity resolved:', this._consumptionEntityId);
+        // Reset chart cache so it redraws with the correct entity
+        const container = this.shadowRoot && this.shadowRoot.getElementById('chart-svg-container');
+        if (container) container._lastStatsKey = null;
+        if (this._activeTab === 'stats') this._drawStatsChart();
+      }
+    }).catch(err => {
+      console.warn('[EmsCard] WS config fetch failed, using fallback entity:', err);
+    });
   }
 
   _resolveConfigValue(key, defaultVal) {
@@ -1107,7 +1134,7 @@ class EmsSchedulerCard extends HTMLElement {
   _drawStatsChart() {
     if (!this._hass) return;
 
-    const consumptionEntityId = this._resolveConfigValue('consumption_entity', 'sensor.load_consumption');
+    const consumptionEntityId = this._consumptionEntityId;
     const consumptionState = this._hass.states[consumptionEntityId];
 
     let actual = Array(24).fill(0);
@@ -1115,14 +1142,27 @@ class EmsSchedulerCard extends HTMLElement {
 
     if (consumptionState && consumptionState.attributes) {
       const attrs = consumptionState.attributes;
-      if (Array.isArray(attrs.today)) {
-        actual = attrs.today.map(v => parseFloat(v) || 0);
+
+      // HA attributes can arrive as Proxy/Object — always convert to plain array
+      const toArray = (val) => {
+        if (!val) return null;
+        if (Array.isArray(val)) return val;
+        if (typeof val === 'object') return Object.values(val);
+        return null;
+      };
+
+      const todayRaw = toArray(attrs.today);
+      if (todayRaw) {
+        actual = todayRaw.map(v => parseFloat(v) || 0);
       }
+
       const avgKey = this._selectedDay === 'today' ? 'average_today' : `average_${this._selectedDay}`;
-      const avgData = attrs[avgKey] || attrs.average_today;
-      if (Array.isArray(avgData)) {
-        average = avgData.map(v => parseFloat(v) || 0);
+      const avgRaw = toArray(attrs[avgKey]) || toArray(attrs.average_today);
+      if (avgRaw) {
+        average = avgRaw.map(v => parseFloat(v) || 0);
       }
+
+      console.debug('[EmsStats] actual (first 3):', actual.slice(0, 3), 'average (first 3):', average.slice(0, 3), 'entity:', consumptionEntityId);
     }
 
     // Normalize arrays to exactly 24 entries

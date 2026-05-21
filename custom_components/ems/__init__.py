@@ -132,6 +132,12 @@ async def ws_get_boiler_config(hass: HomeAssistant, connection: websocket_api.Ac
         return
 
     config = ems_data[entry_id]
+
+    # Look up actual entity_id for the EMS load_consumption sensor via entity registry
+    from homeassistant.helpers import entity_registry as er
+    registry = er.async_get(hass)
+    consumption_entity = registry.async_get_entity_id("sensor", DOMAIN, f"{entry_id}_load_consumption")
+
     connection.send_result(msg["id"], {
         "entry_id": entry_id,
         "gas_climate":  config.get("gas_boiler_climate"),
@@ -141,6 +147,7 @@ async def ws_get_boiler_config(hass: HomeAssistant, connection: websocket_api.Ac
         "pump":         config.get("circulation_pump"),
         "valve":        config.get("bypass_valve"),
         "mode_select":  f"select.ems_boiler_mode",
+        "consumption_entity": consumption_entity or "sensor.load_consumption_2",
     })
 
 
