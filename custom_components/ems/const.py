@@ -21,6 +21,10 @@ CONF_DEBUG = "debug"
 CONF_HW_CIRCULATION_PUMP = "hw_circulation_pump"
 CONF_HW_CIRCULATION_RETURN_TEMP = "hw_circulation_return_temp"
 
+CONF_THERMOSTAT_SET_TEMP = "thermostat_set_temp"
+CONF_ELEC_BOILER_MAX_TEMP = "elec_boiler_max_temp"
+CONF_GAS_BOILER_MAX_TEMP = "gas_boiler_max_temp"
+
 # Financial configuration keys
 CONF_PRICE_BUY_SENSOR = "price_buy_sensor"
 CONF_PRICE_SELL_SENSOR = "price_sell_sensor"
@@ -54,6 +58,10 @@ DEFAULT_BAT_CYCLES = 6000
 DEFAULT_BAT_MAX_POWER = 3000.0
 DEFAULT_MIN_BAT_SOC = 20.0
 DEFAULT_BAT_SOC_EMERGENCY = 10.0
+
+DEFAULT_THERMOSTAT_SET_TEMP = 45.0
+DEFAULT_ELEC_BOILER_MAX_TEMP = 70.0
+DEFAULT_GAS_BOILER_MAX_TEMP = 50.0
 
 # Hysteresis configuration
 SOC_HYSTERESIS = 2.0

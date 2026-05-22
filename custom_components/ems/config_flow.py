@@ -33,6 +33,11 @@ from .const import (
     CONF_BAT_VOLTAGE,
     CONF_MIN_BAT_SOC,
     CONF_BAT_SOC_EMERGENCY,
+    CONF_HW_CIRCULATION_PUMP,
+    CONF_HW_CIRCULATION_RETURN_TEMP,
+    CONF_THERMOSTAT_SET_TEMP,
+    CONF_ELEC_BOILER_MAX_TEMP,
+    CONF_GAS_BOILER_MAX_TEMP,
     DEFAULT_STATISTICS_DAYS,
     DEFAULT_FALLBACK_CONSUMPTION,
     DEFAULT_DEBUG,
@@ -43,6 +48,9 @@ from .const import (
     DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
     DEFAULT_BAT_SOC_EMERGENCY,
+    DEFAULT_THERMOSTAT_SET_TEMP,
+    DEFAULT_ELEC_BOILER_MAX_TEMP,
+    DEFAULT_GAS_BOILER_MAX_TEMP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -410,6 +418,11 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         def get_value(key):
             val = self._user_input.get(key)
             if not val or val == "undefined":
+                return None
+            return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
+
+        schema_dict = {}
+
         keys_domains = {
             "gas_boiler_climate": "climate",
             "gas_boiler_meter": "sensor",
@@ -438,7 +451,19 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         gas_cap = self._user_input.get("gas_boiler_capacity", 100)
         elec_cap = self._user_input.get("elec_boiler_capacity", 100)
         gas_cost = self._user_input.get("gas_cost_m3", 0.0)
+        thermostat_temp = self._user_input.get(CONF_THERMOSTAT_SET_TEMP, DEFAULT_THERMOSTAT_SET_TEMP)
+        elec_max_temp = self._user_input.get(CONF_ELEC_BOILER_MAX_TEMP, DEFAULT_ELEC_BOILER_MAX_TEMP)
+        gas_max_temp = self._user_input.get(CONF_GAS_BOILER_MAX_TEMP, DEFAULT_GAS_BOILER_MAX_TEMP)
 
+        schema_dict[vol.Required(CONF_THERMOSTAT_SET_TEMP, default=thermostat_temp)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=30.0, max=60.0, step=0.5, mode=selector.NumberSelectorMode.SLIDER)
+        )
+        schema_dict[vol.Required(CONF_ELEC_BOILER_MAX_TEMP, default=elec_max_temp)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=30.0, max=75.0, step=1.0, mode=selector.NumberSelectorMode.SLIDER)
+        )
+        schema_dict[vol.Required(CONF_GAS_BOILER_MAX_TEMP, default=gas_max_temp)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=30.0, max=70.0, step=1.0, mode=selector.NumberSelectorMode.SLIDER)
+        )
         schema_dict[vol.Required("gas_boiler_capacity", default=gas_cap)] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=0, step=1, mode=selector.NumberSelectorMode.BOX)
         )
