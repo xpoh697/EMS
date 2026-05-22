@@ -84,8 +84,10 @@
           "elec_boiler_power": "Electric Boiler Power Sensor (kW/W)",
           "elec_boiler_energy": "Electric Boiler Energy Sensor (kWh)",
           "elec_boiler_temp": "Electric Boiler Temperature Sensor",
-          "circulation_pump": "Circulation Pump Switch",
+          "circulation_pump": "Boiler Loading Pump Switch",
           "bypass_valve": "Bypass Valve Switch (On=Open, Off=Closed)",
+          "hw_circulation_pump": "Hot Water Circulation Pump Switch",
+          "hw_circulation_return_temp": "HW Circulation Return Temperature Sensor",
           "gas_boiler_capacity": "Gas Boiler Capacity (L)",
           "elec_boiler_capacity": "Electric Boiler Capacity (L)",
           "gas_cost_m3": "Cost per 1 m³ of gas"
