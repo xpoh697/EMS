@@ -78,7 +78,15 @@ class InverterModeClass:
     export_pv_to_grid: bool   # Продажа излишков солнца в сеть
     is_grid_bypass: bool      # Питание дома напрямую из сети (байпас)
     curtail_pv: bool          # Принудительное ограничение (зажим) генерации панелей
+    allow_boiler: bool        # Разрешена ли работа бойлера в данном режиме
     calibration_limit_soc: float # Лимит SOC, выше которого генерация не используется для калибровки точности
+
+    def __post_init__(self) -> None:
+        """Validate input types."""
+        if not isinstance(self.allow_boiler, bool):
+            raise TypeError(f"allow_boiler must be a bool, got {type(self.allow_boiler)}")
+        if not isinstance(self.calibration_limit_soc, (int, float)):
+            raise TypeError(f"calibration_limit_soc must be a float, got {type(self.calibration_limit_soc)}")
 
 # Глобальный реестр режимов для симуляции и логики
 INVERTER_MODES = {

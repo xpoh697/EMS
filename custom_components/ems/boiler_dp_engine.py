@@ -1,0 +1,325 @@
+"""Boiler DP Engine for EMS."""
+import logging
+import math
+from typing import Any, Dict, List, Tuple
+from .const import INVERTER_MODES
+
+_LOGGER = logging.getLogger(__name__)
+
+def get_lut_rate(lut: dict, temp: float) -> float:
+    """Find standby cooling rate (°C/h) for the given temperature from LUT."""
+    if not lut:
+        return 0.0
+
+    bracket_top = math.ceil(temp / 5.0) * 5.0
+    bracket_bottom = bracket_top - 5.0
+    if temp == bracket_top:
+        bracket_top += 5.0
+        bracket_bottom = bracket_top - 5.0
+
+    key = f"{int(bracket_top)}_{int(bracket_bottom)}"
+    rate = lut.get(key)
+    if rate is not None and rate > 0:
+        return float(rate)
+
+    best_key = None
+    best_delta = float("inf")
+    for k, v in lut.items():
+        if not isinstance(v, (int, float)) or v <= 0:
+            continue
+        try:
+            parts = k.split("_")
+            k_top = int(parts[0])
+            k_bot = int(parts[1])
+            k_mid = (k_top + k_bot) / 2.0
+            delta = abs(temp - k_mid)
+            if delta < best_delta:
+                best_delta = delta
+                best_key = k
+        except (ValueError, IndexError):
+            continue
+
+    if best_key:
+        return float(lut[best_key])
+    return 0.0
+
+def run_boiler_dp(
+    slots: List[Dict[str, Any]],
+    t_start: float,
+    t_min: float,
+    t_max_elec: float,
+    t_max_gas: float,
+    vol_elec: float,
+    vol_gas: float,
+    gas_cost_m3: float,
+    cal_data: Dict[str, Any],
+) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
+    """Run Dynamic Programming strategy optimizer for hot water boiler.
+
+    Returns (status, schedule_list, stats_dict).
+    """
+    # 1. Validation
+    eff_gas_only = cal_data.get("gas_only", {}).get("efficiency_c_per_m3", 0.0)
+    eff_gas_pump = cal_data.get("gas_with_pump", {}).get("efficiency_c_per_m3", 0.0)
+    eff_elec_only = cal_data.get("elec_only", {}).get("efficiency_c_per_kwh", 0.0)
+    eff_elec_pump = cal_data.get("elec_with_pump", {}).get("efficiency_c_per_kwh", 0.0)
+
+    if eff_gas_only <= 0.0 or eff_gas_pump <= 0.0 or eff_elec_only <= 0.0 or eff_elec_pump <= 0.0:
+        _LOGGER.warning(
+            "EMS Boiler DP: Missing or invalid calibration data. Gas Only: %s, Gas Pump: %s, Elec Only: %s, Elec Pump: %s",
+            eff_gas_only, eff_gas_pump, eff_elec_only, eff_elec_pump
+        )
+        return "NO CALIB DATA", [], {}
+
+    standby_losses = cal_data.get("standby_losses", {})
+
+    t_max = max(t_max_elec, t_max_gas)
+    if t_min >= t_max:
+        _LOGGER.error("EMS Boiler DP: Invalid temperature ranges: T_min (%s) >= T_max (%s)", t_min, t_max)
+        return "ERROR", [], {}
+
+    # Total grid size
+    num_states = int(round((t_max - t_min) * 2)) + 1
+    
+    # Clamp starting temp to grid range
+    t_start_clamped = max(t_min, min(t_start, t_max))
+    start_idx = int(round((t_start_clamped - t_min) * 2))
+
+    N = len(slots)
+    if N == 0:
+        return "idle", [], {}
+
+    # Run DP with relaxed constraint fallback
+    best_path = None
+    relaxed_used = False
+
+    for relax in [False, True]:
+        t_min_limit = t_min if not relax else 20.0
+        
+        # dp[h][state_idx] -> minimum cost to reach state_idx at end of slot h (1-indexed)
+        dp = [[float("inf")] * num_states for _ in range(N + 1)]
+        prev_state = [[-1] * num_states for _ in range(N + 1)]
+        prev_mode = [["IDLE"] * num_states for _ in range(N + 1)]
+        prev_cost = [[0.0] * num_states for _ in range(N + 1)]
+        prev_energy = [[0.0] * num_states for _ in range(N + 1)]
+
+        # Initial state (hour 0)
+        dp[0][start_idx] = 0.0
+
+        for h in range(1, N + 1):
+            slot = slots[h - 1]
+            buy_price = slot.get("buy_price", 0.0)
+            sell_price = slot.get("sell_price", 0.0)
+            mode_name = slot.get("physical_mode", "idle")
+            soc = slot.get("expected_soc", 50.0)
+
+            # Retrieve Inverter mode configurations
+            mode_config = INVERTER_MODES.get(mode_name)
+            
+            # Electricity pricing tariff logic
+            if mode_name == "buy":
+                tariff = buy_price
+            elif mode_name in ("sale_pv", "idle"):
+                tariff = sell_price
+            elif mode_config and mode_config.curtail_pv and soc >= mode_config.calibration_limit_soc:
+                tariff = 0.0
+            else:
+                tariff = sell_price
+
+            # Electric heating allowance check
+            allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
+            allow_elec = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
+
+            for prev_idx in range(num_states):
+                if dp[h - 1][prev_idx] == float("inf"):
+                    continue
+
+                T_prev = t_min + prev_idx * 0.5
+
+                # 1. Newton standby cooling rate
+                R_gas = get_lut_rate(standby_losses.get("gas", {}), T_prev)
+                R_elec = get_lut_rate(standby_losses.get("elec", {}), T_prev)
+                total_vol = vol_gas + vol_elec
+                if total_vol > 0:
+                    R_sys = (R_gas * vol_gas + R_elec * vol_elec) / total_vol
+                else:
+                    R_sys = (R_gas + R_elec) / 2.0
+
+                T_cooled = max(20.0, T_prev - R_sys)
+
+                # 2. Iterate modes
+                for mode in ["IDLE", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]:
+                    if mode in ("ELEC", "ELEC_PUMP") and not allow_elec:
+                        continue
+
+                    # Mode-specific parameters
+                    if mode == "IDLE":
+                        max_rise = 0.25
+                        t_max_mode = t_max
+                    elif mode == "GAS":
+                        max_rise = 40.0
+                        t_max_mode = t_max_gas
+                    elif mode == "GAS_PUMP":
+                        max_rise = 40.0
+                        t_max_mode = t_max_gas
+                    elif mode == "ELEC":
+                        power_kw = cal_data.get("elec_only", {}).get("heater_power_kw", 2.5)
+                        if total_vol > 0:
+                            max_rise = power_kw * eff_elec_only * (vol_elec / total_vol)
+                        else:
+                            max_rise = power_kw * eff_elec_only
+                        t_max_mode = t_max_elec
+                    elif mode == "ELEC_PUMP":
+                        power_kw = cal_data.get("elec_with_pump", {}).get("heater_power_kw", 2.5)
+                        max_rise = power_kw * eff_elec_pump
+                        t_max_mode = t_max_elec
+
+                    for curr_idx in range(num_states):
+                        T_curr = t_min + curr_idx * 0.5
+
+                        # Enforce hard constraints
+                        if T_curr < t_min_limit:
+                            continue
+                        if T_curr > t_max_mode:
+                            continue
+
+                        delta_T = T_curr - T_cooled
+
+                        # Discretization bounds check
+                        if delta_T < -0.25:
+                            continue
+                        if delta_T > max_rise:
+                            continue
+
+                        # Calculate costs and consumption
+                        if mode == "IDLE":
+                            if delta_T > 0.25:
+                                continue
+                            cost = 0.0
+                            energy = 0.0
+                        elif mode == "GAS":
+                            heat_rise = max(0.0, delta_T)
+                            if vol_gas > 0 and eff_gas_only > 0:
+                                gas_qty = heat_rise * total_vol / (vol_gas * eff_gas_only)
+                            else:
+                                gas_qty = heat_rise / eff_gas_only
+                            cost = gas_qty * gas_cost_m3
+                            energy = gas_qty
+                        elif mode == "GAS_PUMP":
+                            heat_rise = max(0.0, delta_T)
+                            gas_qty = heat_rise / eff_gas_pump
+                            cost = gas_qty * gas_cost_m3
+                            energy = gas_qty
+                        elif mode == "ELEC":
+                            heat_rise = max(0.0, delta_T)
+                            if vol_elec > 0 and eff_elec_only > 0:
+                                kwh = heat_rise * total_vol / (vol_elec * eff_elec_only)
+                            else:
+                                kwh = heat_rise / eff_elec_only
+                            cost = kwh * tariff
+                            energy = kwh
+                        elif mode == "ELEC_PUMP":
+                            heat_rise = max(0.0, delta_T)
+                            kwh = heat_rise / eff_elec_pump
+                            cost = kwh * tariff
+                            energy = kwh
+
+                        # State relaxation comparison
+                        new_cost = dp[h - 1][prev_idx] + cost
+                        if new_cost < dp[h][curr_idx]:
+                            dp[h][curr_idx] = new_cost
+                            prev_state[h][curr_idx] = prev_idx
+                            prev_mode[h][curr_idx] = mode
+                            prev_cost[h][curr_idx] = cost
+                            prev_energy[h][curr_idx] = energy
+
+        # Backtrack if path found
+        best_idx = min(range(num_states), key=lambda i: dp[N][i])
+        if dp[N][best_idx] != float("inf"):
+            # Backtrack
+            path = []
+            curr_idx = best_idx
+            for h in range(N, 0, -1):
+                prev_idx = prev_state[h][curr_idx]
+                mode = prev_mode[h][curr_idx]
+                cost = prev_cost[h][curr_idx]
+                energy = prev_energy[h][curr_idx]
+
+                path.append({
+                    "hour_index": h - 1,
+                    "mode": mode,
+                    "cost": round(cost, 4),
+                    "energy": round(energy, 4),
+                    "temp_start": round(t_min + prev_idx * 0.5, 2),
+                    "temp_end": round(t_min + curr_idx * 0.5, 2),
+                })
+                curr_idx = prev_idx
+
+            path.reverse()
+            best_path = path
+            relaxed_used = relax
+            break
+
+    if best_path is None:
+        _LOGGER.error("EMS Boiler DP: Failed to find any feasible schedule path.")
+        return "NO PATH", [], {}
+
+    # Build final schedule details with costs per 1°C rise for each mode
+    schedule = []
+    total_cost = 0.0
+
+    for idx, step in enumerate(best_path):
+        slot = slots[idx]
+        buy_price = slot.get("buy_price", 0.0)
+        sell_price = slot.get("sell_price", 0.0)
+        mode_name = slot.get("physical_mode", "idle")
+        soc = slot.get("expected_soc", 50.0)
+
+        # Retrieve Inverter mode configurations
+        mode_config = INVERTER_MODES.get(mode_name)
+        if mode_name == "buy":
+            tariff = buy_price
+        elif mode_name in ("sale_pv", "idle"):
+            tariff = sell_price
+        elif mode_config and mode_config.curtail_pv and soc >= mode_config.calibration_limit_soc:
+            tariff = 0.0
+        else:
+            tariff = sell_price
+
+        # Cost per 1°C rise calculations for each mode
+        total_vol = vol_gas + vol_elec
+        c_per_gas = ((total_vol / (vol_gas * eff_gas_only)) if (vol_gas > 0 and eff_gas_only > 0) else (1.0 / eff_gas_only)) * gas_cost_m3
+        c_per_gas_pump = (1.0 / eff_gas_pump) * gas_cost_m3
+        c_per_elec = ((total_vol / (vol_elec * eff_elec_only)) if (vol_elec > 0 and eff_elec_only > 0) else (1.0 / eff_elec_only)) * tariff
+        c_per_elec_pump = (1.0 / eff_elec_pump) * tariff
+
+        # Determine electric heating allowance
+        allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
+        allow_elec = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
+
+        schedule.append({
+            "date": slot.get("date"),
+            "hour": slot.get("hour"),
+            "mode": step["mode"],
+            "temp_start": step["temp_start"],
+            "temp_end": step["temp_end"],
+            "cost": step["cost"],
+            "energy": step["energy"],
+            "cost_per_c_gas": round(c_per_gas, 4),
+            "cost_per_c_gas_pump": round(c_per_gas_pump, 4),
+            "cost_per_c_elec": round(c_per_elec, 4) if allow_elec else None,
+            "cost_per_c_elec_pump": round(c_per_elec_pump, 4) if allow_elec else None,
+        })
+        total_cost += step["cost"]
+
+    # Final stats
+    stats = {
+        "horizon_hours": N,
+        "start_temp": t_start_clamped,
+        "end_temp": best_path[-1]["temp_end"] if best_path else t_start_clamped,
+        "total_cost": round(total_cost, 4),
+        "relaxed_constraint_used": relaxed_used,
+    }
+
+    current_action = best_path[0]["mode"] if best_path else "IDLE"
+    return current_action, schedule, stats
