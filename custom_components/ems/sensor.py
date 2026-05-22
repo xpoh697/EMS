@@ -1529,6 +1529,11 @@ class EmsDpSensor(SensorEntity):
 
         now = dt_util.now()
         current_hour = now.hour
+
+        now_minute = now.minute
+        now_second = now.second
+        remaining_seconds = (59 - now_minute) * 60 + (60 - now_second)
+        remaining_hour_fraction = max(remaining_seconds / 3600.0, 1 / 3600.0)
         today_str = now.strftime("%Y-%m-%d")
         tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -1601,6 +1606,7 @@ class EmsDpSensor(SensorEntity):
                 terminal_value_per_kwh=terminal_value,
                 min_end_usable=min_end_usable,
                 config=dp_config,
+                remaining_hour_fraction=remaining_hour_fraction,
             )
 
             # Check if total planned discharge is less than the minimum configured limit
@@ -1629,6 +1635,7 @@ class EmsDpSensor(SensorEntity):
                     terminal_value_per_kwh=terminal_value,
                     min_end_usable=min_end_usable,
                     config=dp_config,
+                    remaining_hour_fraction=remaining_hour_fraction,
                 )
         except Exception as ex:
             return {
@@ -1835,6 +1842,13 @@ class EmsSchedulerSensor(SensorEntity):
         bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
         min_bat_soc = storage.min_bat_soc
 
+        # Retrieve battery max power from config/options
+        bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
+        try:
+            bat_max_power = float(bat_max_power)
+        except (ValueError, TypeError):
+            bat_max_power = DEFAULT_BAT_MAX_POWER
+
         # Parse capacity
         capacity = 5.12
         if bat_capacity_entity_id:
@@ -1907,6 +1921,7 @@ class EmsSchedulerSensor(SensorEntity):
             # Normalize first slot energy to full-hour rate for power display
             if slot_idx == 0 and remaining_hour_fraction < 1.0:
                 energy_for_power = energy / remaining_hour_fraction
+                energy_for_power = min(energy_for_power, bat_max_power / 1000.0)
             else:
                 energy_for_power = energy
 
@@ -2517,11 +2532,18 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
         self._gas_with_pump = {"efficiency_c_per_m3": 0.0, "last_calibrated": None}
         self._elec_only = {"efficiency_c_per_kwh": 0.0, "last_calibrated": None}
         self._elec_with_pump = {"efficiency_c_per_kwh": 0.0, "last_calibrated": None}
+
+        # Newton's Law LUT: 11 температурных брэкетов 5°C для каждого бойлера
+        _lut_brackets = [
+            "75_70", "70_65", "65_60", "60_55", "55_50",
+            "50_45", "45_40", "40_35", "35_30", "30_25", "25_20",
+        ]
         self._standby_losses = {
-            "gas_hourly_loss_c": 0.0,
-            "elec_hourly_loss_c": 0.0,
+            "gas":  {b: 0.0 for b in _lut_brackets},
+            "elec": {b: 0.0 for b in _lut_brackets},
             "last_calibrated": None,
         }
+        self._standby_costs = {}  # real-time cost metrics от _async_calculate_costs
         self._calibration_data = {}
 
     @property
@@ -2550,6 +2572,7 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
             "elec_only": self._elec_only,
             "elec_with_pump": self._elec_with_pump,
             "standby_losses": self._standby_losses,
+            "standby_costs": self._standby_costs,
             "calibration_data": self._calibration_data,
         }
 
@@ -2572,7 +2595,8 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
                 self._gas_with_pump = data.get("gas_with_pump", self._gas_with_pump)
                 self._elec_only = data.get("elec_only", self._elec_only)
                 self._elec_with_pump = data.get("elec_with_pump", self._elec_with_pump)
-                self._standby_losses = data.get("standby_losses", self._standby_losses)
+                stored_sl = data.get("standby_losses", {})
+                self._standby_losses = self._migrate_standby_losses(stored_sl)
                 store_loaded = True
 
         last_state = await self.async_get_last_state()
@@ -2593,7 +2617,7 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
                 if "elec_with_pump" in attrs:
                     self._elec_with_pump = attrs["elec_with_pump"]
                 if "standby_losses" in attrs:
-                    self._standby_losses = attrs["standby_losses"]
+                    self._standby_losses = self._migrate_standby_losses(attrs["standby_losses"])
 
                 # Populate the store so it is saved for future loads
                 if store:
@@ -2611,6 +2635,46 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
             if self._calibration_data and self._calibration_data.get("phase"):
                 self.hass.async_create_task(controller.async_recover_calibration(self._calibration_data))
 
+    # -------------------------------------------------------------------------
+    # Public helpers for BoilerController
+    # -------------------------------------------------------------------------
+
+    def get_standby_losses(self) -> dict:
+        """Возвращает текущую LUT тепловых потерь (gas/elec брэкеты)."""
+        return self._standby_losses
+
+    def get_gas_efficiency(self) -> float | None:
+        """Возвращает коэффициент газового бойлера °C/m³ (из лучшей калибровки)."""
+        # Предпочитаем gas_with_pump как более точный (учитывает оба бойлера)
+        eff = self._gas_with_pump.get("efficiency_c_per_m3", 0.0)
+        if not eff:
+            eff = self._gas_only.get("efficiency_c_per_m3", 0.0)
+        return float(eff) if eff else None
+
+    def update_standby_costs(self, costs: dict) -> None:
+        """Обновляет real-time метрики стоимости стендбай и записывает в HA."""
+        self._standby_costs.update(costs)
+        self.async_write_ha_state()
+
+    @staticmethod
+    def _migrate_standby_losses(data: dict) -> dict:
+        """Мигрирует старый плоский формат {gas_hourly_loss_c: X} в новый LUT."""
+        _lut_brackets = [
+            "75_70", "70_65", "65_60", "60_55", "55_50",
+            "50_45", "45_40", "40_35", "35_30", "30_25", "25_20",
+        ]
+        # Если уже новый формат — возвращаем как есть
+        if "gas" in data and isinstance(data["gas"], dict):
+            return data
+        # Миграция: заполняем все брэкеты старым средним значением
+        old_gas  = float(data.get("gas_hourly_loss_c",  0.0))
+        old_elec = float(data.get("elec_hourly_loss_c", 0.0))
+        return {
+            "gas":  {b: old_gas  for b in _lut_brackets},
+            "elec": {b: old_elec for b in _lut_brackets},
+            "last_calibrated": data.get("last_calibrated"),
+        }
+
     def update_calibration_coefficient(self, phase: str, data: dict) -> None:
         """Update coefficients in the sensor and write state to HA."""
         store_phase = phase
@@ -2623,7 +2687,15 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
         elif phase == "elec_with_pump":
             self._elec_with_pump.update(data)
         elif phase == "overnight_loss":
-            self._standby_losses.update(data)
+            # Вложенное слияние: обновляем только переданные брэкеты
+            if "gas" in data and isinstance(data["gas"], dict):
+                self._standby_losses.setdefault("gas", {})
+                self._standby_losses["gas"].update(data["gas"])
+            if "elec" in data and isinstance(data["elec"], dict):
+                self._standby_losses.setdefault("elec", {})
+                self._standby_losses["elec"].update(data["elec"])
+            if "last_calibrated" in data:
+                self._standby_losses["last_calibrated"] = data["last_calibrated"]
             store_phase = "standby_losses"
 
         # Update in store and persist to disk immediately

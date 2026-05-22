@@ -55,7 +55,7 @@ const STYLES = `
   }
   .schema-middle {
     flex: 1;
-    height: 110px;
+    height: 140px;
     min-width: 70px;
     max-width: 130px;
     position: relative;
@@ -117,20 +117,64 @@ const STYLES = `
     cursor: default;
     transition: border-color .3s, background-color .3s, color .3s;
   }
-  .pump-node { top: 20%; left: 50%; }
-  .valve-node { top: 80%; left: 50%; }
+  .pump-node { top: 15%; left: 50%; }
+  .valve-node { top: 57%; left: 50%; }
+  .hw-pump-node {
+    position: absolute;
+    top: 85%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 28px;
+    height: 28px;
+    background: var(--ha-card-background, var(--card-background-color, #1c1c1e));
+    border: 2px solid rgba(255,255,255,0.12);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    cursor: default;
+    transition: border-color .3s, background-color .3s, color .3s;
+  }
+  .hw-pump-node ha-icon {
+    --mdc-icon-size: 16px;
+    color: rgba(255,255,255,0.3);
+    transition: color .3s;
+  }
+  .hw-pump-node.on {
+    border-color: var(--success-color, #4caf50);
+    background: rgba(76,175,80,0.12);
+  }
+  .hw-pump-node.on ha-icon {
+    color: var(--success-color, #4caf50);
+    animation: spin-pump-reverse 2s linear infinite;
+  }
+  @keyframes spin-pump-reverse {
+    100% { transform: rotate(-360deg); }
+  }
+  .hw-return-temp {
+    position: absolute;
+    top: 95%; left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: var(--secondary-text-color);
+    background: var(--ha-card-background, #1c1c1e);
+    padding: 0 4px;
+  }
 
   .schema-container.manual-mode .pump-node,
-  .schema-container.manual-mode .valve-node {
+  .schema-container.manual-mode .valve-node,
+  .schema-container.manual-mode .hw-pump-node {
     cursor: pointer;
   }
   .schema-container.manual-mode .pump-node:hover,
-  .schema-container.manual-mode .valve-node:hover {
+  .schema-container.manual-mode .valve-node:hover,
+  .schema-container.manual-mode .hw-pump-node:hover {
     background: rgba(255,255,255,0.08);
     border-color: rgba(255,255,255,0.25);
   }
   .schema-container.manual-mode .pump-node.on:hover,
-  .schema-container.manual-mode .valve-node.on:hover {
+  .schema-container.manual-mode .valve-node.on:hover,
+  .schema-container.manual-mode .hw-pump-node.on:hover {
     background: rgba(76,175,80,0.2);
   }
   .schema-container.manual-mode .valve-node.warn:hover {
@@ -342,21 +386,29 @@ class BoilerCard extends HTMLElement {
     const middle = document.createElement("div");
     middle.className = "schema-middle";
     middle.innerHTML = `
-      <svg class="schema-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
-        <path class="flow-line" id="line-top" d="M 0 20 L 100 20"></path>
+      <svg class="schema-svg" viewBox="0 0 100 140" preserveAspectRatio="none">
+        <path class="flow-line" id="line-top" d="M 0 21 L 100 21"></path>
         <path class="flow-line" id="line-bottom" d="M 0 80 L 100 80"></path>
+        <path class="flow-line" id="line-hw-circ" d="M 15 119 L 85 119"></path>
       </svg>
-      <div class="pump-node" id="schema-pump" title="Циркуляционный насос">
+      <div class="pump-node" id="schema-pump" title="Насос загрузки бойлера">
         <ha-icon icon="mdi:pump"></ha-icon>
       </div>
       <div class="valve-node" id="schema-valve" title="Байпасный клапан">
         <ha-icon icon="mdi:pipe-valve"></ha-icon>
-      </div>`;
+      </div>
+      <div class="hw-pump-node" id="schema-hw-pump" title="Циркуляционный насос ГВС">
+        <ha-icon icon="mdi:pump"></ha-icon>
+      </div>
+      <div class="hw-return-temp" id="schema-hw-temp"></div>`;
 
     this._schemaPump  = middle.querySelector("#schema-pump");
     this._schemaValve = middle.querySelector("#schema-valve");
+    this._schemaHwPump = middle.querySelector("#schema-hw-pump");
+    this._schemaHwTemp = middle.querySelector("#schema-hw-temp");
     this._lineTop     = middle.querySelector("#line-top");
     this._lineBottom  = middle.querySelector("#line-bottom");
+    this._lineHwCirc  = middle.querySelector("#line-hw-circ");
     this._schemaContainer = schema;
 
     // Add interactivity to pump/valve nodes on the schema
@@ -372,6 +424,12 @@ class BoilerCard extends HTMLElement {
         const e = this._entities;
         const domain = e.valve?.split(".")[0] || "switch";
         this._toggleEntity(domain, e.valve);
+      }
+    });
+    this._schemaHwPump.addEventListener("click", () => {
+      const isManual = this._hass.states[this._entities.mode_select]?.state === "Manual";
+      if (isManual && this._entities.hw_pump) {
+        this._toggleEntity("switch", this._entities.hw_pump);
       }
     });
 
@@ -432,8 +490,9 @@ class BoilerCard extends HTMLElement {
     };
 
     this._btnHeater = mkBtn("cb-heater", "mdi:heating-coil",  "ТЭН электробойлера");
-    this._btnPump   = mkBtn("cb-pump",   "mdi:pump",          "Циркуляционный насос");
+    this._btnPump   = mkBtn("cb-pump",   "mdi:pump",          "Насос загрузки бойлера");
     this._btnValve  = mkBtn("cb-valve",  "mdi:pipe-valve",    "Байпасный клапан");
+    this._btnHwPump = mkBtn("cb-hw-pump","mdi:water-pump",    "Циркуляционный насос ГВС");
 
     this._btnHeater.addEventListener("click", () => this._toggleEntity("switch", this._entities.elec_heater));
     this._btnPump.addEventListener("click",   () => {
@@ -446,10 +505,14 @@ class BoilerCard extends HTMLElement {
       const domain = e.valve?.split(".")[0] || "switch";
       this._toggleEntity(domain, e.valve);
     });
+    this._btnHwPump.addEventListener("click", () => {
+      if (this._entities.hw_pump) this._toggleEntity("switch", this._entities.hw_pump);
+    });
 
     this._controls.appendChild(this._btnHeater);
     this._controls.appendChild(this._btnPump);
     this._controls.appendChild(this._btnValve);
+    this._controls.appendChild(this._btnHwPump);
 
     // Auto hint
     this._autoHint = document.createElement("div");
@@ -477,12 +540,15 @@ class BoilerCard extends HTMLElement {
     const pumpS  = st[e.pump];
     const valveS = st[e.valve];
     const modeS  = st[e.mode_select];
+    const hwPumpS = e.hw_pump ? st[e.hw_pump] : null;
+    const hwTempS = e.hw_return_temp ? st[e.hw_return_temp] : null;
 
     // Cheap dirty check — skip re-paint if nothing changed
     const key = [
       gasS?.state, gasS?.attributes?.current_temperature,
       elecS?.state, powS?.state, tmpS?.state,
       pumpS?.state, valveS?.state, modeS?.state,
+      hwPumpS?.state, hwTempS?.state
     ].join("|");
     if (key === this._prevKey) return;
     this._prevKey = key;
@@ -541,6 +607,36 @@ class BoilerCard extends HTMLElement {
       this._lineBottom.className.baseVal = "flow-line";
     }
 
+    // ── Update HW Circulation Line (right to left) ──
+    if (e.hw_pump) {
+      this._schemaHwPump.classList.remove("hidden");
+      this._lineHwCirc.classList.remove("hidden");
+      this._btnHwPump.classList.remove("hidden");
+
+      const hwPumpOn = stateOn(hwPumpS);
+      if (hwPumpOn) {
+        this._schemaHwPump.className = "hw-pump-node on";
+        this._lineHwCirc.className.baseVal = "flow-line active-reverse";
+      } else {
+        this._schemaHwPump.className = "hw-pump-node";
+        this._lineHwCirc.className.baseVal = "flow-line";
+      }
+
+      if (e.hw_return_temp) {
+        this._schemaHwTemp.classList.remove("hidden");
+        const tVal = fmt1(hwTempS?.state);
+        this._schemaHwTemp.textContent = tVal + " °C";
+        this._schemaHwTemp.style.color = getTempColor(hwTempS?.state);
+      } else {
+        this._schemaHwTemp.classList.add("hidden");
+      }
+    } else {
+      this._schemaHwPump.classList.add("hidden");
+      this._lineHwCirc.classList.add("hidden");
+      this._schemaHwTemp.classList.add("hidden");
+      this._btnHwPump.classList.add("hidden");
+    }
+
     // ── Valve bar ─────────────────────────────────────────────────────────
     this._valveBar.className = "valve-bar " + (elecConn ? "open" : "closed");
     this._valveBar.querySelector("#vb-icon").setAttribute("icon",
@@ -566,6 +662,10 @@ class BoilerCard extends HTMLElement {
       this._btnPump.classList.toggle("disabled", !elecConn);
       // Valve button
       this._updateCtrlBtn(this._btnValve, elecConn, elecConn ? "Подключён" : "Изолирован");
+      // HW Pump button
+      if (e.hw_pump) {
+        this._updateCtrlBtn(this._btnHwPump, stateOn(hwPumpS));
+      }
     }
   }
 

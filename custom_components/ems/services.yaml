@@ -95,3 +95,36 @@ start_calibration:
               value: elec_only
             - label: Electric heating with circulation pump
               value: elec_with_pump
+    heating_duration_minutes:
+      name: Heating Duration
+      description: "For pump phases: Duration of the heating phase in minutes (default 5)."
+      required: false
+      example: 5
+      selector:
+        number:
+          min: 1
+          max: 60
+          step: 1
+          mode: box
+    target_temperature_delta:
+      name: Target Temperature Delta
+      description: "For non-pump phases: Temperature increase target in °C (default 12.0)."
+      required: false
+      example: 12.0
+      selector:
+        number:
+          min: 1.0
+          max: 50.0
+          step: 0.5
+          mode: box
+    stabilization_minutes:
+      name: Stabilization Duration
+      description: "Duration to wait for temperature stabilization after heating in minutes (default 10)."
+      required: false
+      example: 10
+      selector:
+        number:
+          min: 1
+          max: 60
+          step: 1
+          mode: box

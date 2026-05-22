@@ -410,11 +410,6 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         def get_value(key):
             val = self._user_input.get(key)
             if not val or val == "undefined":
-                return None
-            return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
-
-        schema_dict = {}
-
         keys_domains = {
             "gas_boiler_climate": "climate",
             "gas_boiler_meter": "sensor",
@@ -423,7 +418,9 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             "elec_boiler_energy": "sensor",
             "elec_boiler_temp": "sensor",
             "circulation_pump": "switch",
-            "bypass_valve": ["switch", "input_boolean"]
+            "bypass_valve": ["switch", "input_boolean"],
+            CONF_HW_CIRCULATION_PUMP: "switch",
+            CONF_HW_CIRCULATION_RETURN_TEMP: "sensor"
         }
 
         for key, domain in keys_domains.items():

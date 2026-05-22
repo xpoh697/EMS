@@ -66,7 +66,14 @@ class BoilerController:
             datetime.timedelta(minutes=2)
         )
         
-        # 4. Регистрация автоматического ночного теста охлаждения (01:00 - 05:00)
+        # 4. Polling ночного мониторинга охлаждения (каждую минуту)
+        async_track_time_interval(
+            self.hass,
+            self._async_overnight_poll,
+            datetime.timedelta(minutes=1)
+        )
+        
+        # 5. Регистрация старта/завершения ночного теста (01:00 и 05:00)
         async_track_time_change(
             self.hass,
             self._async_overnight_start,
@@ -125,78 +132,251 @@ class BoilerController:
             await self.hass.services.async_call(SWITCH_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: entity_id})
                 
     async def _async_calculate_costs(self, _now):
-        """Расчет стоимости и эффективности. Не спамит Event Loop/БД."""
-        pass # Реализация расчетов стоимости
+        """Real-time расчёт стоимости стендбай-потерь через LUT текущего брэкета."""
+        if not self.calibration_sensor:
+            return
+
+        standby = self.calibration_sensor.get_standby_losses()
+        gas_lut  = standby.get("gas", {})
+        elec_lut = standby.get("elec", {})
+
+        costs = {}
+
+        # --- Газовый бойлер ---
+        t_gas = self._get_gas_temp()
+        if t_gas is not None:
+            rate_gas = self._get_lut_rate(gas_lut, t_gas)       # °C/h
+            eff_gas  = self.calibration_sensor.get_gas_efficiency()  # °C/m³
+            if rate_gas is not None and eff_gas and eff_gas > 0:
+                m3_per_h = rate_gas / eff_gas
+                costs["gas_standby_cost_24h"] = round(m3_per_h * 24 * self.gas_cost_m3, 4)
+                costs["gas_standby_rate_c_h"]  = round(rate_gas, 4)
+
+        # --- Электрический бойлер ---
+        t_elec = self._get_elec_temp()
+        if t_elec is not None:
+            rate_elec = self._get_lut_rate(elec_lut, t_elec)    # °C/h
+            costs["elec_standby_rate_c_h"] = round(rate_elec, 4) if rate_elec is not None else 0.0
+            # Финансовая модель по электро добавляется когда появится тариф ЦЕН/кВт
+
+        if costs:
+            self.calibration_sensor.update_standby_costs(costs)
 
     # =========================================================================
     # Passive Overnight Thermal Loss Calibration (01:00 AM - 05:00 AM)
+    # Newton's Law LUT — температурно-брэкетная таблица 5°C шаг
     # =========================================================================
+
+    # Состояние state machine для overnight мониторинга (in-memory, не персистентное)
+    _overnight_state: dict = {}   # {"gas": {...}, "elec": {...}}
+    _overnight_pending: dict = {} # накопленные обновления LUT до финализации
+
     async def _async_overnight_start(self, _now=None):
-        """Запуск пассивного теста остывания в 01:00."""
+        """Запуск ночного мониторинга в 01:00 — инициализация state machine."""
         if not self.calibration_sensor:
             return
-            
+
         if self.calibration_sensor.native_value != "idle":
-            _LOGGER.warning("Overnight loss calibration skipped: calibration already running (%s)", self.calibration_sensor.native_value)
+            _LOGGER.warning(
+                "Overnight loss calibration skipped: calibration already running (%s)",
+                self.calibration_sensor.native_value,
+            )
             return
 
-        # Получаем температуры газового и электрического бойлеров
-        gas_temp = self._get_gas_temp()
+        gas_temp  = self._get_gas_temp()
         elec_temp = self._get_elec_temp()
-        
-        gas_active = gas_temp is not None and gas_temp > 40.0
-        elec_active = elec_temp is not None and elec_temp > 40.0
-        
+
+        gas_active  = gas_temp  is not None and gas_temp  > 20.0
+        elec_active = elec_temp is not None and elec_temp > 20.0
+
         if not gas_active and not elec_active:
-            _LOGGER.info("Overnight loss calibration skipped: all boiler temperatures <= 40°C (Gas: %s, Elec: %s)", gas_temp, elec_temp)
+            _LOGGER.info(
+                "Overnight loss calibration skipped: both boilers <= 20°C (Gas: %s, Elec: %s)",
+                gas_temp, elec_temp,
+            )
             return
-            
-        calibration_data = {
-            "phase": "overnight_loss",
-            "gas_t_start": gas_temp if gas_active else None,
-            "elec_t_start": elec_temp if elec_active else None,
-            "started_at": dt_util.now().isoformat()
+
+        now_iso = dt_util.now().isoformat()
+
+        def _init_boiler_state(temp):
+            if temp is None:
+                return None
+            # Верхняя граница текущего брэкета — ближайший кратный 5 выше T
+            import math
+            bracket_top = math.ceil(temp / 5.0) * 5.0
+            # Если temp точно на границе — брэкет начинается с неё
+            if temp == bracket_top:
+                bracket_top = temp
+            return {
+                "bracket_top":       bracket_top,
+                "bracket_entered_at": now_iso,
+                "prev_temp":         temp,
+                "discarded":         False,  # флаг: текущий брэкет заблокирован шумом
+            }
+
+        self._overnight_state = {
+            "gas":  _init_boiler_state(gas_temp)  if gas_active  else None,
+            "elec": _init_boiler_state(elec_temp) if elec_active else None,
         }
-        
+        self._overnight_pending = {"gas": {}, "elec": {}}
+
+        calibration_data = {
+            "phase":       "overnight_loss",
+            "gas_t_start": gas_temp  if gas_active  else None,
+            "elec_t_start": elec_temp if elec_active else None,
+            "started_at":  now_iso,
+        }
         self.calibration_sensor.set_calibration_state("overnight_loss", calibration_data)
-        _LOGGER.info("Overnight thermal loss calibration started (Gas: %s, Elec: %s)", gas_temp, elec_temp)
+        _LOGGER.info(
+            "Overnight Newton LUT calibration started. Gas: %s°C, Elec: %s°C",
+            gas_temp, elec_temp,
+        )
+
+    async def _async_overnight_poll(self, _now=None):
+        """Ежеминутный polling (01:00–05:00): обнаружение пересечений брэкетов."""
+        if not self.calibration_sensor:
+            return
+        if self.calibration_sensor.native_value != "overnight_loss":
+            return  # Быстрый выход вне ночного окна — не блокируем event loop
+
+        now = dt_util.now()
+        standby = self.calibration_sensor.get_standby_losses()
+
+        readings = {
+            "gas":  self._get_gas_temp(),
+            "elec": self._get_elec_temp(),
+        }
+
+        for boiler, t_curr in readings.items():
+            state = self._overnight_state.get(boiler)
+            if state is None or t_curr is None:
+                continue
+
+            t_prev = state["prev_temp"]
+
+            # --- Noise Filter: внезапный рост или падение > 2°C за 1 минуту = водозабор ---
+            if abs(t_curr - t_prev) > 2.0:
+                _LOGGER.warning(
+                    "[overnight/%s] Water usage detected (%.1f→%.1f°C). Bracket discarded.",
+                    boiler, t_prev, t_curr,
+                )
+                # Сбрасываем текущий брэкет и начинаем заново с текущей T
+                import math
+                bracket_top = math.ceil(t_curr / 5.0) * 5.0
+                state["bracket_top"]        = bracket_top
+                state["bracket_entered_at"] = now.isoformat()
+                state["prev_temp"]          = t_curr
+                state["discarded"]          = False
+                continue
+
+            bracket_top    = state["bracket_top"]
+            bracket_bottom = bracket_top - 5.0
+
+            # --- Пересечение нижней границы брэкета ---
+            if t_curr <= bracket_bottom and bracket_bottom >= 20.0:
+                entered_at = dt_util.parse_datetime(state["bracket_entered_at"])
+                if entered_at:
+                    elapsed_h = (now - entered_at).total_seconds() / 3600.0
+                else:
+                    elapsed_h = 0.0
+
+                if elapsed_h >= 0.1 and not state["discarded"]:  # >= 6 минут в брэкете
+                    rate = round(5.0 / elapsed_h, 4)  # °C/h
+                    key  = self._get_bracket_key(bracket_top, bracket_bottom)
+                    old_rate = standby.get(boiler, {}).get(key, 0.0)
+                    new_rate = self._apply_ema(old_rate, rate)
+                    self._overnight_pending[boiler][key] = new_rate
+                    _LOGGER.info(
+                        "[overnight/%s] Bracket %s completed: %.4f °C/h (EMA from %.4f). elapsed=%.2fh",
+                        boiler, key, new_rate, old_rate, elapsed_h,
+                    )
+                elif state["discarded"]:
+                    _LOGGER.debug("[overnight/%s] Bracket %s skipped (discarded by noise filter).", boiler, key)
+                else:
+                    _LOGGER.debug("[overnight/%s] Bracket %s too short (%.1f min), skipped.", boiler, key, elapsed_h * 60)
+
+                # Переход в следующий брэкет вниз
+                state["bracket_top"]        = bracket_bottom
+                state["bracket_entered_at"] = now.isoformat()
+                state["discarded"]          = False
+
+            state["prev_temp"] = t_curr
+
+        # Публикуем промежуточное состояние в calibration_data для UI
+        cal_data = self.calibration_sensor._calibration_data or {}
+        cal_data["pending_brackets_gas"]  = len(self._overnight_pending.get("gas", {}))
+        cal_data["pending_brackets_elec"] = len(self._overnight_pending.get("elec", {}))
+        cal_data["gas_current_temp"]  = readings["gas"]
+        cal_data["elec_current_temp"] = readings["elec"]
+        self.calibration_sensor.set_calibration_state("overnight_loss", cal_data)
 
     async def _async_overnight_end(self, _now=None):
-        """Завершение пассивного теста остывания в 05:00."""
+        """Завершение ночного мониторинга в 05:00 — финализация LUT."""
         if not self.calibration_sensor or self.calibration_sensor.native_value != "overnight_loss":
             return
-            
-        cal_data = self.calibration_sensor._calibration_data
-        if not cal_data:
-            self.calibration_sensor.set_calibration_state("idle")
-            return
-            
-        gas_t_start = cal_data.get("gas_t_start")
-        elec_t_start = cal_data.get("elec_t_start")
-        
-        gas_temp_end = self._get_gas_temp()
-        elec_temp_end = self._get_elec_temp()
-        
-        update_data = {"last_calibrated": dt_util.now().date().isoformat()}
-        
-        if gas_t_start is not None and gas_temp_end is not None:
-            u_loss_gas = max(0.0, (gas_t_start - gas_temp_end) / 4.0)
-            update_data["gas_hourly_loss_c"] = round(u_loss_gas, 4)
-            _LOGGER.info("Calculated gas hourly standby loss: %s °C/h", u_loss_gas)
-            
-        if elec_t_start is not None and elec_temp_end is not None:
-            u_loss_elec = max(0.0, (elec_t_start - elec_temp_end) / 4.0)
-            update_data["elec_hourly_loss_c"] = round(u_loss_elec, 4)
-            _LOGGER.info("Calculated electric hourly standby loss: %s °C/h", u_loss_elec)
-            
+
+        now     = dt_util.now()
+        standby = self.calibration_sensor.get_standby_losses()
+
+        # --- Финализировать незавершённые брэкеты (если >= 30 мин в них) ---
+        for boiler, state in self._overnight_state.items():
+            if state is None or state.get("discarded"):
+                continue
+            entered_at = dt_util.parse_datetime(state.get("bracket_entered_at", ""))
+            if not entered_at:
+                continue
+            elapsed_h = (now - entered_at).total_seconds() / 3600.0
+            if elapsed_h >= 0.5:  # >= 30 минут — достаточно для надёжного замера
+                bracket_top    = state["bracket_top"]
+                bracket_bottom = bracket_top - 5.0
+                if bracket_bottom >= 20.0:
+                    t_curr = self._get_gas_temp() if boiler == "gas" else self._get_elec_temp()
+                    if t_curr is not None:
+                        # Реальное падение за elapsed_h (частичный брэкет)
+                        t_prev_in_bracket = bracket_top  # вошли с верхней границы
+                        actual_drop = max(0.0, t_prev_in_bracket - t_curr)
+                        if actual_drop > 0.2:
+                            rate = round(actual_drop / elapsed_h, 4)
+                            key  = self._get_bracket_key(bracket_top, bracket_bottom)
+                            old_rate = standby.get(boiler, {}).get(key, 0.0)
+                            new_rate = self._apply_ema(old_rate, rate)
+                            self._overnight_pending[boiler][key] = new_rate
+                            _LOGGER.info(
+                                "[overnight/%s] Partial bracket %s finalized: %.4f °C/h (drop=%.2f°C, elapsed=%.2fh)",
+                                boiler, key, new_rate, actual_drop, elapsed_h,
+                            )
+
+        # --- Записываем все накопленные обновления LUT ---
+        date_str    = now.date().isoformat()
+        update_data = {"last_calibrated": date_str}
+
+        for boiler in ("gas", "elec"):
+            pending = self._overnight_pending.get(boiler, {})
+            if pending:
+                update_data[boiler] = pending
+                _LOGGER.info(
+                    "[overnight/%s] Saving %d bracket(s) to LUT: %s",
+                    boiler, len(pending), list(pending.keys()),
+                )
+
         self.calibration_sensor.update_calibration_coefficient("overnight_loss", update_data)
-        self.calibration_sensor.set_calibration_state("idle")
-        _LOGGER.info("Overnight thermal loss calibration completed successfully.")
+        self.calibration_sensor.set_calibration_state("idle", {})
+
+        # Сброс state machine
+        self._overnight_state   = {}
+        self._overnight_pending = {}
+        _LOGGER.info("Overnight Newton LUT calibration completed and saved.")
 
     # =========================================================================
     # Manually Triggered Heating Calibration Phases
     # =========================================================================
-    async def async_start_calibration(self, phase: str) -> bool:
+    async def async_start_calibration(
+        self, 
+        phase: str, 
+        heating_duration_minutes: int | None = None,
+        target_temperature_delta: float | None = None,
+        stabilization_minutes: int | None = None
+    ) -> bool:
         """Запуск ручной фазы калибровки с валидацией конфигурации и выводом ошибок в UI."""
         if not self.calibration_sensor:
             raise HomeAssistantError("Cannot start calibration: calibration sensor not registered yet.")
@@ -256,6 +436,9 @@ class BoilerController:
             "t_start": baseline["t_start"],
             "v_start": baseline.get("v_start"),
             "e_start": baseline.get("e_start"),
+            "heating_duration_minutes": heating_duration_minutes,
+            "target_temperature_delta": target_temperature_delta,
+            "stabilization_minutes": stabilization_minutes,
             "started_at": dt_util.now().isoformat()
         }
         self.calibration_sensor.set_calibration_state(phase, cal_data)
@@ -270,16 +453,17 @@ class BoilerController:
         success = False
         
         if "pump" in phase:
-            # Фазы с насосом: нагрев в течение ровно 5 минут (300 секунд)
-            _LOGGER.info("Starting active calibration phase: %s. Baseline Temp: %s°C, Duration: 300s", phase, t_start)
+            # Фазы с насосом: нагрев в течение заданного времени (по умолчанию 5 минут)
+            duration_minutes = cal_data.get("heating_duration_minutes") or 5
+            duration = duration_minutes * 60
+            _LOGGER.info("Starting active calibration phase: %s. Baseline Temp: %s°C, Duration: %ss", phase, t_start, duration)
             await self._actuate_heating(phase, turn_on=True, target_temp=80.0)
             
-            duration = 300
             elapsed = 0
             success = True
             try:
                 # Начальный статус перед циклом
-                cal_data["status_desc"] = "Нагрев 5 мин"
+                cal_data["status_desc"] = f"Нагрев {duration_minutes} мин"
                 cal_data["time_left"] = duration
                 self.calibration_sensor.set_calibration_state(phase, cal_data)
 
@@ -289,15 +473,16 @@ class BoilerController:
                     t_curr = self._get_system_temp()
                     _LOGGER.info("[%s] Heating in progress... Elapsed: %ss/%ss, Current Temp: %s°C", phase, elapsed, duration, t_curr)
                     
-                    cal_data["status_desc"] = "Нагрев 5 мин"
+                    cal_data["status_desc"] = f"Нагрев {duration_minutes} мин"
                     cal_data["time_left"] = max(0, duration - elapsed)
                     self.calibration_sensor.set_calibration_state(phase, cal_data)
             except Exception as ex:
                 _LOGGER.error("Error during calibration heating loop: %s", ex)
                 success = False
         else:
-            # Одиночные фазы без насоса: нагрев до достижения T_start + 12.0°C (макс. 90 минут)
-            t_target = t_start + 12.0
+            # Одиночные фазы без насоса: нагрев до достижения целевой температуры (по умолчанию T_start + 12.0°C)
+            delta = cal_data.get("target_temperature_delta") or 12.0
+            t_target = t_start + delta
             _LOGGER.info("Starting active calibration phase: %s. Baseline Temp: %s°C, Target Temp: %s°C", phase, t_start, t_target)
             await self._actuate_heating(phase, turn_on=True, target_temp=t_target)
             
@@ -339,9 +524,9 @@ class BoilerController:
             self.calibration_sensor.set_calibration_state("idle", {})
             return
 
-        # 4. Стабилизация: 10 минут (600 секунд) для всех фаз
-        stab_duration = 600.0
-        stab_minutes = int(stab_duration // 60)
+        # 4. Стабилизация: 10 минут (или из настроек) для всех фаз
+        stab_minutes = cal_data.get("stabilization_minutes") or 10
+        stab_duration = float(stab_minutes * 60)
         _LOGGER.info("Heating target reached. Starting %s-minute stabilization delay...", stab_minutes)
         cal_data["heating_ended_at"] = dt_util.now().isoformat()
         cal_data["stabilization_duration"] = stab_duration
@@ -638,4 +823,73 @@ class BoilerController:
                 return float(state.state)
             except (ValueError, TypeError):
                 pass
+        return None
+
+    # =========================================================================
+    # LUT Helpers — Newton's Law of Cooling bracket utilities
+    # =========================================================================
+
+    @staticmethod
+    def _get_bracket_key(bracket_top: float, bracket_bottom: float) -> str:
+        """Формирует строковый ключ брэкета: '70_65' для [70°C → 65°C]."""
+        return f"{int(bracket_top)}_{int(bracket_bottom)}"
+
+    @staticmethod
+    def _apply_ema(old: float, new_measurement: float, alpha: float = 0.3) -> float:
+        """EMA с cold-start: если старое значение 0.0 — принимаем новое напрямую.
+        
+        EMA = alpha * new + (1 - alpha) * old
+        Cold-start: если old == 0.0 — возвращаем new_measurement без занижения.
+        """
+        if old == 0.0:
+            return round(new_measurement, 4)
+        return round(alpha * new_measurement + (1.0 - alpha) * old, 4)
+
+    @staticmethod
+    def _get_lut_rate(lut: dict, temp: float) -> float | None:
+        """Находит скорость потерь (°C/h) для текущей температуры по LUT.
+        
+        Брэкеты: 75_70, 70_65, 65_60 ... 25_20
+        Для T=63°C → брэкет '65_60'.
+        Для T ниже нижней границы LUT → берём ближайший нижний брэкет.
+        """
+        if not lut:
+            return None
+
+        # Определяем нижнюю границу брэкета для данной T
+        import math
+        bracket_top    = math.ceil(temp / 5.0) * 5.0
+        bracket_bottom = bracket_top - 5.0
+
+        # Если T точно на верхней границе — принадлежит брэкету выше
+        if temp == bracket_top:
+            bracket_top    += 5.0
+            bracket_bottom  = bracket_top - 5.0
+
+        key = f"{int(bracket_top)}_{int(bracket_bottom)}"
+        rate = lut.get(key)
+        if rate is not None and rate > 0:
+            return float(rate)
+
+        # Fallback: ищем ближайший существующий брэкет с ненулевым значением
+        # (бойлер мог быть холоднее чем диапазон LUT)
+        best_key   = None
+        best_delta = float("inf")
+        for k, v in lut.items():
+            if not isinstance(v, (int, float)) or v <= 0:
+                continue
+            try:
+                parts = k.split("_")
+                k_top = int(parts[0])
+                k_bot = int(parts[1])
+                k_mid = (k_top + k_bot) / 2.0
+                delta = abs(temp - k_mid)
+                if delta < best_delta:
+                    best_delta = delta
+                    best_key   = k
+            except (ValueError, IndexError):
+                continue
+
+        if best_key:
+            return float(lut[best_key])
         return None

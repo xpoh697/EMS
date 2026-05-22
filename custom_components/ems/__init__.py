@@ -146,6 +146,8 @@ async def ws_get_boiler_config(hass: HomeAssistant, connection: websocket_api.Ac
         "elec_temp":    config.get("elec_boiler_temp"),
         "pump":         config.get("circulation_pump"),
         "valve":        config.get("bypass_valve"),
+        "hw_pump":      config.get("hw_circulation_pump"),
+        "hw_return_temp": config.get("hw_circulation_return_temp"),
         "mode_select":  f"select.ems_boiler_mode",
         "consumption_entity": consumption_entity or "sensor.load_consumption_2",
     })

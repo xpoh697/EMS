@@ -55,6 +55,7 @@ def run_unified_dp(
     terminal_value_per_kwh: float,
     min_end_usable: float,
     config: DPConfig,
+    remaining_hour_fraction: float = 1.0,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -89,6 +90,17 @@ def run_unified_dp(
     if not slots or usable_capacity <= 0:
         return [], [], [], [], [], empty_stats
 
+    # Clone slots to avoid mutating input objects (and scale the first slot)
+    scaled_slots = [dict(s) for s in slots]
+    if scaled_slots and remaining_hour_fraction < 1.0:
+        first_slot = scaled_slots[0]
+        if "pv_kwh" in first_slot:
+            first_slot["pv_kwh"] = first_slot["pv_kwh"] * remaining_hour_fraction
+        if "consumption_kwh" in first_slot:
+            first_slot["consumption_kwh"] = first_slot["consumption_kwh"] * remaining_hour_fraction
+        if "ev_kwh" in first_slot:
+            first_slot["ev_kwh"] = first_slot["ev_kwh"] * remaining_hour_fraction
+
     energy_step = 0.1
     max_energy_idx = max(0, int(round(usable_capacity / energy_step)))
     initial_idx = min(max_energy_idx, max(0, int(round(current_usable / energy_step))))
@@ -110,7 +122,7 @@ def run_unified_dp(
 
     dp[0][initial_idx] = 0.0
 
-    for slot_idx, slot in enumerate(slots, start=1):
+    for slot_idx, slot in enumerate(scaled_slots, start=1):
         sell_price = slot.get("sell_price", 0.0)
         buy_price = slot.get("buy_price", 0.0)
         pv_kwh = slot.get("pv_kwh", 0.0)
@@ -163,7 +175,10 @@ def run_unified_dp(
 
             # === DIS: discharge battery to grid ===
             if (override_action == "discharge" or (not config.disable_discharge and not override_action)) and sell_price >= config.min_discharge_price and sell_price > 0:
-                max_exp = min(config.battery_max_discharge_power, usable_energy)
+                max_discharge_power = config.battery_max_discharge_power
+                if slot_idx == 1 and remaining_hour_fraction < 1.0:
+                    max_discharge_power *= remaining_hour_fraction
+                max_exp = min(max_discharge_power, usable_energy)
                 min_ei = 1
                 max_ei = int(round(max_exp / energy_step))
                 for ei in range(min_ei, max_ei + 1):
@@ -176,7 +191,10 @@ def run_unified_dp(
             # === PV_CHARGE: PV surplus -> battery, overflow -> grid ===
             avail_cap = usable_capacity - usable_energy
             if (not override_action or override_action == "grid_charge") and pv_surplus > 0 and avail_cap >= energy_step:
-                max_pvc = min(pv_surplus, avail_cap, config.battery_max_charge_power)
+                max_charge_power = config.battery_max_charge_power
+                if slot_idx == 1 and remaining_hour_fraction < 1.0:
+                    max_charge_power *= remaining_hour_fraction
+                max_pvc = min(pv_surplus, avail_cap, max_charge_power)
                 for ci in range(1, int(max_pvc / energy_step) + 1):
                     chg = ci * energy_step
                     nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
@@ -186,7 +204,10 @@ def run_unified_dp(
 
             # === GRID_CHARGE: charge battery from grid ===
             if (not override_action or override_action == "grid_charge") and avail_cap >= energy_step:
-                max_gc = min(config.battery_max_charge_power, avail_cap)
+                max_charge_power = config.battery_max_charge_power
+                if slot_idx == 1 and remaining_hour_fraction < 1.0:
+                    max_charge_power *= remaining_hour_fraction
+                max_gc = min(max_charge_power, avail_cap)
                 for ci in range(1, int(max_gc / energy_step) + 1):
                     chg = ci * energy_step
                     nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
@@ -267,7 +288,7 @@ def run_unified_dp(
     total_grid_charge = 0.0
     total_paid_import = 0.0
 
-    for slot, act, amount in zip(slots, types_by_slot, amounts_by_slot, strict=False):
+    for slot, act, amount in zip(scaled_slots, types_by_slot, amounts_by_slot, strict=False):
         start_usable = usable_energy
 
         # Apply post-processing filter for small grid discharges (exporters)

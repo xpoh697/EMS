@@ -45,6 +45,9 @@ CLEAR_OVERRIDE_SCHEMA = vol.Schema({
 
 START_CALIBRATION_SCHEMA = vol.Schema({
     vol.Required("phase"): vol.In(["gas_only", "gas_with_pump", "elec_only", "elec_with_pump"]),
+    vol.Optional("heating_duration_minutes"): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
+    vol.Optional("target_temperature_delta"): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=50.0)),
+    vol.Optional("stabilization_minutes"): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
 })
 
 
@@ -182,11 +185,20 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
     async def handle_start_calibration(call: ServiceCall) -> None:
         """Handle starting boiler calibration."""
         phase = call.data["phase"]
+        heating_duration = call.data.get("heating_duration_minutes")
+        target_delta = call.data.get("target_temperature_delta")
+        stabilization = call.data.get("stabilization_minutes")
+
         controller = hass.data[DOMAIN][entry.entry_id].get("boiler_controller")
         if not controller:
             _LOGGER.error("Boiler controller not initialized for config entry %s", entry.entry_id)
             return
-        await controller.async_start_calibration(phase)
+        await controller.async_start_calibration(
+            phase, 
+            heating_duration_minutes=heating_duration,
+            target_temperature_delta=target_delta,
+            stabilization_minutes=stabilization
+        )
 
     hass.services.async_register(
         DOMAIN, SERVICE_SET_OVERRIDE, handle_set_override, schema=SET_OVERRIDE_SCHEMA

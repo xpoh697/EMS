@@ -18,6 +18,9 @@ CONF_STATISTICS_DAYS = "statistics_days"
 CONF_FALLBACK_CONSUMPTION = "fallback_consumption"
 CONF_DEBUG = "debug"
 
+CONF_HW_CIRCULATION_PUMP = "hw_circulation_pump"
+CONF_HW_CIRCULATION_RETURN_TEMP = "hw_circulation_return_temp"
+
 # Financial configuration keys
 CONF_PRICE_BUY_SENSOR = "price_buy_sensor"
 CONF_PRICE_SELL_SENSOR = "price_sell_sensor"
