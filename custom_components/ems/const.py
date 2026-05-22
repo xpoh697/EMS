@@ -92,6 +92,7 @@ INVERTER_MODES = {
         export_pv_to_grid=False,
         is_grid_bypass=True,
         curtail_pv=False,
+	allow_boiler=True,
         calibration_limit_soc=100.0
     ),
     "no_pv_sale_no_bat": InverterModeClass(
@@ -104,6 +105,7 @@ INVERTER_MODES = {
         export_pv_to_grid=False,
         is_grid_bypass=False,
         curtail_pv=True,
+	allow_boiler=True,
         calibration_limit_soc=0.0
     ),
     "sale_pv_no_bat": InverterModeClass(
@@ -116,6 +118,7 @@ INVERTER_MODES = {
         export_pv_to_grid=True,
         is_grid_bypass=False,
         curtail_pv=False,
+	allow_boiler=False,
         calibration_limit_soc=100.0
     ),
     "sale_pv_bat": InverterModeClass(
@@ -128,6 +131,7 @@ INVERTER_MODES = {
         export_pv_to_grid=True,
         is_grid_bypass=False,
         curtail_pv=False,
+	allow_boiler=False,
         calibration_limit_soc=100.0
     ),
     "stop_sale": InverterModeClass(
@@ -140,6 +144,7 @@ INVERTER_MODES = {
         export_pv_to_grid=False,
         is_grid_bypass=False,
         curtail_pv=True,
+	allow_boiler=True,
         calibration_limit_soc=90.0
     ),
     "sale_pv": InverterModeClass(
@@ -152,6 +157,7 @@ INVERTER_MODES = {
         export_pv_to_grid=True,
         is_grid_bypass=False,
         curtail_pv=False,
+	allow_boiler=True,
         calibration_limit_soc=100.0
     ),
     "bat_emergency": InverterModeClass(
@@ -164,6 +170,7 @@ INVERTER_MODES = {
         export_pv_to_grid=False,
         is_grid_bypass=True,
         curtail_pv=False,
+	allow_boiler=False,
         calibration_limit_soc=100.0
     ),
     "idle": InverterModeClass(
@@ -176,6 +183,7 @@ INVERTER_MODES = {
         export_pv_to_grid=True,
         is_grid_bypass=True,
         curtail_pv=False,
+	allow_boiler=True,
         calibration_limit_soc=100.0
     )
 }

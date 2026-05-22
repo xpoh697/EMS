@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -1812,6 +1813,8 @@ class EmsSchedulerSensor(SensorEntity):
 
     _attr_has_entity_name = True
     _attr_should_poll = False
+    _HYSTERESIS_W = 200
+    _BUFFER_WINDOW_S = 180  # 3 minutes
 
     def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
         """Initialize the scheduler sensor."""
@@ -1821,6 +1824,11 @@ class EmsSchedulerSensor(SensorEntity):
         self._attr_name = "Scheduler"
         self._attr_unique_id = f"{entry_id}_scheduler"
         self.entity_id = "sensor.scheduler"
+
+        # Rolling 3-minute buffers for dynamic PV/load switching: (timestamp, watts)
+        self._pv_buffer: deque = deque()
+        self._load_buffer: deque = deque()
+        self._dynamic_sale_pv_active: bool = False
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -1832,6 +1840,73 @@ class EmsSchedulerSensor(SensorEntity):
             model="EMS Controller",
             sw_version=VERSION,
         )
+
+    # ------------------------------------------------------------------
+    # Rolling average helpers
+    # ------------------------------------------------------------------
+    def _push_buffer(self, buf: deque, value_w: float) -> None:
+        """Append timestamped reading and trim entries older than 3 min."""
+        now_ts = time.monotonic()
+        buf.append((now_ts, value_w))
+        cutoff = now_ts - self._BUFFER_WINDOW_S
+        while buf and buf[0][0] < cutoff:
+            buf.popleft()
+
+    def _avg_buffer(self, buf: deque) -> float | None:
+        """Return mean of buffer values, or None if empty."""
+        if not buf:
+            return None
+        return sum(v for _, v in buf) / len(buf)
+
+    def _read_power_w(self, entity_id: str | None) -> float | None:
+        """Read a power sensor value and normalise to watts."""
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if not state or state.state in (None, "unknown", "unavailable"):
+            return None
+        try:
+            val = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        unit = (state.attributes.get("unit_of_measurement") or "").strip()
+        if unit.lower() in ("kw",):
+            val *= 1000.0
+        return val
+
+    def _update_dynamic_switching(self) -> None:
+        """Update the dynamic override state based on rolling buffers."""
+        dp_state = self.hass.states.get("sensor.dp")
+        if dp_state is None or dp_state.state in ("unknown", "unavailable"):
+            self._dynamic_sale_pv_active = False
+            return
+
+        schedule = dp_state.attributes.get("schedule", [])
+        if not schedule:
+            self._dynamic_sale_pv_active = False
+            return
+
+        base_mode = schedule[0].get("physical_mode", dp_state.state)
+
+        # Dynamic switching is only evaluated if base planned mode is sale_pv_no_bat
+        if base_mode != "sale_pv_no_bat":
+            self._dynamic_sale_pv_active = False
+            return
+
+        avg_pv = self._avg_buffer(self._pv_buffer)
+        avg_load = self._avg_buffer(self._load_buffer)
+
+        # Fall back if we don't have enough data
+        if avg_pv is None or avg_load is None:
+            self._dynamic_sale_pv_active = False
+            return
+
+        if self._dynamic_sale_pv_active:
+            if avg_pv > avg_load + self._HYSTERESIS_W:
+                self._dynamic_sale_pv_active = False
+        else:
+            if avg_pv < avg_load - self._HYSTERESIS_W:
+                self._dynamic_sale_pv_active = True
 
     @property
     def native_value(self) -> str | None:
@@ -1881,7 +1956,13 @@ class EmsSchedulerSensor(SensorEntity):
         if not schedule:
             return None
 
-        return schedule[0].get("physical_mode", dp_state.state)
+        base_mode = schedule[0].get("physical_mode", dp_state.state)
+
+        # Apply precalculated dynamic switching
+        if base_mode == "sale_pv_no_bat" and self._dynamic_sale_pv_active:
+            return "sale_pv"
+
+        return base_mode
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -2070,6 +2151,9 @@ class EmsSchedulerSensor(SensorEntity):
             current_amps = current_slot.get("current_a", 0.0)
             current_target_soc = current_slot.get("soc", soc)
 
+        avg_pv = self._avg_buffer(self._pv_buffer)
+        avg_load = self._avg_buffer(self._load_buffer)
+
         return {
             "current_plan": dispatched_plan,
             "last_dp_call": last_dp_call,
@@ -2082,6 +2166,9 @@ class EmsSchedulerSensor(SensorEntity):
             "power": current_power,
             "target_soc": current_target_soc,
             "amps": current_amps,
+            "avg_pv_w": round(avg_pv, 1) if avg_pv is not None else None,
+            "avg_load_w": round(avg_load, 1) if avg_load is not None else None,
+            "pv_load_switch_active": self._dynamic_sale_pv_active,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -2095,6 +2182,25 @@ class EmsSchedulerSensor(SensorEntity):
             )
         )
 
+        # Subscribe to PV generation and house consumption power sensors
+        config = self._entry.data
+        options = self._entry.options
+        pv_sensor_id = options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION))
+        load_sensor_id = options.get(CONF_CURRENT_HOUSE_CONSUMPTION, config.get(CONF_CURRENT_HOUSE_CONSUMPTION))
+
+        if pv_sensor_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [pv_sensor_id], self._async_pv_changed
+                )
+            )
+        if load_sensor_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [load_sensor_id], self._async_load_changed
+                )
+            )
+
         # Listen for manual override updates
         self.async_on_remove(
             self.hass.bus.async_listen("ems_schedule_updated", self._async_override_changed)
@@ -2102,10 +2208,40 @@ class EmsSchedulerSensor(SensorEntity):
 
     async def _async_dp_changed(self, event) -> None:
         """Handle DP sensor changes."""
+        self._update_dynamic_switching()
         self.async_write_ha_state()
 
     async def _async_override_changed(self, event) -> None:
         """Handle manual override updates."""
+        self._update_dynamic_switching()
+        self.async_write_ha_state()
+
+    async def _async_pv_changed(self, event) -> None:
+        """Handle PV generation sensor changes — update rolling buffer."""
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in (None, "unknown", "unavailable"):
+            return
+        config = self._entry.data
+        options = self._entry.options
+        entity_id = options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION))
+        val_w = self._read_power_w(entity_id)
+        if val_w is not None:
+            self._push_buffer(self._pv_buffer, val_w)
+        self._update_dynamic_switching()
+        self.async_write_ha_state()
+
+    async def _async_load_changed(self, event) -> None:
+        """Handle house consumption sensor changes — update rolling buffer."""
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in (None, "unknown", "unavailable"):
+            return
+        config = self._entry.data
+        options = self._entry.options
+        entity_id = options.get(CONF_CURRENT_HOUSE_CONSUMPTION, config.get(CONF_CURRENT_HOUSE_CONSUMPTION))
+        val_w = self._read_power_w(entity_id)
+        if val_w is not None:
+            self._push_buffer(self._load_buffer, val_w)
+        self._update_dynamic_switching()
         self.async_write_ha_state()
 
 
