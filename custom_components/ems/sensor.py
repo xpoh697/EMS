@@ -1,6 +1,7 @@
 """Sensor platform for EMS integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta
@@ -270,6 +271,9 @@ async def async_setup_entry(
     statistics_days = options.get(CONF_STATISTICS_DAYS, config.get(CONF_STATISTICS_DAYS, DEFAULT_STATISTICS_DAYS))
     fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
 
+    # Boiler settings (to pass energy sensor)
+    elec_boiler_energy_id = options.get("elec_boiler_energy", config.get("elec_boiler_energy"))
+
     # PV forecast settings
     current_pv_generation_id = options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION))
     pv_generation_today_id = options.get(CONF_PV_GENERATION_TODAY, config.get(CONF_PV_GENERATION_TODAY))
@@ -472,6 +476,7 @@ async def async_setup_entry(
                 target_sensor_id,
                 statistics_days,
                 fallback_consumption,
+                elec_boiler_energy_id,
             )
         )
 
@@ -557,11 +562,13 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         target_sensor_id: str,
         statistics_days: int,
         fallback_consumption: float,
+        boiler_sensor_id: str | None = None,
     ) -> None:
         """Initialize the load consumption sensor."""
         self._entry_id = entry_id
         self._device_name = device_name
         self._target_sensor_id = target_sensor_id
+        self._boiler_sensor_id = boiler_sensor_id
         self._statistics_days = statistics_days
         self._fallback_consumption = fallback_consumption
 
@@ -575,10 +582,15 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         self._last_hour: int = dt_util.now().hour
         self._last_day: int = dt_util.now().day
 
+        self._boiler_today_consumption: list[float] = [0.0] * 24
+        self._boiler_last_total_value: float | None = None
+
         # Weekday averages mapping weekday (0-6) -> 24-element list
         self._averages: dict[int, list[float]] = {}
+        self._boiler_averages: dict[int, list[float]] = {}
         for weekday in range(7):
             self._averages[weekday] = [self._fallback_consumption] * 24
+            self._boiler_averages[weekday] = [0.0] * 24
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -623,6 +635,15 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         for idx, key in enumerate(day_keys):
             attrs[key] = self._averages.get(idx, [self._fallback_consumption] * 24)
 
+        if self._boiler_sensor_id:
+            attrs.update({
+                "boiler_today": self._boiler_today_consumption,
+                "boiler_average_today": self._boiler_averages.get(today_weekday, [0.0] * 24),
+                "boiler_last_total_value": self._boiler_last_total_value,
+            })
+            for idx, key in enumerate(day_keys):
+                attrs[f"boiler_{key}"] = self._boiler_averages.get(idx, [0.0] * 24)
+
         return attrs
 
     async def async_added_to_hass(self) -> None:
@@ -647,19 +668,33 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
             self._last_total_value = last_state.attributes.get("last_total_value")
             self._last_hour = last_state.attributes.get("last_hour", dt_util.now().hour)
             self._last_day = last_state.attributes.get("last_day", dt_util.now().day)
+            
+            if self._boiler_sensor_id:
+                boiler_today_attr = last_state.attributes.get("boiler_today")
+                if isinstance(boiler_today_attr, list) and len(boiler_today_attr) == 24:
+                    self._boiler_today_consumption = [float(x) for x in boiler_today_attr]
+                else:
+                    self._boiler_today_consumption = [0.0] * 24
+                self._boiler_last_total_value = last_state.attributes.get("boiler_last_total_value")
         else:
             self._state = 0.0
             self._today_consumption = [0.0] * 24
             self._last_hour = dt_util.now().hour
             self._last_day = dt_util.now().day
+            self._boiler_today_consumption = [0.0] * 24
+            self._boiler_last_total_value = None
 
         # Initial fetch of averages from statistics
         await self.async_update_averages()
 
         # Listener for cumulative sensor changes
+        listen_entities = [self._target_sensor_id]
+        if self._boiler_sensor_id:
+            listen_entities.append(self._boiler_sensor_id)
+            
         self.async_on_remove(
             async_track_state_change_event(
-                self.hass, [self._target_sensor_id], self._async_sensor_state_listener
+                self.hass, listen_entities, self._async_sensor_state_listener
             )
         )
 
@@ -675,9 +710,19 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         from .statistics import async_get_average_hourly_consumption
 
         ems_log(self.hass, _LOGGER, logging.DEBUG, "Updating EMS weekday average statistics profiles")
-        averages = await async_get_average_hourly_consumption(
-            self.hass, self._target_sensor_id, self._statistics_days
-        )
+        
+        tasks = [
+            async_get_average_hourly_consumption(self.hass, self._target_sensor_id, self._statistics_days)
+        ]
+        if self._boiler_sensor_id:
+            tasks.append(
+                async_get_average_hourly_consumption(self.hass, self._boiler_sensor_id, self._statistics_days)
+            )
+            
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        averages = results[0] if not isinstance(results[0], Exception) else None
+        boiler_averages = results[1] if self._boiler_sensor_id and len(results) > 1 and not isinstance(results[1], Exception) else None
 
         if averages:
             for weekday in range(7):
@@ -693,6 +738,19 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
             for weekday in range(7):
                 self._averages[weekday] = [self._fallback_consumption] * 24
 
+        if self._boiler_sensor_id:
+            if boiler_averages:
+                for weekday in range(7):
+                    day_avg = []
+                    for hour in range(24):
+                        val = boiler_averages.get(weekday, {}).get(hour, 0.0)
+                        day_avg.append(round(max(val, 0.0), 4))
+                    self._boiler_averages[weekday] = day_avg
+            else:
+                ems_log(self.hass, _LOGGER, logging.DEBUG, "No boiler statistics available, using zero fallback")
+                for weekday in range(7):
+                    self._boiler_averages[weekday] = [0.0] * 24
+
     async def _async_hourly_trigger(self, datetime_now) -> None:
         """Handle transitioning to a new hour and resetting daily parameters at midnight."""
         now = dt_util.now()
@@ -701,19 +759,20 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         if now.day != self._last_day:
             ems_log(self.hass, _LOGGER, logging.INFO, "EMS load consumption midnight reset triggered")
             self._today_consumption = [0.0] * 24
+            self._boiler_today_consumption = [0.0] * 24
             self._last_day = now.day
             self._state = 0.0
             # Update averages at the start of a new day
             await self.async_update_averages()
-
         self._last_hour = now.hour
         self.async_write_ha_state()
 
     async def _async_sensor_state_listener(self, event) -> None:
-        """Track state updates from the target cumulative sensor and calculate hourly deltas."""
+        """Track state updates from the target cumulative sensors and calculate hourly deltas."""
+        entity_id = event.data.get("entity_id")
         new_state = event.data.get("new_state")
         if new_state is None:
-            ems_log(self.hass, _LOGGER, logging.ERROR, f"Sensor state for {self._target_sensor_id} is None!")
+            ems_log(self.hass, _LOGGER, logging.ERROR, f"Sensor state for {entity_id} is None!")
             return
 
         if new_state.state in (None, "unknown", "unavailable"):
@@ -721,7 +780,7 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
                 self.hass,
                 _LOGGER,
                 logging.ERROR,
-                f"Sensor state for {self._target_sensor_id} is invalid: {new_state.state}"
+                f"Sensor state for {entity_id} is invalid: {new_state.state}"
             )
             return
 
@@ -732,7 +791,7 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
                 self.hass,
                 _LOGGER,
                 logging.ERROR,
-                f"Could not convert sensor state '{new_state.state}' to float for {self._target_sensor_id}: {err}"
+                f"Could not convert sensor state '{new_state.state}' to float for {entity_id}: {err}"
             )
             return
 
@@ -741,7 +800,7 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
             self.hass,
             _LOGGER,
             logging.INFO,
-            f"Successfully retrieved value from {self._target_sensor_id}: {new_value} kWh"
+            f"Successfully retrieved value from {entity_id}: {new_value} kWh"
         )
 
         now = dt_util.now()
@@ -749,31 +808,47 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         # Double check midnight transition in case cron lagged
         if now.day != self._last_day:
             self._today_consumption = [0.0] * 24
+            self._boiler_today_consumption = [0.0] * 24
             self._last_day = now.day
             self._last_hour = now.hour
             await self.async_update_averages()
 
-        if self._last_total_value is None:
+        is_boiler = (entity_id == self._boiler_sensor_id)
+        last_val = self._boiler_last_total_value if is_boiler else self._last_total_value
+
+        if last_val is None:
             # First sensor update since boot - initialize base value
-            self._last_total_value = new_value
+            if is_boiler:
+                self._boiler_last_total_value = new_value
+            else:
+                self._last_total_value = new_value
             self._last_hour = now.hour
             self.async_write_ha_state()
             return
 
-        delta = new_value - self._last_total_value
+        delta = new_value - last_val
         if delta < 0:
             # Handle source sensor resets
-            self._last_total_value = new_value
+            if is_boiler:
+                self._boiler_last_total_value = new_value
+            else:
+                self._last_total_value = new_value
             self.async_write_ha_state()
             return
 
         current_hour = now.hour
-        # Update hourly slot and total today value
-        self._today_consumption[current_hour] = round(self._today_consumption[current_hour] + delta, 4)
-        self._last_total_value = new_value
-        self._last_hour = current_hour
-        self._state = round(sum(self._today_consumption), 4)
+        
+        if is_boiler:
+            self._boiler_today_consumption[current_hour] = round(self._boiler_today_consumption[current_hour] + delta, 4)
+            self._boiler_last_total_value = new_value
+        else:
+            self._today_consumption[current_hour] = round(self._today_consumption[current_hour] + delta, 4)
+            self._last_total_value = new_value
+            
+            # Update the main state (cumulative consumption for today)
+            self._state = round(sum(self._today_consumption), 4)
 
+        self._last_hour = current_hour
         self.async_write_ha_state()
 
 
