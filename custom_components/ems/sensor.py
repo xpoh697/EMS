@@ -23,6 +23,8 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
+from .utils import ems_log
+
 from .const import (
     DOMAIN,
     VERSION,
@@ -1268,7 +1270,6 @@ class EmsDpSensor(SensorEntity):
                 CONF_BAT_CAPACITY_ENTITY,
                 CONF_BAT_SOC_ENTITY,
             ]
-            from .utils import ems_log
             for key in required_keys:
                 entity_id = options.get(key, config.get(key))
                 if not entity_id:
