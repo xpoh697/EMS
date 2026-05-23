@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.6.0";
+const CARD_VERSION = "1.8.0";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -399,46 +399,131 @@ const STYLES = `
   }
 
   /* ─── Schedule Tab Styling ───────────────────────────────────────────── */
+  .schedule-day-header {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--primary-color, #2196f3);
+    margin: 16px 16px 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-left: 3px solid var(--primary-color, #2196f3);
+    padding-left: 8px;
+  }
   .schedule-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 8px;
-    padding: 16px;
+    padding: 0 16px 16px;
   }
   .schedule-tile {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
     border-radius: 8px;
     padding: 10px 4px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 4px;
+    gap: 6px;
     cursor: pointer;
     transition: background .2s, border-color .2s, transform .1s;
+    border: 1px solid transparent;
   }
   .schedule-tile:hover {
-    background: rgba(255,255,255,0.08);
-    border-color: rgba(255,255,255,0.15);
     transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
   }
   .schedule-tile:active {
     transform: translateY(0);
   }
   .schedule-tile .st-hour {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
-    color: var(--secondary-text-color);
+  }
+  .schedule-tile .st-icons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+  }
+  .schedule-tile .st-icons ha-icon {
+    --mdc-icon-size: 20px;
+  }
+  .schedule-tile .st-icons ha-icon.pump-icon {
+    --mdc-icon-size: 14px;
+    animation: spin-pump 3s linear infinite;
   }
   .schedule-tile .st-mode {
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
-    padding: 2px 5px;
+    padding: 2px 4px;
     border-radius: 4px;
     text-align: center;
     white-space: nowrap;
+    text-transform: uppercase;
   }
+
+  /* Themes */
+  .schedule-tile.theme-idle {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(255,255,255,0.06);
+    color: var(--secondary-text-color);
+  }
+  .schedule-tile.theme-idle .st-hour {
+    color: var(--secondary-text-color);
+    opacity: 0.8;
+  }
+  .schedule-tile.theme-idle .st-icons ha-icon {
+    color: var(--secondary-text-color);
+    opacity: 0.5;
+  }
+
+  .schedule-tile.theme-gas {
+    background: rgba(255,152,0,0.08);
+    border-color: rgba(255,152,0,0.25);
+    color: #ff9800;
+  }
+  .schedule-tile.theme-gas .st-hour {
+    color: #ffb74d;
+  }
+  .schedule-tile.theme-gas .st-icons ha-icon {
+    color: #ff9800;
+  }
+
+  .schedule-tile.theme-gas_pump {
+    background: rgba(255,152,0,0.15);
+    border-color: rgba(255,152,0,0.4);
+    color: #ffb74d;
+  }
+  .schedule-tile.theme-gas_pump .st-hour {
+    color: #ffe0b2;
+  }
+  .schedule-tile.theme-gas_pump .st-icons ha-icon {
+    color: #ff9800;
+  }
+
+  .schedule-tile.theme-elec {
+    background: rgba(76,175,80,0.08);
+    border-color: rgba(76,175,80,0.25);
+    color: #4caf50;
+  }
+  .schedule-tile.theme-elec .st-hour {
+    color: #81c784;
+  }
+  .schedule-tile.theme-elec .st-icons ha-icon {
+    color: #4caf50;
+  }
+
+  .schedule-tile.theme-elec_pump {
+    background: rgba(76,175,80,0.15);
+    border-color: rgba(76,175,80,0.4);
+    color: #81c784;
+  }
+  .schedule-tile.theme-elec_pump .st-hour {
+    color: #c8e6c9;
+  }
+  .schedule-tile.theme-elec_pump .st-icons ha-icon {
+    color: #4caf50;
+  }
+
   .mode-idle { background: rgba(255,255,255,0.06); color: var(--secondary-text-color); }
   .mode-gas { background: rgba(255,152,0,0.12); color: #ff9800; }
   .mode-gas_pump { background: rgba(255,152,0,0.22); color: #ffb74d; border: 1px dashed #ff9800; }
@@ -539,6 +624,50 @@ const STYLES = `
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
+
+  /* ─── Auto settings panel ────────────────────────────────────────────── */
+  .auto-settings-panel {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 12px;
+    margin: 8px 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .auto-settings-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--primary-color, #2196f3);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .auto-settings-row {
+    display: flex;
+    gap: 12px;
+  }
+  .auto-select-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .auto-select-col label {
+    font-size: 11px;
+    color: var(--secondary-text-color);
+  }
+  .auto-select-col select {
+    background: #2c2c2e;
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    padding: 8px;
+    font-size: 13px;
+    outline: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
 `;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -577,6 +706,7 @@ class BoilerCard extends HTMLElement {
     this._cardConfig    = {};
     this._skeletonBuilt = false;   // full DOM built?
     this._prevKey       = null;    // cheap dirty-check string
+    this._scheduleNeedsUpdate = true;
   }
 
   // ── Lovelace hooks ───────────────────────────────────────────────────────
@@ -853,19 +983,65 @@ class BoilerCard extends HTMLElement {
     this._controls.appendChild(this._btnValve);
     this._controls.appendChild(this._btnHwPump);
 
+    // Auto Settings Panel (Schedule Start/End selection)
+    this._autoSettingsPanel = document.createElement("div");
+    this._autoSettingsPanel.className = "auto-settings-panel hidden";
+    this._autoSettingsPanel.innerHTML = `
+      <div class="auto-settings-title">Часы работы нагрева</div>
+      <div class="auto-settings-row">
+        <div class="auto-select-col">
+          <label>С</label>
+          <select id="auto-start-hour">
+            ${Array.from({length: 24}, (_, i) => `<option value="${i}">${String(i).padStart(2, '0')}:00</option>`).join("")}
+          </select>
+        </div>
+        <div class="auto-select-col">
+          <label>По</label>
+          <select id="auto-end-hour">
+            ${Array.from({length: 24}, (_, i) => `<option value="${i}">${String(i).padStart(2, '0')}:00</option>`).join("")}
+          </select>
+        </div>
+      </div>
+    `;
+
+    this._autoStartSelect = this._autoSettingsPanel.querySelector("#auto-start-hour");
+    this._autoEndSelect = this._autoSettingsPanel.querySelector("#auto-end-hour");
+
+    this._autoStartSelect.addEventListener("change", () => {
+      const val = parseFloat(this._autoStartSelect.value);
+      this._hass.callService("number", "set_value", {
+        entity_id: this._entities.heating_start_hour || "number.ems_boiler_heating_start_hour",
+        value: val
+      });
+    });
+
+    this._autoEndSelect.addEventListener("change", () => {
+      const val = parseFloat(this._autoEndSelect.value);
+      this._hass.callService("number", "set_value", {
+        entity_id: this._entities.heating_end_hour || "number.ems_boiler_heating_end_hour",
+        value: val
+      });
+    });
+
     // Auto hint
     this._autoHint = document.createElement("div");
     this._autoHint.className = "auto-hint";
     this._autoHint.innerHTML = `<ha-icon icon="mdi:robot-outline"></ha-icon> Управление автоматическое`;
 
     this._statusContent.appendChild(this._controls);
+    this._statusContent.appendChild(this._autoSettingsPanel);
     this._statusContent.appendChild(this._autoHint);
     card.appendChild(this._statusContent);
 
     // Schedule Tab Content
     this._scheduleContent = document.createElement("div");
     this._scheduleContent.className = "tab-content-schedule hidden";
-    this._scheduleContent.innerHTML = `<div class="schedule-grid" id="sched-grid"></div>`;
+    this._scheduleContent.innerHTML = `
+      <div id="sched-hdr-today" class="schedule-day-header hidden">Сегодня</div>
+      <div class="schedule-grid hidden" id="sched-grid-today"></div>
+      <div id="sched-hdr-tomorrow" class="schedule-day-header hidden">Завтра</div>
+      <div class="schedule-grid hidden" id="sched-grid-tomorrow"></div>
+    `;
     card.appendChild(this._scheduleContent);
 
     // Modal Dialog overlay
@@ -910,6 +1086,9 @@ class BoilerCard extends HTMLElement {
       tabStatus.classList.remove("active");
       this._statusContent.classList.add("hidden");
       this._scheduleContent.classList.remove("hidden");
+      if (this._scheduleNeedsUpdate) {
+        this._updateSchedule();
+      }
     });
 
     sr.appendChild(card);
@@ -1041,7 +1220,20 @@ class BoilerCard extends HTMLElement {
 
     // ── Show/hide controls vs hint ────────────────────────────────────────
     this._controls.classList.toggle("hidden", !isManual);
+    this._autoSettingsPanel.classList.toggle("hidden", isManual);
     this._autoHint.classList.toggle("hidden",  isManual);
+
+    if (!isManual) {
+      const startEnt = st[this._entities.heating_start_hour || "number.ems_boiler_heating_start_hour"];
+      const endEnt = st[this._entities.heating_end_hour || "number.ems_boiler_heating_end_hour"];
+      
+      if (startEnt && startEnt.state !== undefined && startEnt.state !== "unknown" && startEnt.state !== "unavailable") {
+        this._autoStartSelect.value = Math.round(parseFloat(startEnt.state));
+      }
+      if (endEnt && endEnt.state !== undefined && endEnt.state !== "unknown" && endEnt.state !== "unavailable") {
+        this._autoEndSelect.value = Math.round(parseFloat(endEnt.state));
+      }
+    }
 
     if (isManual) {
       const manualActive = dpS?.attributes?.manual_heating_active === true;
@@ -1080,30 +1272,96 @@ class BoilerCard extends HTMLElement {
       }
     }
 
-    // ── Update Schedule Grid ──────────────────────────────────────────────
+    // ── Update Schedule Grid (Lazy update) ────────────────────────────────
+    const tabSchedule = this.shadowRoot.querySelector("#tab-schedule");
+    const isScheduleActive = tabSchedule && tabSchedule.classList.contains("active");
+    if (isScheduleActive) {
+      this._updateSchedule();
+    } else {
+      this._scheduleNeedsUpdate = true;
+    }
+  }
+
+  _updateSchedule() {
+    this._scheduleNeedsUpdate = false;
+    if (!this._hass) return;
+
+    const dpS = this._hass.states["sensor.boiler_dp"];
     const schedule = dpS?.attributes?.schedule || [];
-    const grid = this._scheduleContent.querySelector("#sched-grid");
-    grid.innerHTML = "";
+
+    const hdrToday = this._scheduleContent.querySelector("#sched-hdr-today");
+    const gridToday = this._scheduleContent.querySelector("#sched-grid-today");
+    const hdrTomorrow = this._scheduleContent.querySelector("#sched-hdr-tomorrow");
+    const gridTomorrow = this._scheduleContent.querySelector("#sched-grid-tomorrow");
+
+    gridToday.innerHTML = "";
+    gridTomorrow.innerHTML = "";
 
     if (schedule.length === 0) {
-      grid.innerHTML = `<div style="grid-column: span 4; text-align: center; color: var(--secondary-text-color); font-size: 13px; padding: 20px 0;">Расписание недоступно</div>`;
-    } else {
-      schedule.forEach((slot) => {
-        const tile = document.createElement("div");
-        tile.className = "schedule-tile";
-        
-        const hourStr = String(slot.hour).padStart(2, '0') + ":00";
-        const modeName = slot.mode || "IDLE";
-        
-        tile.innerHTML = `
-          <span class="st-hour">${hourStr}</span>
-          <span class="st-mode mode-${modeName.toLowerCase()}">${modeName}</span>
-        `;
-        tile.addEventListener("click", () => {
-          this._showSlotDetails(slot);
-        });
-        grid.appendChild(tile);
+      hdrToday.classList.add("hidden");
+      hdrTomorrow.classList.add("hidden");
+      gridTomorrow.classList.add("hidden");
+      gridToday.classList.remove("hidden");
+      gridToday.innerHTML = `<div style="grid-column: span 4; text-align: center; color: var(--secondary-text-color); font-size: 13px; padding: 20px 0;">Расписание недоступно</div>`;
+      return;
+    }
+
+    const startHour = new Date().getHours();
+    let todayCount = 0;
+    let tomorrowCount = 0;
+
+    schedule.forEach((slot, i) => {
+      const tile = document.createElement("div");
+      const modeName = slot.mode || "IDLE";
+      tile.className = `schedule-tile theme-${modeName.toLowerCase()}`;
+      
+      const hourStr = String(slot.hour).padStart(2, '0') + ":00";
+      
+      let iconsHtml = "";
+      if (modeName === "IDLE") {
+        iconsHtml = `<ha-icon icon="mdi:power-sleep"></ha-icon>`;
+      } else if (modeName === "GAS") {
+        iconsHtml = `<ha-icon icon="mdi:fire"></ha-icon>`;
+      } else if (modeName === "GAS_PUMP") {
+        iconsHtml = `<ha-icon icon="mdi:fire"></ha-icon><ha-icon icon="mdi:pump" class="pump-icon"></ha-icon>`;
+      } else if (modeName === "ELEC") {
+        iconsHtml = `<ha-icon icon="mdi:lightning-bolt"></ha-icon>`;
+      } else if (modeName === "ELEC_PUMP") {
+        iconsHtml = `<ha-icon icon="mdi:lightning-bolt"></ha-icon><ha-icon icon="mdi:pump" class="pump-icon"></ha-icon>`;
+      }
+
+      tile.innerHTML = `
+        <span class="st-hour">${hourStr}</span>
+        <div class="st-icons">${iconsHtml}</div>
+        <span class="st-mode mode-${modeName.toLowerCase()}">${modeName}</span>
+      `;
+      tile.addEventListener("click", () => {
+        this._showSlotDetails(slot);
       });
+
+      if (startHour + i < 24) {
+        gridToday.appendChild(tile);
+        todayCount++;
+      } else {
+        gridTomorrow.appendChild(tile);
+        tomorrowCount++;
+      }
+    });
+
+    if (todayCount > 0) {
+      hdrToday.classList.remove("hidden");
+      gridToday.classList.remove("hidden");
+    } else {
+      hdrToday.classList.add("hidden");
+      gridToday.classList.add("hidden");
+    }
+
+    if (tomorrowCount > 0) {
+      hdrTomorrow.classList.remove("hidden");
+      gridTomorrow.classList.remove("hidden");
+    } else {
+      hdrTomorrow.classList.add("hidden");
+      gridTomorrow.classList.add("hidden");
     }
   }
 

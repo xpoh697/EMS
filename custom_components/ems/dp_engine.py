@@ -47,6 +47,19 @@ def hours_from_now(price_entry: dict) -> float:
         return 0
 
 
+def get_cvcc_charge_multiplier(soc: float) -> float:
+    """Calculate the charge power multiplier based on CVCC battery characteristics."""
+    if soc < 93.0:
+        return 1.0
+    if soc < 95.0:
+        return 0.80
+    if soc < 97.0:
+        return 0.50
+    if soc < 99.0:
+        return 0.25
+    return 0.10
+
+
 def run_unified_dp(
     slots: list[dict[str, Any]],
     current_usable: float,
@@ -87,7 +100,7 @@ def run_unified_dp(
         "pv_charge_hours": 0,
         "paid_import_hours": 0,
     }
-    if not slots or usable_capacity <= 0:
+    if not slots or usable_capacity <= 0 or config.battery_capacity <= 0.0:
         return [], [], [], [], [], empty_stats
 
     # Clone slots to avoid mutating input objects (and scale the first slot)
@@ -105,6 +118,14 @@ def run_unified_dp(
     max_energy_idx = max(0, int(round(usable_capacity / energy_step)))
     initial_idx = min(max_energy_idx, max(0, int(round(current_usable / energy_step))))
     neg_inf = float("-inf")
+
+    # Pre-calculate CVCC charge multipliers for all states to optimize loop performance
+    cvcc_multipliers = []
+    for s_idx in range(max_energy_idx + 1):
+        usable_energy = s_idx * energy_step
+        soc_val = config.battery_min_soc + (usable_energy / config.battery_capacity * 100.0)
+        clamped_soc = min(100.0, max(0.0, soc_val))
+        cvcc_multipliers.append(get_cvcc_charge_multiplier(clamped_soc))
 
     n_slots = len(slots)
     dp: list[list[float]] = [
@@ -191,7 +212,7 @@ def run_unified_dp(
             # === PV_CHARGE: PV surplus -> battery, overflow -> grid ===
             avail_cap = usable_capacity - usable_energy
             if (not override_action or override_action == "grid_charge") and pv_surplus > 0 and avail_cap >= energy_step:
-                max_charge_power = config.battery_max_charge_power
+                max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_charge_power *= remaining_hour_fraction
                 max_pvc = min(pv_surplus, avail_cap, max_charge_power)
@@ -204,7 +225,7 @@ def run_unified_dp(
 
             # === GRID_CHARGE: charge battery from grid ===
             if (not override_action or override_action == "grid_charge") and avail_cap >= energy_step:
-                max_charge_power = config.battery_max_charge_power
+                max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_charge_power *= remaining_hour_fraction
                 max_gc = min(max_charge_power, avail_cap)

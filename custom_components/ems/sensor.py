@@ -3204,6 +3204,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         self._recommended_bypass: str = "OFF"
         self._schedule: list[dict] = []
         self._stats: dict = {}
+        self._heating_start_hour: int = 0
+        self._heating_end_hour: int = 23
         self._t_start: float | None = None
         self._t_min: float | None = None
         self._t_max_elec: float | None = None
@@ -3263,6 +3265,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "manual_heating_active": manual_active,
             "manual_heating_mode": manual_mode,
             "manual_heating_setpoint": manual_setpoint,
+            "heating_start_hour": self._heating_start_hour,
+            "heating_end_hour": self._heating_end_hour,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -3277,6 +3281,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._stats = attrs.get("stats", {})
             self._recommended_bypass = attrs.get("recommended_bypass", "OFF")
             self._t_start = attrs.get("t_start")
+            self._heating_start_hour = attrs.get("heating_start_hour", 0)
+            self._heating_end_hour = attrs.get("heating_end_hour", 23)
             self._t_min = attrs.get("t_min")
             self._t_max_elec = attrs.get("t_max_elec")
             self._t_max_gas = attrs.get("t_max_gas")
@@ -3297,7 +3303,12 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         gas_sensor = options.get("gas_boiler_climate", config.get("gas_boiler_climate"))
         elec_sensor = options.get("elec_boiler_temp", config.get("elec_boiler_temp"))
 
-        listeners = ["sensor.dp", "sensor.boiler_calibration"]
+        listeners = [
+            "sensor.dp",
+            "sensor.boiler_calibration",
+            "number.ems_boiler_heating_start_hour",
+            "number.ems_boiler_heating_end_hour",
+        ]
         if gas_sensor:
             listeners.append(gas_sensor)
         if elec_sensor:
@@ -3325,7 +3336,11 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
 
     async def _async_state_changed_listener(self, event) -> None:
         """Handle monitored entity state changes with debouncing."""
-        await self.async_update_boiler_dp(force=False)
+        entity_id = event.data.get("entity_id")
+        force = False
+        if entity_id in ("number.ems_boiler_heating_start_hour", "number.ems_boiler_heating_end_hour"):
+            force = True
+        await self.async_update_boiler_dp(force=force)
 
     async def async_update_boiler_dp(self, force: bool = False) -> None:
         """Calculate the Boiler DP schedule inside executor."""
@@ -3447,6 +3462,10 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 if state and state.state == "on":
                     bypass_start = True
 
+            storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
+            heating_start_hour = int(round(getattr(storage, "boiler_heating_start_hour", 0.0)))
+            heating_end_hour = int(round(getattr(storage, "boiler_heating_end_hour", 23.0)))
+
             from .boiler_dp_engine import run_boiler_dp
             current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(
                 run_boiler_dp,
@@ -3461,6 +3480,9 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 vol_gas,
                 gas_cost_m3,
                 cal_data,
+                0.001,  # temp_reward
+                heating_start_hour,
+                heating_end_hour,
             )
 
             self._state = current_action
@@ -3471,6 +3493,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 self._recommended_bypass = "ON" if first_bypass else "OFF"
             else:
                 self._recommended_bypass = "OFF"
+            self._heating_start_hour = heating_start_hour
+            self._heating_end_hour = heating_end_hour
         except Exception as err:
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Error running boiler DP optimizer: {err}", exc_info=True)
             self._state = "error"

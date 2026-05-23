@@ -26,6 +26,8 @@ async def async_setup_entry(
         EmsMinSellPriceNumber(entry.entry_id, entry.title, storage),
         EmsMinDischargePriceNumber(entry.entry_id, entry.title, storage),
         EmsMinEnergyToDischargeNumber(entry.entry_id, entry.title, storage),
+        EmsBoilerHeatingStartHourNumber(entry.entry_id, entry.title, storage),
+        EmsBoilerHeatingEndHourNumber(entry.entry_id, entry.title, storage),
     ])
 
 
@@ -205,6 +207,96 @@ class EmsMinDischargePriceNumber(NumberEntity):
         """Update the minimum discharge price value."""
         clamped_value = float(max(self.native_min_value, min(value, self.native_max_value)))
         self._storage.min_discharge_price = clamped_value
+        await self._storage.async_save()
+        self.async_write_ha_state()
+        # Fire event to trigger immediate DP recalculation
+        self.hass.bus.async_fire("ems_schedule_updated")
+class EmsBoilerHeatingStartHourNumber(NumberEntity):
+    """EMS Boiler Heating Start Hour number entity."""
+
+    _attr_has_entity_name = True
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 23.0
+    _attr_native_step = 1.0
+    _attr_mode = NumberMode.BOX
+    _attr_icon = "mdi:clock-start"
+    _attr_native_unit_of_measurement = "h"
+
+    def __init__(self, entry_id: str, device_name: str, storage: Any) -> None:
+        """Initialize the number entity."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._storage = storage
+        self._attr_name = "Boiler Heating Start Hour"
+        self._attr_unique_id = f"{entry_id}_boiler_heating_start_hour"
+        self.entity_id = "number.ems_boiler_heating_start_hour"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        """Return the current start hour."""
+        return getattr(self._storage, "boiler_heating_start_hour", 0.0)
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the start hour value."""
+        clamped_value = float(max(self.native_min_value, min(value, self.native_max_value)))
+        self._storage.boiler_heating_start_hour = clamped_value
+        await self._storage.async_save()
+        self.async_write_ha_state()
+        # Fire event to trigger immediate DP recalculation
+        self.hass.bus.async_fire("ems_schedule_updated")
+
+
+class EmsBoilerHeatingEndHourNumber(NumberEntity):
+    """EMS Boiler Heating End Hour number entity."""
+
+    _attr_has_entity_name = True
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 23.0
+    _attr_native_step = 1.0
+    _attr_mode = NumberMode.BOX
+    _attr_icon = "mdi:clock-end"
+    _attr_native_unit_of_measurement = "h"
+
+    def __init__(self, entry_id: str, device_name: str, storage: Any) -> None:
+        """Initialize the number entity."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._storage = storage
+        self._attr_name = "Boiler Heating End Hour"
+        self._attr_unique_id = f"{entry_id}_boiler_heating_end_hour"
+        self.entity_id = "number.ems_boiler_heating_end_hour"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        """Return the current end hour."""
+        return getattr(self._storage, "boiler_heating_end_hour", 23.0)
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the end hour value."""
+        clamped_value = float(max(self.native_min_value, min(value, self.native_max_value)))
+        self._storage.boiler_heating_end_hour = clamped_value
         await self._storage.async_save()
         self.async_write_ha_state()
         # Fire event to trigger immediate DP recalculation

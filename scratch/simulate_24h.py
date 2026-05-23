@@ -1,27 +1,22 @@
-"""Boiler DP Engine for EMS."""
-import logging
+import sys
+import os
+import json
 import math
 from typing import Any, Dict, List, Tuple
-from .const import INVERTER_MODES
 
-_LOGGER = logging.getLogger(__name__)
-
+# Re-implement run_boiler_dp here with the fix to test it
 def get_lut_rate(lut: dict, temp: float) -> float:
-    """Find standby cooling rate (°C/h) for the given temperature from LUT."""
     if not lut:
         return 0.0
-
     bracket_top = math.ceil(temp / 5.0) * 5.0
     bracket_bottom = bracket_top - 5.0
     if temp == bracket_top:
         bracket_top += 5.0
         bracket_bottom = bracket_top - 5.0
-
     key = f"{int(bracket_top)}_{int(bracket_bottom)}"
     rate = lut.get(key)
     if rate is not None and rate > 0:
         return float(rate)
-
     best_key = None
     best_delta = float("inf")
     for k, v in lut.items():
@@ -38,18 +33,16 @@ def get_lut_rate(lut: dict, temp: float) -> float:
                 best_key = k
         except (ValueError, IndexError):
             continue
-
     if best_key:
         return float(lut[best_key])
     return 0.0
 
-def is_hour_in_range(hour: int, start: int, end: int) -> bool:
-    """Check if the given hour is within the allowed heating range (inclusive)."""
-    if start <= end:
-        return start <= hour <= end
-    return hour >= start or hour <= end
+INVERTER_MODES = {
+    "idle": type("InverterMode", (object,), {"curtail_pv": False, "allow_boiler": True, "calibration_limit_soc": 100.0})(),
+    "sale_pv": type("InverterMode", (object,), {"curtail_pv": True, "allow_boiler": True, "calibration_limit_soc": 80.0})(),
+}
 
-def run_boiler_dp(
+def run_boiler_dp_fixed(
     slots: List[Dict[str, Any]],
     t_gas_start: float,
     t_elec_start: float,
@@ -62,77 +55,31 @@ def run_boiler_dp(
     gas_cost_m3: float,
     cal_data: Dict[str, Any],
     temp_reward: float = 0.001,
-    heating_start_hour: int = 0,
-    heating_end_hour: int = 23,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
-    """Run Dynamic Programming strategy optimizer for hot water boiler.
-
-    Returns (status, schedule_list, stats_dict).
-    """
-    # 1. Validation
     eff_gas_only = cal_data.get("gas_only", {}).get("efficiency_c_per_m3", 0.0)
     eff_gas_pump = cal_data.get("gas_with_pump", {}).get("efficiency_c_per_m3", 0.0)
     eff_elec_only = cal_data.get("elec_only", {}).get("efficiency_c_per_kwh", 0.0)
     eff_elec_pump = cal_data.get("elec_with_pump", {}).get("efficiency_c_per_kwh", 0.0)
-
-    has_active_boiler = False
-    if vol_gas > 0.0:
-        if eff_gas_only <= 0.0 or eff_gas_pump <= 0.0:
-            _LOGGER.warning("EMS Boiler DP: Missing or invalid gas calibration data. Gas Only: %s, Gas Pump: %s", eff_gas_only, eff_gas_pump)
-            return "NO CALIB DATA", [], {}
-        has_active_boiler = True
-    if vol_elec > 0.0:
-        if eff_elec_only <= 0.0 or eff_elec_pump <= 0.0:
-            _LOGGER.warning("EMS Boiler DP: Missing or invalid electric calibration data. Elec Only: %s, Elec Pump: %s", eff_elec_only, eff_elec_pump)
-            return "NO CALIB DATA", [], {}
-        has_active_boiler = True
-
-    if not has_active_boiler:
-        _LOGGER.warning("EMS Boiler DP: No active boilers configured or available.")
-        return "NO CALIB DATA", [], {}
-
     standby_losses = cal_data.get("standby_losses", {})
 
     t_max = max(t_max_elec, t_max_gas)
-    if t_min >= t_max:
-        _LOGGER.error("EMS Boiler DP: Invalid temperature ranges: T_min (%s) >= T_max (%s)", t_min, t_max)
-        return "ERROR", [], {}
-
-    start_h = max(0, min(23, int(round(heating_start_hour))))
-    end_h = max(0, min(23, int(round(heating_end_hour))))
-
-    # Total grid size with lower bound at 20.0°C (water supply temp) to allow unused boiler to cool freely
     GRID_MIN_TEMP = min(20.0, t_min)
     num_states = int(round((t_max - GRID_MIN_TEMP) * 2)) + 1
     
-    # Clamp starting gas temp to grid range
     t_gas_start_clamped = max(GRID_MIN_TEMP, min(t_gas_start, t_max))
     start_idx = int(round((t_gas_start_clamped - GRID_MIN_TEMP) * 2))
-
     N = len(slots)
-    if N == 0:
-        return "idle", [], {}
-
-    # Run DP with relaxed constraint fallback
-    best_path = None
-    relaxed_used = False
 
     for relax in [False, True]:
         t_min_limit = t_min if not relax else 20.0
-        
-        # dp[h][state_idx] -> minimum cost to reach state_idx at end of slot h (1-indexed)
         dp = [[float("inf")] * num_states for _ in range(N + 1)]
         prev_state = [[-1] * num_states for _ in range(N + 1)]
         prev_mode = [["IDLE"] * num_states for _ in range(N + 1)]
         prev_cost = [[0.0] * num_states for _ in range(N + 1)]
         prev_energy = [[0.0] * num_states for _ in range(N + 1)]
-        
-        # elec_temp[h][state_idx] -> temperature of electric boiler at end of slot h
         elec_temp = [[GRID_MIN_TEMP] * num_states for _ in range(N + 1)]
-        # bypass_state[h][state_idx] -> True if bypass is open (serial) at end of slot h
         bypass_state = [[False] * num_states for _ in range(N + 1)]
 
-        # Initial state (hour 0)
         dp[0][start_idx] = 0.0
         elec_temp[0][start_idx] = t_elec_start
         bypass_state[0][start_idx] = bypass_start
@@ -144,10 +91,7 @@ def run_boiler_dp(
             mode_name = slot.get("physical_mode", "idle")
             soc = slot.get("expected_soc", 50.0)
 
-            # Retrieve Inverter mode configurations
             mode_config = INVERTER_MODES.get(mode_name)
-            
-            # Electricity pricing tariff logic
             if mode_name == "buy":
                 tariff = buy_price
             elif mode_name in ("sale_pv", "idle"):
@@ -157,7 +101,6 @@ def run_boiler_dp(
             else:
                 tariff = sell_price
 
-            # Electric heating allowance check
             allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
             allow_elec = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
 
@@ -169,7 +112,6 @@ def run_boiler_dp(
                 T_elec_prev = elec_temp[h - 1][prev_idx]
                 T_bypass_prev = bypass_state[h - 1][prev_idx]
 
-                # Standby cooling
                 R_gas = get_lut_rate(standby_losses.get("gas", {}), T_gas_prev)
                 R_elec = get_lut_rate(standby_losses.get("elec", {}), T_elec_prev)
                 
@@ -177,43 +119,31 @@ def run_boiler_dp(
                 T_elec_cooled = max(GRID_MIN_TEMP, T_elec_prev - R_elec)
                 total_vol = vol_gas + vol_elec
 
-                # Iterate modes
-                slot_hour = slot.get("hour", 0)
-                allowed_heating = is_hour_in_range(slot_hour, start_h, end_h)
-
                 for mode in ["IDLE", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]:
-                    if mode != "IDLE" and not allowed_heating:
-                        continue
                     if mode in ("GAS", "GAS_PUMP") and vol_gas <= 0.0:
                         continue
                     if mode in ("ELEC", "ELEC_PUMP") and (vol_elec <= 0.0 or not allow_elec):
                         continue
 
-                    # Mode-specific transitions
                     if mode == "IDLE":
-                        # Bypass state is inherited from previous state
                         T_bypass_end_val = T_bypass_prev
                         T_gas_end_val = T_gas_cooled
                         T_elec_end_val = T_elec_cooled
                         
-                        # Active temperature is T_elec if bypass is open, else T_gas
                         if not T_bypass_end_val:
                             T_active = T_gas_end_val
                         else:
                             T_active = T_elec_end_val
                             
                         t_max_mode = t_max
-                        max_rise = 0.25
-
-                        # Grid index represents T_gas
                         curr_idx = int(round((T_gas_end_val - GRID_MIN_TEMP) * 2))
                         if 0 <= curr_idx < num_states:
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
+                            # FIX: Use GRID_MIN_TEMP instead of t_min_limit for inactive gas boiler T_curr limit
                             if T_curr >= GRID_MIN_TEMP and T_curr <= t_max_mode:
                                 if T_active >= t_min_limit:
                                     cost = 0.0
                                     energy = 0.0
-                                    
                                     penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                                     if tariff <= 0.0:
                                         reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min))
@@ -230,8 +160,6 @@ def run_boiler_dp(
                                         bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "GAS":
-                        # Bypass is closed. Electric cools. Gas heats.
-                        # Active temperature is T_gas_end (T_curr).
                         T_elec_end_val = T_elec_cooled
                         T_bypass_end_val = False
                         t_max_mode = t_max_gas
@@ -240,21 +168,17 @@ def run_boiler_dp(
                         for curr_idx in range(num_states):
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
-                            
                             if T_curr < t_min_limit or T_curr > t_max_mode:
                                 continue
                             if T_active < t_min_limit:
                                 continue
-                            
                             delta_T = T_curr - T_gas_cooled
                             if delta_T < -0.25 or delta_T > max_rise:
                                 continue
-                            
                             heat_rise = max(0.0, delta_T)
                             gas_qty = heat_rise / eff_gas_only if eff_gas_only > 0.0 else 0.0
                             cost = gas_qty * gas_cost_m3
                             energy = gas_qty
-                            
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                             if tariff <= 0.0:
                                 reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_elec_end_val - t_min))
@@ -271,7 +195,6 @@ def run_boiler_dp(
                                 bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "GAS_PUMP":
-                        # Bypass is open, pump is running. Mixed temperature.
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
                         T_bypass_end_val = True
                         t_max_mode = t_max_gas
@@ -280,21 +203,17 @@ def run_boiler_dp(
                         for curr_idx in range(num_states):
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
-
                             if T_curr < t_min_limit or T_curr > t_max_mode:
                                 continue
                             if T_active < t_min_limit:
                                 continue
-                            
                             delta_T = T_curr - T_mixed
                             if delta_T < -0.25:
                                 continue
-                            
                             heat_rise = max(0.0, delta_T)
                             gas_qty = heat_rise / eff_gas_pump if eff_gas_pump > 0.0 else 0.0
                             cost = gas_qty * gas_cost_m3
                             energy = gas_qty
-                            
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                             if tariff <= 0.0:
                                 reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
@@ -311,8 +230,6 @@ def run_boiler_dp(
                                 bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC":
-                        # Bypass is open or closed, pump is off. Gas cools. Electric heats.
-                        # Grid state represents Gas (T_gas_cooled).
                         power_kw = cal_data.get("elec_only", {}).get("heater_power_kw", 2.5)
                         max_rise_elec = power_kw * eff_elec_only
                         T_elec_end_val = min(t_max_elec, T_elec_cooled + max_rise_elec)
@@ -328,12 +245,12 @@ def run_boiler_dp(
                             curr_idx = int(round((T_gas_end_val - GRID_MIN_TEMP) * 2))
                             if 0 <= curr_idx < num_states:
                                 T_curr = GRID_MIN_TEMP + curr_idx * 0.5
+                                # FIX: Use GRID_MIN_TEMP instead of t_min_limit for inactive gas boiler T_curr limit
                                 if T_curr >= GRID_MIN_TEMP and T_curr <= t_max_mode:
                                     if T_active >= t_min_limit:
                                         kwh = max(0.0, T_elec_end_val - T_elec_cooled) / eff_elec_only if eff_elec_only > 0.0 else 0.0
                                         cost = kwh * tariff
                                         energy = kwh
-                                        
                                         penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                                         if tariff <= 0.0:
                                             reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min))
@@ -350,7 +267,6 @@ def run_boiler_dp(
                                             bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC_PUMP":
-                        # Bypass is open, pump is running. Mixed temperature.
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
                         T_bypass_end_val = True
                         power_kw = cal_data.get("elec_with_pump", {}).get("heater_power_kw", 2.5)
@@ -360,21 +276,17 @@ def run_boiler_dp(
                         for curr_idx in range(num_states):
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
-
                             if T_curr < t_min_limit or T_curr > t_max_mode:
                                 continue
                             if T_active < t_min_limit:
                                 continue
-                            
                             delta_T = T_curr - T_mixed
                             if delta_T < -0.25:
                                 continue
-                            
                             heat_rise = max(0.0, delta_T)
                             kwh = heat_rise / eff_elec_pump if eff_elec_pump > 0.0 else 0.0
                             cost = kwh * tariff
                             energy = kwh
-                            
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                             if tariff <= 0.0:
                                 reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
@@ -390,10 +302,8 @@ def run_boiler_dp(
                                 elec_temp[h][curr_idx] = T_curr
                                 bypass_state[h][curr_idx] = T_bypass_end_val
 
-        # Backtrack if path found
         best_idx = min(range(num_states), key=lambda i: dp[N][i])
         if dp[N][best_idx] != float("inf"):
-            # Backtrack
             path = []
             curr_idx = best_idx
             for h in range(N, 0, -1):
@@ -415,11 +325,11 @@ def run_boiler_dp(
                     mix_start = (gas_start * vol_gas + elec_start * vol_elec) / total_vol if total_vol > 0.0 else (gas_start + elec_start) / 2.0
                     active_start = mix_start
                     active_end = gas_end
-                else: # IDLE, ELEC
+                else:
                     if mode == "ELEC":
                         active_start = elec_start
                         active_end = elec_end
-                    else: # IDLE
+                    else:
                         if not bypass_end_step:
                             active_start = gas_start
                             active_end = gas_end
@@ -445,76 +355,67 @@ def run_boiler_dp(
                 curr_idx = prev_idx
 
             path.reverse()
-            best_path = path
-            relaxed_used = relax
-            break
+            return "OK", path, {}
+    return "FAILED", [], {}
 
-    if best_path is None:
-        _LOGGER.error("EMS Boiler DP: Failed to find any feasible schedule path.")
-        return "NO PATH", [], {}
+# Run DP from Hour 10 to 23
+buy_prices = [1.02344, 0.96194, 0.939677, 0.924154, 0.911252, 0.906073, 0.86723, 0.810576, 0.62369, 0.29774, 0.260852, 0.259093, 0.251676, 0.23624, 0.251676, 0.260828, 0.337186, 0.802926, 0.937623, 1.06649, 1.188285, 1.150007, 1.067597, 0.99761]
+sell_prices = [0.7626, 0.7011, 0.678837, 0.663314, 0.650412, 0.645233, 0.60639, 0.549736, 0.36285, 0.0369, 1.2e-05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.076346, 0.542086, 0.676783, 0.80565, 0.927445, 0.889167, 0.806757, 0.73677]
 
-    # Build final schedule details with costs per 1°C rise for each mode
-    schedule = []
-    total_cost = 0.0
+physical_modes = ["idle"] * 24
+for h in range(8, 17):
+    physical_modes[h] = "sale_pv"
 
-    for idx, step in enumerate(best_path):
-        slot = slots[idx]
-        buy_price = slot.get("buy_price", 0.0)
-        sell_price = slot.get("sell_price", 0.0)
-        mode_name = slot.get("physical_mode", "idle")
-        soc = slot.get("expected_soc", 50.0)
+slots = []
+for h in range(24):
+    slots.append({
+        "date": "2026-05-23",
+        "hour": h,
+        "buy_price": buy_prices[h],
+        "sell_price": sell_prices[h],
+        "physical_mode": physical_modes[h],
+        "expected_soc": 50.0
+    })
 
-        # Retrieve Inverter mode configurations
-        mode_config = INVERTER_MODES.get(mode_name)
-        if mode_name == "buy":
-            tariff = buy_price
-        elif mode_name in ("sale_pv", "idle"):
-            tariff = sell_price
-        elif mode_config and mode_config.curtail_pv and soc >= mode_config.calibration_limit_soc:
-            tariff = 0.0
-        else:
-            tariff = sell_price
+t_min = 40.0
+t_max_elec = 70.0
+t_max_gas = 65.0
+vol_elec = 75.0
+vol_gas = 45.0
+gas_cost_m3 = 4.5
 
-        # Cost per 1°C rise calculations for each mode
-        c_per_gas = (1.0 / eff_gas_only if eff_gas_only > 0.0 else 0.0) * gas_cost_m3
-        c_per_gas_pump = (1.0 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * gas_cost_m3
-        c_per_elec = (1.0 / eff_elec_only if eff_elec_only > 0.0 else 0.0) * tariff
-        c_per_elec_pump = (1.0 / eff_elec_pump if eff_elec_pump > 0.0 else 0.0) * tariff
+cal_data = {
+  "gas_only": { "efficiency_c_per_m3": 338.1579, "last_calibrated": "2026-05-23" },
+  "gas_with_pump": { "efficiency_c_per_m3": 103.8223, "last_calibrated": "2026-05-21" },
+  "elec_only": { "efficiency_c_per_kwh": 20.4082, "last_calibrated": "2026-05-22" },
+  "elec_with_pump": { "efficiency_c_per_kwh": 3.3505, "last_calibrated": "2026-05-22" },
+  "standby_losses": {
+    "gas": {
+      "75_70": 4.36, "70_65": 3.63, "65_60": 2.9, "60_55": 2.17, "55_50": 1.8,
+      "50_45": 1.432, "45_40": 0.6985, "40_35": 0.51, "35_30": 0.38, "30_25": 0.25, "25_20": 0.12
+    },
+    "elec": {
+      "75_70": 0.5, "70_65": 0.475, "65_60": 0.45, "60_55": 0.425, "55_50": 0.4,
+      "50_45": 0.375, "45_40": 0.35, "40_35": 0.325, "35_30": 0.3, "30_25": 0.275, "25_20": 0.25
+    },
+    "last_calibrated": "2026-05-23"
+  }
+}
 
-        # Determine electric heating allowance
-        allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
-        allow_elec = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
+status, schedule, stats = run_boiler_dp_fixed(
+    slots[10:],
+    41.0, # t_gas_start
+    70.0, # t_elec_start
+    False, # bypass_start
+    t_min,
+    t_max_elec,
+    t_max_gas,
+    vol_elec,
+    vol_gas,
+    gas_cost_m3,
+    cal_data
+)
 
-        schedule.append({
-            "date": slot.get("date"),
-            "hour": slot.get("hour"),
-            "mode": step["mode"],
-            "temp_start": step["temp_start"],
-            "temp_end": step["temp_end"],
-            "temp_gas_start": step["temp_gas_start"],
-            "temp_gas_end": step["temp_gas_end"],
-            "temp_elec_start": step["temp_elec_start"],
-            "temp_elec_end": step["temp_elec_end"],
-            "temp_active_start": step["temp_active_start"],
-            "temp_active_end": step["temp_active_end"],
-            "bypass": step["bypass"],
-            "cost": step["cost"],
-            "energy": step["energy"],
-            "cost_per_c_gas": round(c_per_gas, 4),
-            "cost_per_c_gas_pump": round(c_per_gas_pump, 4),
-            "cost_per_c_elec": round(c_per_elec, 4) if allow_elec else None,
-            "cost_per_c_elec_pump": round(c_per_elec_pump, 4) if allow_elec else None,
-        })
-        total_cost += step["cost"]
-
-    # Final stats
-    stats = {
-        "horizon_hours": N,
-        "start_temp": best_path[0]["temp_active_start"] if best_path else t_gas_start_clamped,
-        "end_temp": best_path[-1]["temp_active_end"] if best_path else t_gas_start_clamped,
-        "total_cost": round(total_cost, 4),
-        "relaxed_constraint_used": relaxed_used,
-    }
-
-    current_action = best_path[0]["mode"] if best_path else "IDLE"
-    return current_action, schedule, stats
+print("Fixed schedule from Hour 10:")
+for s in schedule:
+    print(f"Hour {s['hour_index']+10:02d}: mode={s['mode']:9s} gas={s['temp_gas_start']}->{s['temp_gas_end']} elec={s['temp_elec_start']}->{s['temp_elec_end']} active={s['temp_active_start']}->{s['temp_active_end']} bypass={str(s['bypass']):5s} cost={s['cost']:.4f} sell_p={sell_prices[s['hour_index']+10]:.5f}")
