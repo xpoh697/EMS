@@ -198,7 +198,10 @@ def run_boiler_dp(
                                     energy = 0.0
                                     
                                     penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
-                                    reward = temp_reward * (T_active - t_min)
+                                    if tariff <= 0.0:
+                                        reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min))
+                                    else:
+                                        reward = temp_reward * max(0.0, T_active - t_min)
                                     new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
                                     if new_cost < dp[h][curr_idx]:
                                         dp[h][curr_idx] = new_cost
@@ -236,7 +239,10 @@ def run_boiler_dp(
                             energy = gas_qty
                             
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
-                            reward = temp_reward * (T_active - t_min)
+                            if tariff <= 0.0:
+                                reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_elec_end_val - t_min))
+                            else:
+                                reward = temp_reward * max(0.0, T_active - t_min)
                             new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
                             if new_cost < dp[h][curr_idx]:
                                 dp[h][curr_idx] = new_cost
@@ -273,7 +279,10 @@ def run_boiler_dp(
                             energy = gas_qty
                             
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
-                            reward = temp_reward * (T_active - t_min)
+                            if tariff <= 0.0:
+                                reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
+                            else:
+                                reward = temp_reward * max(0.0, T_active - t_min)
                             new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
                             if new_cost < dp[h][curr_idx]:
                                 dp[h][curr_idx] = new_cost
@@ -309,7 +318,10 @@ def run_boiler_dp(
                                         energy = kwh
                                         
                                         penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
-                                        reward = temp_reward * (T_active - t_min)
+                                        if tariff <= 0.0:
+                                            reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min))
+                                        else:
+                                            reward = temp_reward * max(0.0, T_active - t_min)
                                         new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
                                         if new_cost < dp[h][curr_idx]:
                                             dp[h][curr_idx] = new_cost
@@ -347,7 +359,10 @@ def run_boiler_dp(
                             energy = kwh
                             
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
-                            reward = temp_reward * (T_active - t_min)
+                            if tariff <= 0.0:
+                                reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
+                            else:
+                                reward = temp_reward * max(0.0, T_active - t_min)
                             new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
                             if new_cost < dp[h][curr_idx]:
                                 dp[h][curr_idx] = new_cost
