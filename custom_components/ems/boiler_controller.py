@@ -142,8 +142,27 @@ class BoilerController:
         # Блокировка 1: Режим Auto запрещает ручное управление
         if self.current_mode.lower() == "auto":
             if new_state and old_state and new_state.state != old_state.state:
-                # Откат в предыдущее состояние
-                service = "turn_on" if old_state.state == STATE_ON else "turn_off"
+                # Определим плановое состояние устройства на основе сенсора DP
+                dp_state = self.hass.states.get("sensor.boiler_dp")
+                if not dp_state or dp_state.state in ("unknown", "unavailable", "error", "idle_bypass", "NO PATH", "NO CALIB DATA"):
+                    expected_state = STATE_OFF
+                else:
+                    mode = dp_state.state.upper()
+                    recommended_bypass = dp_state.attributes.get("recommended_bypass", "OFF").upper()
+                    if entity_id == self.elec_heater:
+                        expected_state = STATE_ON if "ELEC" in mode else STATE_OFF
+                    elif entity_id == self.pump:
+                        expected_state = STATE_ON if ("_PUMP" in mode and recommended_bypass == "ON") else STATE_OFF
+                    else:
+                        expected_state = None
+
+                # Если новое состояние совпадает с целевым плановым — пропускаем!
+                if expected_state is not None and new_state.state == expected_state:
+                    return
+
+                # Если не совпадает — откатываем к плановому (или предыдущему)
+                target_state = expected_state if expected_state is not None else old_state.state
+                service = "turn_on" if target_state == STATE_ON else "turn_off"
                 await self.hass.services.async_call(SWITCH_DOMAIN, service, {ATTR_ENTITY_ID: entity_id})
 
         # Блокировка 2: Попытка включить насос при изолированном электробойлере (valve OFF)
