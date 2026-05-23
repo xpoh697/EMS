@@ -1215,6 +1215,7 @@ class EmsDpSensor(SensorEntity):
         price_buy_sensor_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
         price_sell_sensor_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
         bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
+        total_load_consumption_id = options.get(CONF_TOTAL_LOAD_CONSUMPTION, config.get(CONF_TOTAL_LOAD_CONSUMPTION))
 
         # Recalculate on SOC changes with throttling
         if bat_soc_entity_id:
@@ -1224,12 +1225,14 @@ class EmsDpSensor(SensorEntity):
                 )
             )
 
-        # Listen for tariff and forecast changes
+        # Listen for tariff, consumption and forecast changes
         generic_listeners = []
         if price_buy_sensor_id:
             generic_listeners.append(price_buy_sensor_id)
         if price_sell_sensor_id:
             generic_listeners.append(price_sell_sensor_id)
+        if total_load_consumption_id:
+            generic_listeners.append(total_load_consumption_id)
         generic_listeners.extend([
             "sensor.pv_forecast_today",
             "sensor.pv_forecast_tomorrow"
@@ -1349,8 +1352,6 @@ class EmsDpSensor(SensorEntity):
                 )
                 return
 
-        self._reactive_debounce_time = now
-
         start_time = time.perf_counter()
 
         try:
@@ -1374,7 +1375,7 @@ class EmsDpSensor(SensorEntity):
                     ems_log(
                         self.hass,
                         _LOGGER,
-                        logging.ERROR,
+                        logging.WARNING,
                         f"Required configuration parameter '{key}' is missing! Please configure it in integration settings."
                     )
                     self._state = "unavailable"
@@ -1398,7 +1399,7 @@ class EmsDpSensor(SensorEntity):
                     ems_log(
                         self.hass,
                         _LOGGER,
-                        logging.ERROR,
+                        logging.WARNING,
                         f"Required sensor '{entity_id}' is in state '{state_obj.state if state_obj else 'None'}'. Skipping strategy update."
                     )
                     self._state = "unavailable"
@@ -1538,6 +1539,7 @@ class EmsDpSensor(SensorEntity):
             storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
             overrides = storage.get_overrides()
 
+            self._reactive_debounce_time = now
             result = await self.hass.async_add_executor_job(
                 self._calculate_strategy_sync,
                 effective_soc,

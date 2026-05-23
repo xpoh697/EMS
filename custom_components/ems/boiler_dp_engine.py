@@ -193,7 +193,7 @@ def run_boiler_dp(
                         curr_idx = int(round((T_gas_end_val - GRID_MIN_TEMP) * 2))
                         if 0 <= curr_idx < num_states:
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
-                            if T_curr >= t_min_limit and T_curr <= t_max_mode:
+                            if T_curr >= GRID_MIN_TEMP and T_curr <= t_max_mode:
                                 if T_active >= t_min_limit:
                                     cost = 0.0
                                     energy = 0.0
@@ -312,7 +312,7 @@ def run_boiler_dp(
                             curr_idx = int(round((T_gas_end_val - GRID_MIN_TEMP) * 2))
                             if 0 <= curr_idx < num_states:
                                 T_curr = GRID_MIN_TEMP + curr_idx * 0.5
-                                if T_curr >= t_min_limit and T_curr <= t_max_mode:
+                                if T_curr >= GRID_MIN_TEMP and T_curr <= t_max_mode:
                                     if T_active >= t_min_limit:
                                         kwh = max(0.0, T_elec_end_val - T_elec_cooled) / eff_elec_only if eff_elec_only > 0.0 else 0.0
                                         cost = kwh * tariff
