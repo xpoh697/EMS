@@ -44,6 +44,8 @@ class BoilerController:
         
     async def async_setup(self):
         """Регистрация безопасных слушателей событий и таймеров калибровки."""
+        self._is_applying_dp_plan = False
+
         # 1. Мгновенный Safety Interlock: следим за клапаном
         if self.bypass_valve:
             async_track_state_change_event(
@@ -59,6 +61,23 @@ class BoilerController:
                 [self.elec_heater, self.pump],
                 self._async_override_check
             )
+
+        # 3. Следим за изменениями планировщика DP для автоматического управления
+        async_track_state_change_event(
+            self.hass,
+            ["sensor.boiler_dp"],
+            self._async_dp_plan_changed
+        )
+
+        # 4. Следим за переключением режима Auto/Manual
+        async_track_state_change_event(
+            self.hass,
+            ["select.ems_boiler_mode"],
+            self._async_system_mode_changed
+        )
+
+        # Применяем план при старте
+        self.hass.async_create_task(self._async_apply_current_dp_plan())
         
         # 3. Throttling вычислений стоимости (раз в 2 минуты)
         async_track_time_interval(
@@ -104,7 +123,10 @@ class BoilerController:
             
     async def _async_override_check(self, event):
         """Отклоняет ручные изменения в режиме Auto или если клапан перекрыт."""
-        # Пропускаем любые проверки, если сейчас выполняется калибровка
+        # Пропускаем любые проверки, если сейчас выполняется калибровка или применяется DP-план
+        if getattr(self, "_is_applying_dp_plan", False):
+            return
+
         if self.calibration_sensor and self.calibration_sensor.native_value != "idle":
             return
 
@@ -945,3 +967,99 @@ class BoilerController:
         if best_key:
             return float(lut[best_key])
         return None
+
+    async def _async_dp_plan_changed(self, event):
+        """Handle DP plan state changes."""
+        await self._async_apply_current_dp_plan()
+
+    async def _async_system_mode_changed(self, event):
+        """Handle system mode selection changes (Auto/Manual)."""
+        new_state = event.data.get("new_state")
+        if new_state:
+            self.current_mode = new_state.state
+            await self._async_apply_current_dp_plan()
+
+    async def _async_apply_current_dp_plan(self):
+        """Apply current DP plan recommended actions to physical hardware if in Auto mode."""
+        if self.current_mode.lower() != "auto":
+            return
+
+        dp_state = self.hass.states.get("sensor.boiler_dp")
+        if not dp_state or dp_state.state in ("unknown", "unavailable", "error", "idle_bypass", "NO PATH", "NO CALIB DATA"):
+            # Safe default to IDLE mode, closed bypass (OFF)
+            await self._async_set_boiler_mode("IDLE", "OFF")
+            return
+
+        mode = dp_state.state.upper()
+        recommended_bypass = dp_state.attributes.get("recommended_bypass", "OFF").upper()
+        await self._async_set_boiler_mode(mode, recommended_bypass)
+
+    async def _async_set_boiler_mode(self, mode: str, recommended_bypass: str):
+        """Turn on/off actuators based on mode and recommended bypass."""
+        self._is_applying_dp_plan = True
+        try:
+            # 1. Control Bypass Valve
+            if self.bypass_valve:
+                valve_domain = self.bypass_valve.split(".")[0]
+                current_valve = self.hass.states.get(self.bypass_valve)
+                target_service = SERVICE_TURN_ON if recommended_bypass == "ON" else SERVICE_TURN_OFF
+                target_state = STATE_ON if recommended_bypass == "ON" else STATE_OFF
+                if not current_valve or current_valve.state != target_state:
+                    await self.hass.services.async_call(
+                        valve_domain,
+                        target_service,
+                        {ATTR_ENTITY_ID: self.bypass_valve}
+                    )
+
+            # 2. Control Circulation Pump
+            if self.pump:
+                current_pump = self.hass.states.get(self.pump)
+                target_pump_service = SERVICE_TURN_ON if "_PUMP" in mode else SERVICE_TURN_OFF
+                target_pump_state = STATE_ON if "_PUMP" in mode else STATE_OFF
+                # Safety check: bypass must be open to run pump
+                if target_pump_service == SERVICE_TURN_ON and recommended_bypass != "ON":
+                    _LOGGER.warning("EMS Boiler Controller: Prevented turning pump ON in Auto mode because bypass is closed")
+                    target_pump_service = SERVICE_TURN_OFF
+                    target_pump_state = STATE_OFF
+                if not current_pump or current_pump.state != target_pump_state:
+                    await self.hass.services.async_call(
+                        SWITCH_DOMAIN,
+                        target_pump_service,
+                        {ATTR_ENTITY_ID: self.pump}
+                    )
+
+            # 3. Control Electric Heater
+            if self.elec_heater:
+                current_heater = self.hass.states.get(self.elec_heater)
+                target_heater_service = SERVICE_TURN_ON if "ELEC" in mode else SERVICE_TURN_OFF
+                target_heater_state = STATE_ON if "ELEC" in mode else STATE_OFF
+                if not current_heater or current_heater.state != target_heater_state:
+                    await self.hass.services.async_call(
+                        SWITCH_DOMAIN,
+                        target_heater_service,
+                        {ATTR_ENTITY_ID: self.elec_heater}
+                    )
+
+            # 4. Control Gas Climate
+            if self.gas_climate:
+                current_gas = self.hass.states.get(self.gas_climate)
+                target_hvac = "heat" if "GAS" in mode else "off"
+                if not current_gas or current_gas.state != target_hvac:
+                    await self.hass.services.async_call(
+                        CLIMATE_DOMAIN,
+                        "set_hvac_mode",
+                        {ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": target_hvac}
+                    )
+                if target_hvac == "heat":
+                    target_temp = float(self.config.get("gas_boiler_max_temp", 50.0))
+                    current_target_temp = current_gas.attributes.get("temperature") if current_gas else None
+                    if current_target_temp != target_temp:
+                        await self.hass.services.async_call(
+                            CLIMATE_DOMAIN,
+                            "set_temperature",
+                            {ATTR_ENTITY_ID: self.gas_climate, ATTR_TEMPERATURE: target_temp}
+                        )
+        except Exception as ex:
+            _LOGGER.error("Error applying DP mode %s: %s", mode, ex)
+        finally:
+            self._is_applying_dp_plan = False

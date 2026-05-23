@@ -1,15 +1,13 @@
 /**
- * EMS Boiler Card v1.4.2
+ * EMS Boiler Card v1.5.0
  * - DOM строится один раз → нет мерцания при hover
  * - Значения обновляются точечно через textContent/className
  * - Entity IDs загружаются автоматически через WebSocket API интеграции
- *
- * Минимальный YAML:
- *   type: custom:boiler-card
- *   title: Бойлер   (опционально)
+ * - Добавлена вкладка "Расписание" (Schedule) с почасовой сеткой и детальным модальным окном
+ * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.4.3";
+const CARD_VERSION = "1.5.0";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -19,6 +17,7 @@ const STYLES = `
     border-radius: 16px;
     overflow: hidden;
     font-family: var(--paper-font-body1_-_font-family, 'Inter', sans-serif);
+    position: relative;
   }
 
   /* ─── Header ─────────────────────────────────────────────────────────── */
@@ -31,6 +30,29 @@ const STYLES = `
   }
   .card-header .title  { font-size: 17px; font-weight: 600; color: var(--primary-text-color); }
   .card-header .ver    { font-size: 11px; color: var(--secondary-text-color); opacity: 0.5; }
+
+  /* ─── Tabs ───────────────────────────────────────────────────────────── */
+  .card-tabs {
+    display: flex;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+    background: rgba(255,255,255,0.02);
+  }
+  .card-tab {
+    flex: 1;
+    text-align: center;
+    padding: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--secondary-text-color);
+    cursor: pointer;
+    transition: color 0.2s, background-color 0.2s;
+    border-bottom: 2px solid transparent;
+  }
+  .card-tab.active {
+    color: var(--primary-color, #2196f3);
+    border-bottom-color: var(--primary-color, #2196f3);
+    background: rgba(255,255,255,0.04);
+  }
 
   /* ─── Loading / Error ────────────────────────────────────────────────── */
   .state-msg {
@@ -223,9 +245,9 @@ const STYLES = `
   .tile .t-value { font-size: 18px; font-weight: 600; color: var(--primary-text-color); }
   .tile .t-sub   { font-size: 12px; color: var(--secondary-text-color); }
 
-  .tile.st-on   ha-icon { color: var(--success-color,  #4caf50); }
-  .tile.st-off  ha-icon { color: rgba(255,255,255,.25); }
-  .tile.st-warn ha-icon { color: var(--warning-color,  #ff9800); }
+  /* Red when heating, light gray when idle/off */
+  .tile.st-heating ha-icon { color: var(--error-color, #f44336); }
+  .tile.st-idle    ha-icon { color: rgba(255, 255, 255, 0.4); }
 
   /* ─── Valve status bar ───────────────────────────────────────────────── */
   .valve-bar {
@@ -259,7 +281,6 @@ const STYLES = `
     color: var(--primary-text-color); font-size: 14px;
     cursor: pointer; transition: background .2s, border-color .2s;
     width: 100%; text-align: left;
-    /* ВАЖНО: pointer-events не сбрасываем — иначе hover будет работать стабильно */
   }
   .ctrl-btn:hover  { background: rgba(255,255,255,.09); }
   .ctrl-btn:active { background: rgba(255,255,255,.14); }
@@ -282,6 +303,143 @@ const STYLES = `
 
   .divider { height: 1px; background: rgba(255,255,255,.06); margin: 0 16px; }
   .hidden { display: none !important; }
+
+  /* ─── Schedule Tab Styling ───────────────────────────────────────────── */
+  .schedule-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    padding: 16px;
+  }
+  .schedule-tile {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 10px 4px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    cursor: pointer;
+    transition: background .2s, border-color .2s, transform .1s;
+  }
+  .schedule-tile:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.15);
+    transform: translateY(-1px);
+  }
+  .schedule-tile:active {
+    transform: translateY(0);
+  }
+  .schedule-tile .st-hour {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--secondary-text-color);
+  }
+  .schedule-tile .st-mode {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 5px;
+    border-radius: 4px;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .mode-idle { background: rgba(255,255,255,0.06); color: var(--secondary-text-color); }
+  .mode-gas { background: rgba(255,152,0,0.12); color: #ff9800; }
+  .mode-gas_pump { background: rgba(255,152,0,0.22); color: #ffb74d; border: 1px dashed #ff9800; }
+  .mode-elec { background: rgba(76,175,80,0.12); color: #4caf50; }
+  .mode-elec_pump { background: rgba(76,175,80,0.22); color: #81c784; border: 1px dashed #4caf50; }
+
+  /* ─── Modal Dialog Styling ───────────────────────────────────────────── */
+  .modal-overlay {
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(4px);
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  .modal-overlay.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .modal-window {
+    background: var(--ha-card-background, var(--card-background-color, #1c1c1e));
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 16px;
+    width: 85%;
+    max-width: 320px;
+    padding: 16px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    transform: scale(0.9);
+    transition: transform 0.3s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .modal-overlay.open .modal-window {
+    transform: scale(1);
+  }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding-bottom: 8px;
+  }
+  .modal-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--primary-text-color);
+  }
+  .modal-close {
+    background: transparent;
+    border: none;
+    color: var(--secondary-text-color);
+    cursor: pointer;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+  }
+  .modal-close ha-icon {
+    --mdc-icon-size: 20px;
+  }
+  .modal-content {
+    font-size: 13px;
+    color: var(--primary-text-color);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+  .modal-row-detail {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+  }
+  .modal-row-detail .m-label {
+    color: var(--secondary-text-color);
+  }
+  .modal-row-detail .m-val {
+    font-weight: 600;
+  }
+  .modal-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--primary-color, #2196f3);
+    margin-top: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
 `;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -343,7 +501,7 @@ class BoilerCard extends HTMLElement {
     }
   }
 
-  getCardSize() { return 5; }
+  getCardSize() { return 6; }
 
   // ── Skeleton (built ONCE) ────────────────────────────────────────────────
   _buildSkeleton() {
@@ -364,13 +522,26 @@ class BoilerCard extends HTMLElement {
       <span class="ver">v${CARD_VERSION}</span>`;
     card.appendChild(hdr);
 
+    // Tabs Container
+    const tabsContainer = document.createElement("div");
+    tabsContainer.className = "card-tabs";
+    tabsContainer.innerHTML = `
+      <div class="card-tab active" id="tab-status">Состояние</div>
+      <div class="card-tab" id="tab-schedule">Расписание</div>
+    `;
+    card.appendChild(tabsContainer);
+
+    // Status Tab Content
+    this._statusContent = document.createElement("div");
+    this._statusContent.className = "tab-content-status";
+
     // Schema Container
     const schema = document.createElement("div");
     schema.className = "schema-container";
 
     const mkTile = (id, icon, label) => {
       const d = document.createElement("div");
-      d.className = "tile st-off";
+      d.className = "tile st-idle";
       d.id = id;
       d.innerHTML = `
         <ha-icon icon="${icon}"></ha-icon>
@@ -436,7 +607,7 @@ class BoilerCard extends HTMLElement {
     schema.appendChild(this._tGas);
     schema.appendChild(middle);
     schema.appendChild(this._tElec);
-    card.appendChild(schema);
+    this._statusContent.appendChild(schema);
 
     // Valve bar
     this._valveBar = document.createElement("div");
@@ -445,12 +616,12 @@ class BoilerCard extends HTMLElement {
       <ha-icon id="vb-icon" icon="mdi:alert-circle-outline"></ha-icon>
       <span class="vb-label">Электробойлер</span>
       <span class="vb-state" id="vb-state">Изолирован</span>`;
-    card.appendChild(this._valveBar);
+    this._statusContent.appendChild(this._valveBar);
 
     // Divider
     const div1 = document.createElement("div");
     div1.className = "divider";
-    card.appendChild(div1);
+    this._statusContent.appendChild(div1);
 
     // Mode row
     const modeRow = document.createElement("div");
@@ -461,7 +632,7 @@ class BoilerCard extends HTMLElement {
         <button id="btn-auto"   data-mode="Auto">Auto</button>
         <button id="btn-manual" data-mode="Manual">Manual</button>
       </div>`;
-    card.appendChild(modeRow);
+    this._statusContent.appendChild(modeRow);
 
     this._btnAuto   = modeRow.querySelector("#btn-auto");
     this._btnManual = modeRow.querySelector("#btn-manual");
@@ -472,7 +643,7 @@ class BoilerCard extends HTMLElement {
     // Divider
     const div2 = document.createElement("div");
     div2.className = "divider";
-    card.appendChild(div2);
+    this._statusContent.appendChild(div2);
 
     // Manual controls
     this._controls = document.createElement("div");
@@ -519,8 +690,59 @@ class BoilerCard extends HTMLElement {
     this._autoHint.className = "auto-hint";
     this._autoHint.innerHTML = `<ha-icon icon="mdi:robot-outline"></ha-icon> Управление автоматическое`;
 
-    card.appendChild(this._controls);
-    card.appendChild(this._autoHint);
+    this._statusContent.appendChild(this._controls);
+    this._statusContent.appendChild(this._autoHint);
+    card.appendChild(this._statusContent);
+
+    // Schedule Tab Content
+    this._scheduleContent = document.createElement("div");
+    this._scheduleContent.className = "tab-content-schedule hidden";
+    this._scheduleContent.innerHTML = `<div class="schedule-grid" id="sched-grid"></div>`;
+    card.appendChild(this._scheduleContent);
+
+    // Modal Dialog overlay
+    this._modalOverlay = document.createElement("div");
+    this._modalOverlay.className = "modal-overlay";
+    this._modalOverlay.innerHTML = `
+      <div class="modal-window">
+        <div class="modal-header">
+          <span class="modal-title" id="modal-title">Детали часа</span>
+          <button class="modal-close" id="modal-close-btn">
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+        </div>
+        <div class="modal-content" id="modal-content"></div>
+      </div>
+    `;
+    card.appendChild(this._modalOverlay);
+
+    // Close modal event listeners
+    this._modalOverlay.querySelector("#modal-close-btn").addEventListener("click", () => {
+      this._modalOverlay.classList.remove("open");
+    });
+    this._modalOverlay.addEventListener("click", (e) => {
+      if (e.target === this._modalOverlay) {
+        this._modalOverlay.classList.remove("open");
+      }
+    });
+
+    // Tab switching event listeners
+    const tabStatus = tabsContainer.querySelector("#tab-status");
+    const tabSchedule = tabsContainer.querySelector("#tab-schedule");
+
+    tabStatus.addEventListener("click", () => {
+      tabStatus.classList.add("active");
+      tabSchedule.classList.remove("active");
+      this._statusContent.classList.remove("hidden");
+      this._scheduleContent.classList.add("hidden");
+    });
+
+    tabSchedule.addEventListener("click", () => {
+      tabSchedule.classList.add("active");
+      tabStatus.classList.remove("active");
+      this._statusContent.classList.add("hidden");
+      this._scheduleContent.classList.remove("hidden");
+    });
 
     sr.appendChild(card);
     this._skeletonBuilt = true;
@@ -542,13 +764,15 @@ class BoilerCard extends HTMLElement {
     const modeS  = st[e.mode_select];
     const hwPumpS = e.hw_pump ? st[e.hw_pump] : null;
     const hwTempS = e.hw_return_temp ? st[e.hw_return_temp] : null;
+    const dpS    = st["sensor.boiler_dp"];
 
     // Cheap dirty check — skip re-paint if nothing changed
     const key = [
       gasS?.state, gasS?.attributes?.current_temperature,
       elecS?.state, powS?.state, tmpS?.state,
       pumpS?.state, valveS?.state, modeS?.state,
-      hwPumpS?.state, hwTempS?.state
+      hwPumpS?.state, hwTempS?.state,
+      dpS?.state, dpS?.attributes?.schedule?.length
     ].join("|");
     if (key === this._prevKey) return;
     this._prevKey = key;
@@ -556,24 +780,21 @@ class BoilerCard extends HTMLElement {
     // ── Gas tile ──────────────────────────────────────────────────────────
     const gasTemp   = gasS?.attributes?.current_temperature ?? gasS?.state ?? "–";
     const gasTarget = gasS?.attributes?.temperature ?? "–";
-    this._setTile(this._tGas, "st-on", fmt1(gasTemp) + " °C", "цель: " + fmt1(gasTarget) + " °C", gasTemp);
+    const gasActive = gasS?.attributes?.hvac_action === "heating" || 
+                      (gasS?.state === "heat" && gasTemp !== null && gasTarget !== null && +gasTemp < +gasTarget);
+    const gasCls = gasActive ? "st-heating" : "st-idle";
+    this._setTile(this._tGas, gasCls, fmt1(gasTemp) + " °C", "цель: " + fmt1(gasTarget) + " °C", gasTemp);
 
     // ── Elec tile ─────────────────────────────────────────────────────────
     const elecTemp = fmt1(tmpS?.state);
     const elecPowVal = (powS?.state != null && !isNaN(+powS.state)) ? Math.round(+powS.state) : "–";
-    const elecCls  = elecS?.state === "on" ? "st-on" : "st-off";
+    const elecActive = elecS?.state === "on";
+    const elecCls  = elecActive ? "st-heating" : "st-idle";
     this._setTile(this._tElec, elecCls, elecTemp + " °C", "мощность: " + elecPowVal + " Вт", tmpS?.state);
 
     // ── Pump & Valve Schema Elements ──────────────────────────────────────
     const pumpOn   = stateOn(pumpS);
     const elecConn = stateOn(valveS);
-
-    // Check if Gas climate is active heating
-    const gasActive = gasS?.attributes?.hvac_action === "heating" || 
-                      (gasS?.state === "heat" && gasTemp !== null && gasTarget !== null && +gasTemp < +gasTarget);
-
-    // Check if Electric boiler is active heating (heater switch is ON)
-    const elecActive = elecS?.state === "on";
 
     // ── Update Top Line (Gas -> Electric, left to right) ──
     if (pumpOn) {
@@ -667,6 +888,104 @@ class BoilerCard extends HTMLElement {
         this._updateCtrlBtn(this._btnHwPump, stateOn(hwPumpS));
       }
     }
+
+    // ── Update Schedule Grid ──────────────────────────────────────────────
+    const schedule = dpS?.attributes?.schedule || [];
+    const grid = this._scheduleContent.querySelector("#sched-grid");
+    grid.innerHTML = "";
+
+    if (schedule.length === 0) {
+      grid.innerHTML = `<div style="grid-column: span 4; text-align: center; color: var(--secondary-text-color); font-size: 13px; padding: 20px 0;">Расписание недоступно</div>`;
+    } else {
+      schedule.forEach((slot) => {
+        const tile = document.createElement("div");
+        tile.className = "schedule-tile";
+        
+        const hourStr = String(slot.hour).padStart(2, '0') + ":00";
+        const modeName = slot.mode || "IDLE";
+        
+        tile.innerHTML = `
+          <span class="st-hour">${hourStr}</span>
+          <span class="st-mode mode-${modeName.toLowerCase()}">${modeName}</span>
+        `;
+        tile.addEventListener("click", () => {
+          this._showSlotDetails(slot);
+        });
+        grid.appendChild(tile);
+      });
+    }
+  }
+
+  // ── Show Popup Detail Modal ──────────────────────────────────────────────
+  _showSlotDetails(slot) {
+    const titleEl = this._modalOverlay.querySelector("#modal-title");
+    const contentEl = this._modalOverlay.querySelector("#modal-content");
+    
+    const hourStr = String(slot.hour).padStart(2, '0') + ":00";
+    titleEl.textContent = `Час: ${hourStr}`;
+    
+    const modeLabels = {
+      "IDLE": "Простой (IDLE)",
+      "GAS": "Нагрев газом (GAS)",
+      "GAS_PUMP": "Газ + Насос (GAS_PUMP)",
+      "ELEC": "Нагрев ТЭН (ELEC)",
+      "ELEC_PUMP": "ТЭН + Насос (ELEC_PUMP)"
+    };
+    
+    const bypassLabel = slot.bypass ? "Открыт (Последовательный)" : "Закрыт (Байпас)";
+    
+    contentEl.innerHTML = `
+      <div class="modal-row-detail">
+        <span class="m-label">Режим системы</span>
+        <span class="m-val">${modeLabels[slot.mode] || slot.mode}</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Байпасный клапан</span>
+        <span class="m-val">${bypassLabel}</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Планируемый расход</span>
+        <span class="m-val">${slot.cost != null ? slot.cost.toFixed(2) + " руб." : "0.00 руб."}</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Энергия</span>
+        <span class="m-val">${slot.energy != null ? slot.energy.toFixed(2) + " кВтч/м³" : "0.0 кВтч/м³"}</span>
+      </div>
+      
+      <div class="modal-section-title">Планируемые температуры</div>
+      <div class="modal-row-detail">
+        <span class="m-label">Газовый бойлер</span>
+        <span class="m-val">${fmt1(slot.temp_gas_start)}°C → ${fmt1(slot.temp_gas_end)}°C</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Электробойлер</span>
+        <span class="m-val">${fmt1(slot.temp_elec_start)}°C → ${fmt1(slot.temp_elec_end)}°C</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">ГВС (на выходе)</span>
+        <span class="m-val" style="color: ${getTempColor(slot.temp_active_end)}">${fmt1(slot.temp_active_start)}°C → ${fmt1(slot.temp_active_end)}°C</span>
+      </div>
+
+      <div class="modal-section-title">Стоимость нагрева на 1°C</div>
+      <div class="modal-row-detail">
+        <span class="m-label">Газ (без насоса)</span>
+        <span class="m-val">${slot.cost_per_c_gas != null ? slot.cost_per_c_gas.toFixed(2) + " руб." : "–"}</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Газ + Насос</span>
+        <span class="m-val">${slot.cost_per_c_gas_pump != null ? slot.cost_per_c_gas_pump.toFixed(2) + " руб." : "–"}</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Электро (без насоса)</span>
+        <span class="m-val">${slot.cost_per_c_elec != null ? slot.cost_per_c_elec.toFixed(2) + " руб." : "–"}</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Электро + Насос</span>
+        <span class="m-val">${slot.cost_per_c_elec_pump != null ? slot.cost_per_c_elec_pump.toFixed(2) + " руб." : "–"}</span>
+      </div>
+    `;
+    
+    this._modalOverlay.classList.add("open");
   }
 
   // ── DOM helpers ──────────────────────────────────────────────────────────
