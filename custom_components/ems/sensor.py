@@ -2127,6 +2127,9 @@ class EmsSchedulerSensor(SensorEntity):
             action = slot.get("action", "idle")
             energy = slot.get("energy_kwh", 0.0)
 
+            power_w = 0.0
+            current_a = 0.0
+
             # If battery is in emergency state, force first slot to bat_emergency with 0 energy
             if slot_idx == 0 and soc is not None and soc <= bat_soc_emergency_val:
                 action = "bat_emergency"
