@@ -64,11 +64,20 @@ def run_boiler_dp(
     eff_elec_only = cal_data.get("elec_only", {}).get("efficiency_c_per_kwh", 0.0)
     eff_elec_pump = cal_data.get("elec_with_pump", {}).get("efficiency_c_per_kwh", 0.0)
 
-    if eff_gas_only <= 0.0 or eff_gas_pump <= 0.0 or eff_elec_only <= 0.0 or eff_elec_pump <= 0.0:
-        _LOGGER.warning(
-            "EMS Boiler DP: Missing or invalid calibration data. Gas Only: %s, Gas Pump: %s, Elec Only: %s, Elec Pump: %s",
-            eff_gas_only, eff_gas_pump, eff_elec_only, eff_elec_pump
-        )
+    has_active_boiler = False
+    if vol_gas > 0.0:
+        if eff_gas_only <= 0.0 or eff_gas_pump <= 0.0:
+            _LOGGER.warning("EMS Boiler DP: Missing or invalid gas calibration data. Gas Only: %s, Gas Pump: %s", eff_gas_only, eff_gas_pump)
+            return "NO CALIB DATA", [], {}
+        has_active_boiler = True
+    if vol_elec > 0.0:
+        if eff_elec_only <= 0.0 or eff_elec_pump <= 0.0:
+            _LOGGER.warning("EMS Boiler DP: Missing or invalid electric calibration data. Elec Only: %s, Elec Pump: %s", eff_elec_only, eff_elec_pump)
+            return "NO CALIB DATA", [], {}
+        has_active_boiler = True
+
+    if not has_active_boiler:
+        _LOGGER.warning("EMS Boiler DP: No active boilers configured or available.")
         return "NO CALIB DATA", [], {}
 
     standby_losses = cal_data.get("standby_losses", {})
@@ -149,7 +158,9 @@ def run_boiler_dp(
 
                 # 2. Iterate modes
                 for mode in ["IDLE", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]:
-                    if mode in ("ELEC", "ELEC_PUMP") and not allow_elec:
+                    if mode in ("GAS", "GAS_PUMP") and vol_gas <= 0.0:
+                        continue
+                    if mode in ("ELEC", "ELEC_PUMP") and (vol_elec <= 0.0 or not allow_elec):
                         continue
 
                     # Mode-specific parameters
@@ -202,12 +213,12 @@ def run_boiler_dp(
                             if vol_gas > 0 and eff_gas_only > 0:
                                 gas_qty = heat_rise * total_vol / (vol_gas * eff_gas_only)
                             else:
-                                gas_qty = heat_rise / eff_gas_only
+                                gas_qty = heat_rise / eff_gas_only if eff_gas_only > 0 else 0.0
                             cost = gas_qty * gas_cost_m3
                             energy = gas_qty
                         elif mode == "GAS_PUMP":
                             heat_rise = max(0.0, delta_T)
-                            gas_qty = heat_rise / eff_gas_pump
+                            gas_qty = heat_rise / eff_gas_pump if eff_gas_pump > 0 else 0.0
                             cost = gas_qty * gas_cost_m3
                             energy = gas_qty
                         elif mode == "ELEC":
@@ -215,12 +226,12 @@ def run_boiler_dp(
                             if vol_elec > 0 and eff_elec_only > 0:
                                 kwh = heat_rise * total_vol / (vol_elec * eff_elec_only)
                             else:
-                                kwh = heat_rise / eff_elec_only
+                                kwh = heat_rise / eff_elec_only if eff_elec_only > 0 else 0.0
                             cost = kwh * tariff
                             energy = kwh
                         elif mode == "ELEC_PUMP":
                             heat_rise = max(0.0, delta_T)
-                            kwh = heat_rise / eff_elec_pump
+                            kwh = heat_rise / eff_elec_pump if eff_elec_pump > 0 else 0.0
                             cost = kwh * tariff
                             energy = kwh
 
@@ -288,10 +299,10 @@ def run_boiler_dp(
 
         # Cost per 1°C rise calculations for each mode
         total_vol = vol_gas + vol_elec
-        c_per_gas = ((total_vol / (vol_gas * eff_gas_only)) if (vol_gas > 0 and eff_gas_only > 0) else (1.0 / eff_gas_only)) * gas_cost_m3
-        c_per_gas_pump = (1.0 / eff_gas_pump) * gas_cost_m3
-        c_per_elec = ((total_vol / (vol_elec * eff_elec_only)) if (vol_elec > 0 and eff_elec_only > 0) else (1.0 / eff_elec_only)) * tariff
-        c_per_elec_pump = (1.0 / eff_elec_pump) * tariff
+        c_per_gas = ((total_vol / (vol_gas * eff_gas_only)) if (vol_gas > 0 and eff_gas_only > 0) else (1.0 / eff_gas_only if eff_gas_only > 0 else 0.0)) * gas_cost_m3
+        c_per_gas_pump = (1.0 / eff_gas_pump if eff_gas_pump > 0 else 0.0) * gas_cost_m3
+        c_per_elec = ((total_vol / (vol_elec * eff_elec_only)) if (vol_elec > 0 and eff_elec_only > 0) else (1.0 / eff_elec_only if eff_elec_only > 0 else 0.0)) * tariff
+        c_per_elec_pump = (1.0 / eff_elec_pump if eff_elec_pump > 0 else 0.0) * tariff
 
         # Determine electric heating allowance
         allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False

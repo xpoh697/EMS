@@ -64,6 +64,12 @@ from .const import (
     DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
     SOC_HYSTERESIS,
+    CONF_THERMOSTAT_SET_TEMP,
+    CONF_ELEC_BOILER_MAX_TEMP,
+    CONF_GAS_BOILER_MAX_TEMP,
+    DEFAULT_THERMOSTAT_SET_TEMP,
+    DEFAULT_ELEC_BOILER_MAX_TEMP,
+    DEFAULT_GAS_BOILER_MAX_TEMP,
 )
 from .utils import ems_log, calculate_battery_degradation, parse_price_sensor
 from .dp_engine import run_unified_dp, DPConfig
@@ -543,6 +549,21 @@ async def async_setup_entry(
             entry.title,
         )
     )
+    entities.append(
+        EmsDiagnosticSensor(
+            entry.entry_id,
+            entry.title,
+            entry,
+        )
+    )
+    if bat_soc_entity_id and bat_capacity_entity_id:
+        entities.append(
+            EmsBoilerDpSensor(
+                entry.entry_id,
+                entry.title,
+                entry,
+            )
+        )
 
     if entities:
         async_add_entities(entities)
@@ -1781,6 +1802,7 @@ class EmsDpSensor(SensorEntity):
             if idx == 0:
                 current_action = action
 
+            expected_soc_val = stats.get("expected_trajectory", [])[idx] if idx < len(stats.get("expected_trajectory", [])) else 0.0
             schedule.append({
                 "date": slot["date"],
                 "hour": slot["hour"],
@@ -1792,6 +1814,7 @@ class EmsDpSensor(SensorEntity):
                 "physical_mode": physical_mode,
                 "mapping_reason": mapping_reason,
                 "energy_kwh": round(energy, 2),
+                "expected_soc": expected_soc_val,
             })
 
         return {
@@ -1911,6 +1934,30 @@ class EmsSchedulerSensor(SensorEntity):
     @property
     def native_value(self) -> str | None:
         """Return the state of the scheduler (current active mode)."""
+        config = self._entry.data
+        options = self._entry.options
+        from .const import CONF_BAT_SOC_ENTITY, CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY
+
+        bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
+        bat_soc_emergency_val = options.get(CONF_BAT_SOC_EMERGENCY, config.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY))
+        try:
+            bat_soc_emergency_val = float(bat_soc_emergency_val)
+        except (ValueError, TypeError):
+            bat_soc_emergency_val = DEFAULT_BAT_SOC_EMERGENCY
+
+        # Read actual SOC
+        soc = None
+        if bat_soc_entity_id:
+            soc_state = self.hass.states.get(bat_soc_entity_id)
+            if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    soc = float(soc_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+        # If actual SOC is <= emergency threshold, force bat_emergency
+        if soc is not None and soc <= bat_soc_emergency_val:
+            return "bat_emergency"
         storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
         overrides = storage.get_overrides()
 
@@ -1992,12 +2039,19 @@ class EmsSchedulerSensor(SensorEntity):
             CONF_BAT_SOC_ENTITY,
             CONF_MIN_BAT_SOC,
             DEFAULT_MIN_BAT_SOC,
+            CONF_BAT_SOC_EMERGENCY,
+            DEFAULT_BAT_SOC_EMERGENCY,
         )
 
         bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
         bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
         bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
         min_bat_soc = storage.min_bat_soc
+        bat_soc_emergency_val = options.get(CONF_BAT_SOC_EMERGENCY, config.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY))
+        try:
+            bat_soc_emergency_val = float(bat_soc_emergency_val)
+        except (ValueError, TypeError):
+            bat_soc_emergency_val = DEFAULT_BAT_SOC_EMERGENCY
 
         # Retrieve battery max power from config/options
         bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
@@ -2072,15 +2126,18 @@ class EmsSchedulerSensor(SensorEntity):
             action = slot.get("action", "idle")
             energy = slot.get("energy_kwh", 0.0)
 
-            power_w = 0.0
-            current_a = 0.0
-
-            # Normalize first slot energy to full-hour rate for power display
-            if slot_idx == 0 and remaining_hour_fraction < 1.0:
-                energy_for_power = energy / remaining_hour_fraction
-                energy_for_power = min(energy_for_power, bat_max_power / 1000.0)
+            # If battery is in emergency state, force first slot to bat_emergency with 0 energy
+            if slot_idx == 0 and soc is not None and soc <= bat_soc_emergency_val:
+                action = "bat_emergency"
+                energy = 0.0
+                energy_for_power = 0.0
             else:
-                energy_for_power = energy
+                # Normalize first slot energy to full-hour rate for power display
+                if slot_idx == 0 and remaining_hour_fraction < 1.0:
+                    energy_for_power = energy / remaining_hour_fraction
+                    energy_for_power = min(energy_for_power, bat_max_power / 1000.0)
+                else:
+                    energy_for_power = energy
 
             if action in ("grid_charge", "pv_charge"):
                 end_usable = min(usable_capacity, usable_energy + energy)
@@ -2097,12 +2154,16 @@ class EmsSchedulerSensor(SensorEntity):
             end_soc = (end_usable / safe_capacity) * 100 + min_bat_soc
             end_soc = max(min_bat_soc, min(100.0, end_soc))
 
-            dispatched_plan.append({
+            slot_data = {
                 **slot,
-                "soc": round(end_soc, 1),
+                "soc": round(soc if (slot_idx == 0 and soc is not None and soc <= bat_soc_emergency_val) else end_soc, 1),
                 "power_w": round(power_w, 1),
                 "current_a": round(current_a, 1),
-            })
+            }
+            if slot_idx == 0 and soc is not None and soc <= bat_soc_emergency_val:
+                slot_data["action"] = "bat_emergency"
+                slot_data["physical_mode"] = "bat_emergency"
+            dispatched_plan.append(slot_data)
             usable_energy = end_usable
 
         # Determine raw_mode and mapping_reason for the current state
@@ -2140,6 +2201,10 @@ class EmsSchedulerSensor(SensorEntity):
                 cheap_ahead=cheap_ahead,
             )
             mapping_reason = f"override: {active_override} | {override_reason}"
+
+        if soc is not None and soc <= bat_soc_emergency_val:
+            raw_mode = "bat_emergency"
+            mapping_reason = "battery_emergency"
 
         current_power = 0.0
         current_amps = 0.0
@@ -2206,6 +2271,15 @@ class EmsSchedulerSensor(SensorEntity):
             self.hass.bus.async_listen("ems_schedule_updated", self._async_override_changed)
         )
 
+        # Subscribe to Battery SOC sensor
+        bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
+        if bat_soc_entity_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [bat_soc_entity_id], self._async_soc_changed
+                )
+            )
+
     async def _async_dp_changed(self, event) -> None:
         """Handle DP sensor changes."""
         self._update_dynamic_switching()
@@ -2213,6 +2287,11 @@ class EmsSchedulerSensor(SensorEntity):
 
     async def _async_override_changed(self, event) -> None:
         """Handle manual override updates."""
+        self._update_dynamic_switching()
+        self.async_write_ha_state()
+
+    async def _async_soc_changed(self, event) -> None:
+        """Handle battery SOC changes."""
         self._update_dynamic_switching()
         self.async_write_ha_state()
 
@@ -2742,8 +2821,8 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
         self._state: str = "idle"
         self._gas_only = {"efficiency_c_per_m3": 0.0, "last_calibrated": None}
         self._gas_with_pump = {"efficiency_c_per_m3": 0.0, "last_calibrated": None}
-        self._elec_only = {"efficiency_c_per_kwh": 0.0, "last_calibrated": None}
-        self._elec_with_pump = {"efficiency_c_per_kwh": 0.0, "last_calibrated": None}
+        self._elec_only = {"efficiency_c_per_kwh": 0.0, "heater_power_kw": 2.5, "last_calibrated": None}
+        self._elec_with_pump = {"efficiency_c_per_kwh": 0.0, "heater_power_kw": 2.5, "last_calibrated": None}
 
         # Newton's Law LUT: 11 температурных брэкетов 5°C для каждого бойлера
         _lut_brackets = [
@@ -2922,4 +3001,418 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
         """Set active calibration phase and update transient data."""
         self._state = state
         self._calibration_data = calibration_data or {}
+        self.async_write_ha_state()
+
+
+class EmsDiagnosticSensor(SensorEntity):
+    """EMS Diagnostic Sensor that monitors boiler temperature sensors."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
+        """Initialize the diagnostic sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._entry = entry
+        self._attr_name = "EMS Diagnostic"
+        self._attr_unique_id = f"{entry_id}_ems_diagnostic"
+        self.entity_id = "sensor.ems_diagnostic"
+
+        self._state: str = "OK"
+        self._gas_boiler_temp_sensor: str | None = None
+        self._gas_boiler_temp_state: str = "missing"
+        self._gas_boiler_temp: float | None = None
+        self._gas_boiler_effective_volume: float = 0.0
+
+        self._elec_boiler_temp_sensor: str | None = None
+        self._elec_boiler_temp_state: str = "missing"
+        self._elec_boiler_temp: float | None = None
+        self._elec_boiler_effective_volume: float = 0.0
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return the current diagnostic state."""
+        return self._state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "gas_boiler_temp_sensor": self._gas_boiler_temp_sensor,
+            "gas_boiler_temp_state": self._gas_boiler_temp_state,
+            "gas_boiler_temp": self._gas_boiler_temp,
+            "gas_boiler_effective_volume": self._gas_boiler_effective_volume,
+            "elec_boiler_temp_sensor": self._elec_boiler_temp_sensor,
+            "elec_boiler_temp_state": self._elec_boiler_temp_state,
+            "elec_boiler_temp": self._elec_boiler_temp,
+            "elec_boiler_effective_volume": self._elec_boiler_effective_volume,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition."""
+        await super().async_added_to_hass()
+        config = self._entry.data
+        options = self._entry.options
+        gas_sensor = options.get("gas_boiler_climate", config.get("gas_boiler_climate"))
+        elec_sensor = options.get("elec_boiler_temp", config.get("elec_boiler_temp"))
+
+        listeners = []
+        if gas_sensor:
+            listeners.append(gas_sensor)
+        if elec_sensor:
+            listeners.append(elec_sensor)
+
+        if listeners:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, listeners, self._async_sensor_changed
+                )
+            )
+
+        self._update_state()
+
+    async def _async_sensor_changed(self, event) -> None:
+        """Handle temperature sensor updates."""
+        self._update_state()
+        self.async_write_ha_state()
+
+    def _update_state(self) -> None:
+        """Update sensor state and attributes based on temperature sensor availability."""
+        config = self._entry.data
+        options = self._entry.options
+
+        gas_sensor = options.get("gas_boiler_climate", config.get("gas_boiler_climate"))
+        elec_sensor = options.get("elec_boiler_temp", config.get("elec_boiler_temp"))
+        gas_cap = float(options.get("gas_boiler_capacity", config.get("gas_boiler_capacity", 100.0)))
+        elec_cap = float(options.get("elec_boiler_capacity", config.get("elec_boiler_capacity", 100.0)))
+
+        gas_ok = False
+        gas_temp_val = None
+        gas_temp_state = "missing"
+
+        if gas_sensor:
+            state = self.hass.states.get(gas_sensor)
+            if state and state.state not in (None, "unknown", "unavailable"):
+                temp_attr = state.attributes.get("current_temperature")
+                if temp_attr is not None:
+                    try:
+                        gas_temp_val = float(temp_attr)
+                        gas_ok = True
+                        gas_temp_state = "available"
+                    except (ValueError, TypeError):
+                        gas_temp_state = "invalid_value"
+                else:
+                    gas_temp_state = "missing_temperature_attribute"
+            else:
+                gas_temp_state = "unavailable"
+
+        elec_ok = False
+        elec_temp_val = None
+        elec_temp_state = "missing"
+
+        if elec_sensor:
+            state = self.hass.states.get(elec_sensor)
+            if state and state.state not in (None, "unknown", "unavailable"):
+                try:
+                    elec_temp_val = float(state.state)
+                    elec_ok = True
+                    elec_temp_state = "available"
+                except (ValueError, TypeError):
+                    elec_temp_state = "invalid_value"
+            else:
+                elec_temp_state = "unavailable"
+
+        self._gas_boiler_temp_sensor = gas_sensor
+        self._gas_boiler_temp_state = gas_temp_state
+        self._gas_boiler_temp = gas_temp_val
+        self._gas_boiler_effective_volume = gas_cap if gas_ok else 0.0
+
+        self._elec_boiler_temp_sensor = elec_sensor
+        self._elec_boiler_temp_state = elec_temp_state
+        self._elec_boiler_temp = elec_temp_val
+        self._elec_boiler_effective_volume = elec_cap if elec_ok else 0.0
+
+        if gas_ok and elec_ok:
+            self._state = "OK"
+        else:
+            self._state = "ERROR"
+
+
+class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
+    """EMS Boiler Dynamic Programming Scheduler Sensor."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
+        """Initialize the Boiler DP sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._entry = entry
+        self._attr_name = "Boiler DP"
+        self._attr_unique_id = f"{entry_id}_boiler_dp"
+        self.entity_id = "sensor.boiler_dp"
+
+        self._state: str = "IDLE"
+        self._schedule: list[dict] = []
+        self._stats: dict = {}
+        self._t_start: float | None = None
+        self._t_min: float | None = None
+        self._t_max_elec: float | None = None
+        self._t_max_gas: float | None = None
+        self._vol_elec: float | None = None
+        self._vol_gas: float | None = None
+        self._gas_cost_m3: float | None = None
+        self._last_calc_time: datetime | None = None
+        self._last_calc_temp: float | None = None
+        self._calc_duration: float | None = None
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return the current recommended action."""
+        return self._state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {
+            "schedule": self._schedule,
+            "stats": self._stats,
+            "t_start": self._t_start,
+            "t_min": self._t_min,
+            "t_max_elec": self._t_max_elec,
+            "t_max_gas": self._t_max_gas,
+            "vol_elec": self._vol_elec,
+            "vol_gas": self._vol_gas,
+            "gas_cost_m3": self._gas_cost_m3,
+            "last_calculation": self._last_calc_time.isoformat() if self._last_calc_time else None,
+            "calculation_duration": self._calc_duration,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition and restore state."""
+        await super().async_added_to_hass()
+
+        last_state = await self.async_get_last_state()
+        if last_state:
+            self._state = last_state.state
+            attrs = last_state.attributes
+            self._schedule = attrs.get("schedule", [])
+            self._stats = attrs.get("stats", {})
+            self._t_start = attrs.get("t_start")
+            self._t_min = attrs.get("t_min")
+            self._t_max_elec = attrs.get("t_max_elec")
+            self._t_max_gas = attrs.get("t_max_gas")
+            self._vol_elec = attrs.get("vol_elec")
+            self._vol_gas = attrs.get("vol_gas")
+            self._gas_cost_m3 = attrs.get("gas_cost_m3")
+            if attrs.get("last_calculation"):
+                try:
+                    self._last_calc_time = datetime.fromisoformat(attrs["last_calculation"])
+                except (ValueError, TypeError):
+                    self._last_calc_time = None
+
+        # Listen to target state changes
+        config = self._entry.data
+        options = self._entry.options
+        gas_sensor = options.get("gas_boiler_climate", config.get("gas_boiler_climate"))
+        elec_sensor = options.get("elec_boiler_temp", config.get("elec_boiler_temp"))
+
+        listeners = ["sensor.dp", "sensor.boiler_calibration"]
+        if gas_sensor:
+            listeners.append(gas_sensor)
+        if elec_sensor:
+            listeners.append(elec_sensor)
+
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, listeners, self._async_state_changed_listener
+            )
+        )
+
+        # Recalculate on every hour transition
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._async_hourly_trigger, minute=0, second=0
+            )
+        )
+
+        # Initial trigger
+        await self.async_update_boiler_dp(force=True)
+
+    async def _async_hourly_trigger(self, datetime_now) -> None:
+        """Handle hourly recalculation."""
+        await self.async_update_boiler_dp(force=True)
+
+    async def _async_state_changed_listener(self, event) -> None:
+        """Handle monitored entity state changes with debouncing."""
+        await self.async_update_boiler_dp(force=False)
+
+    async def async_update_boiler_dp(self, force: bool = False) -> None:
+        """Calculate the Boiler DP schedule inside executor."""
+        now = dt_util.now()
+        config = self._entry.data
+        options = self._entry.options
+
+        # 1. Retrieve temperature sensors and calculate current weighted system temp
+        gas_sensor = options.get("gas_boiler_climate", config.get("gas_boiler_climate"))
+        elec_sensor = options.get("elec_boiler_temp", config.get("elec_boiler_temp"))
+
+        gas_cap = float(options.get("gas_boiler_capacity", config.get("gas_boiler_capacity", 100.0)))
+        elec_cap = float(options.get("elec_boiler_capacity", config.get("elec_boiler_capacity", 100.0)))
+
+        # Evaluate availability of gas temp
+        gas_ok = False
+        t_gas = 0.0
+        if gas_sensor:
+            state = self.hass.states.get(gas_sensor)
+            if state and state.state not in (None, "unknown", "unavailable"):
+                temp_attr = state.attributes.get("current_temperature")
+                if temp_attr is not None:
+                    try:
+                        t_gas = float(temp_attr)
+                        gas_ok = True
+                    except (ValueError, TypeError):
+                        pass
+
+        # Evaluate availability of elec temp
+        elec_ok = False
+        t_elec = 0.0
+        if elec_sensor:
+            state = self.hass.states.get(elec_sensor)
+            if state and state.state not in (None, "unknown", "unavailable"):
+                try:
+                    t_elec = float(state.state)
+                    elec_ok = True
+                except (ValueError, TypeError):
+                    pass
+
+        # Effective volumes (0.0 if sensor unavailable/missing)
+        vol_gas = gas_cap if gas_ok else 0.0
+        vol_elec = elec_cap if elec_ok else 0.0
+
+        # Weighted temperature calculation
+        total_vol = vol_gas + vol_elec
+        if total_vol > 0.0:
+            t_curr = (t_gas * vol_gas + t_elec * vol_elec) / total_vol
+        else:
+            t_curr = 20.0  # Safe default if no sensor is available/configured
+
+        # 2. Check debounce conditions
+        if not force and self._last_calc_time is not None and self._last_calc_temp is not None:
+            time_delta = (now - self._last_calc_time).total_seconds()
+            temp_delta = abs(t_curr - self._last_calc_temp)
+            if time_delta < 60.0 and temp_delta < 0.5:
+                return
+
+        # 3. Retrieve schedule slots from sensor.dp
+        dp_state = self.hass.states.get("sensor.dp")
+        if not dp_state or dp_state.state in ("unknown", "unavailable"):
+            ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.dp is not available yet.")
+            self._state = "IDLE"
+            self.async_write_ha_state()
+            return
+
+        dp_schedule = dp_state.attributes.get("schedule", [])
+        if not dp_schedule:
+            ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.dp has no schedule attribute.")
+            self._state = "IDLE"
+            self.async_write_ha_state()
+            return
+
+        # Convert schedule from sensor.dp back to list of dicts required by run_boiler_dp
+        slots = []
+        for slot in dp_schedule:
+            slots.append({
+                "date": slot.get("date"),
+                "hour": slot.get("hour"),
+                "buy_price": float(slot.get("buy_price", 0.0)),
+                "sell_price": float(slot.get("sell_price", 0.0)),
+                "physical_mode": slot.get("physical_mode", "idle"),
+                "expected_soc": float(slot.get("expected_soc", 50.0)),
+            })
+
+        # 4. Retrieve calibration coefficients from sensor.boiler_calibration
+        cal_state = self.hass.states.get("sensor.boiler_calibration")
+        if not cal_state or cal_state.state in ("unknown", "unavailable"):
+            ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.boiler_calibration is not available.")
+            self._state = "NO CALIB DATA"
+            self.async_write_ha_state()
+            return
+
+        cal_attrs = cal_state.attributes
+        cal_data = {
+            "gas_only": cal_attrs.get("gas_only", {}),
+            "gas_with_pump": cal_attrs.get("gas_with_pump", {}),
+            "elec_only": cal_attrs.get("elec_only", {}),
+            "elec_with_pump": cal_attrs.get("elec_with_pump", {}),
+            "standby_losses": cal_attrs.get("standby_losses", {}),
+        }
+
+        # 5. Extract limits and settings
+        t_min = float(options.get(CONF_THERMOSTAT_SET_TEMP, config.get(CONF_THERMOSTAT_SET_TEMP, DEFAULT_THERMOSTAT_SET_TEMP)))
+        t_max_elec = float(options.get(CONF_ELEC_BOILER_MAX_TEMP, config.get(CONF_ELEC_BOILER_MAX_TEMP, DEFAULT_ELEC_BOILER_MAX_TEMP)))
+        t_max_gas = float(options.get(CONF_GAS_BOILER_MAX_TEMP, config.get(CONF_GAS_BOILER_MAX_TEMP, DEFAULT_GAS_BOILER_MAX_TEMP)))
+        gas_cost_m3 = float(options.get("gas_cost_m3", config.get("gas_cost_m3", 0.0)))
+
+        # 6. Execute run_boiler_dp in the executor thread pool
+        start_time = time.perf_counter()
+        try:
+            from .boiler_dp_engine import run_boiler_dp
+            current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(
+                run_boiler_dp,
+                slots,
+                t_curr,
+                t_min,
+                t_max_elec,
+                t_max_gas,
+                vol_elec,
+                vol_gas,
+                gas_cost_m3,
+                cal_data,
+            )
+
+            self._state = current_action
+            self._schedule = schedule_list
+            self._stats = stats_dict
+        except Exception as err:
+            ems_log(self.hass, _LOGGER, logging.ERROR, f"Error running boiler DP optimizer: {err}", exc_info=True)
+            self._state = "error"
+            self._schedule = []
+            self._stats = {"error": str(err)}
+
+        self._t_start = round(t_curr, 2)
+        self._t_min = t_min
+        self._t_max_elec = t_max_elec
+        self._t_max_gas = t_max_gas
+        self._vol_elec = vol_elec
+        self._vol_gas = vol_gas
+        self._gas_cost_m3 = gas_cost_m3
+        self._last_calc_time = now
+        self._last_calc_temp = t_curr
+        self._calc_duration = round(time.perf_counter() - start_time, 3)
+
         self.async_write_ha_state()

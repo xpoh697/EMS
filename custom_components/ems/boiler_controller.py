@@ -29,6 +29,7 @@ class BoilerController:
         self.gas_meter = config.get("gas_boiler_meter")
         self.elec_energy = config.get("elec_boiler_energy")
         self.elec_temp = config.get("elec_boiler_temp")
+        self.elec_power = config.get("elec_boiler_power")
         
         # Sensor reference (will be registered by sensor.py)
         self.calibration_sensor = None
@@ -470,6 +471,12 @@ class BoilerController:
                 while elapsed < duration:
                     await asyncio.sleep(10)
                     elapsed += 10
+                    if "elec" in phase:
+                        p_val = self._get_elec_power()
+                        if p_val is not None:
+                            if "power_readings" not in cal_data:
+                                cal_data["power_readings"] = []
+                            cal_data["power_readings"].append(p_val)
                     t_curr = self._get_system_temp()
                     _LOGGER.info("[%s] Heating in progress... Elapsed: %ss/%ss, Current Temp: %s°C", phase, elapsed, duration, t_curr)
                     
@@ -497,6 +504,12 @@ class BoilerController:
                 while elapsed < timeout:
                     await asyncio.sleep(10)
                     elapsed += 10
+                    if "elec" in phase:
+                        p_val = self._get_elec_power()
+                        if p_val is not None:
+                            if "power_readings" not in cal_data:
+                                cal_data["power_readings"] = []
+                            cal_data["power_readings"].append(p_val)
                     
                     if "gas" in phase:
                         t_curr = self._get_gas_temp()
@@ -608,6 +621,34 @@ class BoilerController:
             update_data["efficiency_c_per_kwh"] = efficiency
             _LOGGER.info("Electric Efficiency calculated successfully: %s °C/kWh", efficiency)
 
+            # Calculate and save heater_power_kw based on readings, duration, or fallback
+            readings = cal_data.get("power_readings", [])
+            avg_p = None
+            if readings:
+                avg_p = sum(readings) / len(readings)
+                _LOGGER.info("Average electric power from instant sensor: %.3f kW", avg_p)
+            
+            if avg_p is None:
+                started_at_str = cal_data.get("started_at")
+                ended_at_str = cal_data.get("heating_ended_at")
+                if started_at_str and ended_at_str:
+                    try:
+                        started_dt = dt_util.parse_datetime(started_at_str)
+                        ended_dt = dt_util.parse_datetime(ended_at_str)
+                        if started_dt and ended_dt:
+                            duration_hours = (ended_dt - started_dt).total_seconds() / 3600.0
+                            if duration_hours > 0.0:
+                                avg_p = delta_e / duration_hours
+                                _LOGGER.info("Calculated electric power from energy/duration: %.3f kW", avg_p)
+                    except Exception as ex:
+                        _LOGGER.warning("Could not calculate electric power from duration: %s", ex)
+            
+            if avg_p is None or avg_p <= 0.0:
+                avg_p = 2.5
+                _LOGGER.info("Using default electric power: %.3f kW", avg_p)
+            
+            update_data["heater_power_kw"] = round(avg_p, 3)
+
         # Сохранение результатов и сброс в IDLE
         self.calibration_sensor.update_calibration_coefficient(phase, update_data)
         self.calibration_sensor.set_calibration_state("idle", {})
@@ -645,6 +686,21 @@ class BoilerController:
     # =========================================================================
     # Helpers: Readings and Actuation
     # =========================================================================
+    def _get_elec_power(self) -> float | None:
+        """Получить показания мгновенной мощности ТЭНа."""
+        if not self.elec_power:
+            return None
+        state = self.hass.states.get(self.elec_power)
+        if state is None or state.state in ("unknown", "unavailable"):
+            return None
+        try:
+            val = float(state.state)
+            if val > 15.0:
+                val /= 1000.0
+            return val
+        except (ValueError, TypeError):
+            return None
+
     def _get_baseline_readings(self, phase: str) -> dict:
         """Сбор базовых параметров перед калибровкой с жесткой проверкой ошибок."""
         readings = {}

@@ -287,9 +287,12 @@ def run_unified_dp(
     total_battery_discharge = 0.0
     total_grid_charge = 0.0
     total_paid_import = 0.0
+    expected_trajectory: list[float] = []
 
     for slot, act, amount in zip(scaled_slots, types_by_slot, amounts_by_slot, strict=False):
         start_usable = usable_energy
+        soc_val = max(0.0, min(100.0, config.battery_min_soc + (start_usable / config.battery_capacity * 100.0)))
+        expected_trajectory.append(round(soc_val, 2))
 
         # Apply post-processing filter for small grid discharges (exporters)
         if act == ACT_DIS and amount > 0:
@@ -413,4 +416,5 @@ def run_unified_dp(
         "paid_import_hours": len(paid_import_hours),
         "best_value": round(best_total_value, 2),
         "end_usable_kwh": round(usable_energy, 2),
+        "expected_trajectory": expected_trajectory,
     }
