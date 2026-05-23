@@ -53,6 +53,7 @@ def run_boiler_dp(
     vol_gas: float,
     gas_cost_m3: float,
     cal_data: Dict[str, Any],
+    temp_reward: float = 0.001,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run Dynamic Programming strategy optimizer for hot water boiler.
 
@@ -235,8 +236,10 @@ def run_boiler_dp(
                             cost = kwh * tariff
                             energy = kwh
 
-                        # State relaxation comparison
-                        new_cost = dp[h - 1][prev_idx] + cost
+                        # State relaxation and comfort reward comparison
+                        penalty = 1000.0 * (t_min - T_curr) if (relax and T_curr < t_min) else 0.0
+                        reward = temp_reward * (T_curr - t_min)
+                        new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
                         if new_cost < dp[h][curr_idx]:
                             dp[h][curr_idx] = new_cost
                             prev_state[h][curr_idx] = prev_idx
