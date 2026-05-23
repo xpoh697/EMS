@@ -154,6 +154,7 @@ def run_unified_dp(
         # Parse override: may be "action" or "action:target_soc"
         override_action = None
         override_target_soc = None
+        target_nsi = None
         if override:
             _parts = override.split(":", 1)
             override_action = _parts[0]
@@ -162,6 +163,15 @@ def run_unified_dp(
                     override_target_soc = float(_parts[1])
                 except (ValueError, TypeError):
                     override_target_soc = None
+            else:
+                if override_action == "grid_charge":
+                    override_target_soc = 100.0
+                elif override_action == "discharge":
+                    override_target_soc = float(config.battery_min_soc)
+
+            if override_target_soc is not None and config.battery_capacity > 0.0 and energy_step > 0.0:
+                target_usable = config.battery_capacity * (override_target_soc - config.battery_min_soc) / 100.0
+                target_nsi = max(0, min(max_energy_idx, int(round(target_usable / energy_step))))
 
         for state_idx, current_value in enumerate(dp[slot_idx - 1]):
             if current_value == neg_inf:
@@ -172,16 +182,17 @@ def run_unified_dp(
 
             def _update(nsi: int, rwd: float, act: int, amt: float) -> None:
                 nonlocal state_updated
-                # Guard: if charging action has a target_soc, discard transitions that exceed it
-                if override_target_soc is not None and act in (ACT_PV_CHARGE, ACT_GRID_CHARGE):
-                    next_soc = (nsi * energy_step / config.battery_capacity) * 100.0 + config.battery_min_soc
-                    if next_soc > override_target_soc + 1e-5:
-                        return
-                # Guard: if discharging action has a target_soc, discard transitions that go below it
-                if override_target_soc is not None and act in (ACT_DIS, ACT_SELF_CONSUME):
-                    next_soc = (nsi * energy_step / config.battery_capacity) * 100.0 + config.battery_min_soc
-                    if next_soc < override_target_soc - 1e-5:
-                        return
+                # Defense-in-depth safety checks
+                if target_nsi is not None and not (act == ACT_SOL and nsi == state_idx):
+                    if target_nsi > state_idx:
+                        if nsi > target_nsi or nsi <= state_idx:
+                            return
+                    elif target_nsi < state_idx:
+                        if nsi < target_nsi or nsi >= state_idx:
+                            return
+                    else:
+                        if nsi != state_idx:
+                            return
                 val = current_value + rwd
                 if val > dp[slot_idx][nsi]:
                     dp[slot_idx][nsi] = val
@@ -191,57 +202,98 @@ def run_unified_dp(
                 state_updated = True
 
             # === SOL: battery idle, PV surplus -> grid ===
-            if not override_action or override_action == "idle":
+            if (not override_action or override_action in ("idle", "sale_pv", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")) and (target_nsi is None or target_nsi == state_idx):
                 _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
 
             # === DIS: discharge battery to grid ===
-            if (override_action == "discharge" or (not config.disable_discharge and not override_action)) and sell_price >= config.min_discharge_price and sell_price > 0:
+            if (override_action == "discharge" or ((not config.disable_discharge and not override_action) and sell_price >= config.min_discharge_price and sell_price > 0)) and (target_nsi is None or target_nsi < state_idx):
                 max_discharge_power = config.battery_max_discharge_power
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_discharge_power *= remaining_hour_fraction
                 max_exp = min(max_discharge_power, usable_energy)
-                min_ei = 1
-                max_ei = int(round(max_exp / energy_step))
-                for ei in range(min_ei, max_ei + 1):
-                    exp = ei * energy_step
-                    nsi = min(max_energy_idx, max(0, int(round((usable_energy - exp) / energy_step))))
-                    to_grid = max(0.0, exp + pv_kwh - consumption_kwh)
-                    grid_imp = max(0.0, consumption_kwh - exp - pv_kwh)
-                    _update(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
+                
+                if target_nsi is not None:
+                    max_possible_dis_steps = int(max_exp / energy_step)
+                    desired_dis_steps = min(state_idx - target_nsi, max_possible_dis_steps)
+                    if desired_dis_steps >= 1:
+                        exp = desired_dis_steps * energy_step
+                        nsi = max(0, min(max_energy_idx, state_idx - desired_dis_steps))
+                        to_grid = max(0.0, exp + pv_kwh - consumption_kwh)
+                        grid_imp = max(0.0, consumption_kwh - exp - pv_kwh)
+                        _update(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
+                else:
+                    min_ei = 1
+                    max_ei = int(round(max_exp / energy_step))
+                    for ei in range(min_ei, max_ei + 1):
+                        exp = ei * energy_step
+                        nsi = min(max_energy_idx, max(0, int(round((usable_energy - exp) / energy_step))))
+                        to_grid = max(0.0, exp + pv_kwh - consumption_kwh)
+                        grid_imp = max(0.0, consumption_kwh - exp - pv_kwh)
+                        _update(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
 
             # === PV_CHARGE: PV surplus -> battery, overflow -> grid ===
             avail_cap = usable_capacity - usable_energy
-            if (not override_action or override_action == "grid_charge") and pv_surplus > 0 and avail_cap >= energy_step:
+            if (not override_action or override_action in ("grid_charge", "pv_charge", "sale_pv", "stop_sale")) and pv_surplus > 0 and avail_cap >= energy_step and (target_nsi is None or target_nsi > state_idx):
                 max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_charge_power *= remaining_hour_fraction
                 max_pvc = min(pv_surplus, avail_cap, max_charge_power)
-                for ci in range(1, int(max_pvc / energy_step) + 1):
-                    chg = ci * energy_step
-                    nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                    reward = sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
-                    reward += 1e-6 * chg
-                    _update(nsi, reward, ACT_PV_CHARGE, chg)
+                
+                if target_nsi is not None:
+                    max_possible_chg_steps = int(max_pvc / energy_step)
+                    desired_chg_steps = min(target_nsi - state_idx, max_possible_chg_steps)
+                    if desired_chg_steps >= 1:
+                        chg = desired_chg_steps * energy_step
+                        nsi = min(max_energy_idx, max(0, state_idx + desired_chg_steps))
+                        reward = sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
+                        reward += 1e-6 * chg
+                        _update(nsi, reward, ACT_PV_CHARGE, chg)
+                else:
+                    for ci in range(1, int(max_pvc / energy_step) + 1):
+                        chg = ci * energy_step
+                        nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
+                        reward = sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
+                        reward += 1e-6 * chg
+                        _update(nsi, reward, ACT_PV_CHARGE, chg)
 
             # === GRID_CHARGE: charge battery from grid ===
-            if (not override_action or override_action == "grid_charge") and avail_cap >= energy_step:
+            if (not override_action or override_action == "grid_charge") and avail_cap >= energy_step and (target_nsi is None or target_nsi > state_idx):
                 max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_charge_power *= remaining_hour_fraction
                 max_gc = min(max_charge_power, avail_cap)
-                for ci in range(1, int(max_gc / energy_step) + 1):
-                    chg = ci * energy_step
-                    nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                    _update(nsi, sell_price * pv_surplus - buy_price * (chg + pv_deficit) - cycle_cost * chg, ACT_GRID_CHARGE, chg)
+                
+                if target_nsi is not None:
+                    max_possible_chg_steps = int(max_gc / energy_step)
+                    desired_chg_steps = min(target_nsi - state_idx, max_possible_chg_steps)
+                    if desired_chg_steps >= 1:
+                        chg = desired_chg_steps * energy_step
+                        nsi = min(max_energy_idx, max(0, state_idx + desired_chg_steps))
+                        _update(nsi, sell_price * pv_surplus - buy_price * (chg + pv_deficit) - cycle_cost * chg, ACT_GRID_CHARGE, chg)
+                else:
+                    for ci in range(1, int(max_gc / energy_step) + 1):
+                        chg = ci * energy_step
+                        nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
+                        _update(nsi, sell_price * pv_surplus - buy_price * (chg + pv_deficit) - cycle_cost * chg, ACT_GRID_CHARGE, chg)
 
             # === SELF_CONSUME: battery covers consumption deficit ===
-            if (not override_action or override_action == "self_consume") and pv_deficit >= energy_step and usable_energy >= energy_step:
+            if (not override_action or override_action in ("self_consume", "stop_sale")) and pv_deficit >= energy_step and usable_energy >= energy_step and (target_nsi is None or target_nsi < state_idx):
                 max_sc = min(usable_energy, pv_deficit)
-                for sci in range(1, int(round(max_sc / energy_step)) + 1):
-                    sc = sci * energy_step
-                    nsi = min(max_energy_idx, max(0, int(round((usable_energy - sc) / energy_step))))
-                    remaining_deficit = max(0.0, pv_deficit - sc)
-                    _update(nsi, -buy_price * remaining_deficit, ACT_SELF_CONSUME, sc)
+                
+                if target_nsi is not None:
+                    max_possible_sc_steps = int(max_sc / energy_step)
+                    desired_sc_steps = min(state_idx - target_nsi, max_possible_sc_steps)
+                    if desired_sc_steps >= 1:
+                        sc = desired_sc_steps * energy_step
+                        nsi = max(0, min(max_energy_idx, state_idx - desired_sc_steps))
+                        remaining_deficit = max(0.0, pv_deficit - sc)
+                        _update(nsi, -buy_price * remaining_deficit, ACT_SELF_CONSUME, sc)
+                else:
+                    for sci in range(1, int(round(max_sc / energy_step)) + 1):
+                        sc = sci * energy_step
+                        nsi = min(max_energy_idx, max(0, int(round((usable_energy - sc) / energy_step))))
+                        remaining_deficit = max(0.0, pv_deficit - sc)
+                        _update(nsi, -buy_price * remaining_deficit, ACT_SELF_CONSUME, sc)
 
             # === PAID_IMPORT: home from grid, PV curtailed, battery untouched ===
             if not override_action and buy_price < 0 and consumption_kwh >= energy_step:
