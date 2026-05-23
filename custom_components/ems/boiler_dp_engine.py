@@ -285,37 +285,40 @@ def run_boiler_dp(
                                 bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC":
-                        # Bypass is open, pump is off. Gas cools. Electric heats.
+                        # Bypass is open or closed, pump is off. Gas cools. Electric heats.
                         # Grid state represents Gas (T_gas_cooled).
-                        # Active temperature is T_elec_end.
-                        T_gas_end_val = T_gas_cooled
                         power_kw = cal_data.get("elec_only", {}).get("heater_power_kw", 2.5)
                         max_rise_elec = power_kw * eff_elec_only
                         T_elec_end_val = min(t_max_elec, T_elec_cooled + max_rise_elec)
-                        T_active = T_elec_end_val
-                        T_bypass_end_val = True
-                        t_max_mode = t_max
+                        T_gas_end_val = T_gas_cooled
                         
-                        curr_idx = int(round((T_gas_end_val - t_min) * 2))
-                        if 0 <= curr_idx < num_states:
-                            T_curr = t_min + curr_idx * 0.5
-                            if T_curr >= t_min_limit and T_curr <= t_max_mode:
-                                if T_active >= t_min_limit:
-                                    kwh = max(0.0, T_elec_end_val - T_elec_cooled) / eff_elec_only if eff_elec_only > 0.0 else 0.0
-                                    cost = kwh * tariff
-                                    energy = kwh
-                                    
-                                    penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
-                                    reward = temp_reward * (T_active - t_min)
-                                    new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
-                                    if new_cost < dp[h][curr_idx]:
-                                        dp[h][curr_idx] = new_cost
-                                        prev_state[h][curr_idx] = prev_idx
-                                        prev_mode[h][curr_idx] = mode
-                                        prev_cost[h][curr_idx] = cost
-                                        prev_energy[h][curr_idx] = energy
-                                        elec_temp[h][curr_idx] = T_elec_end_val
-                                        bypass_state[h][curr_idx] = T_bypass_end_val
+                        for T_bypass_end_val in (True, False):
+                            if not T_bypass_end_val:
+                                T_active = T_gas_end_val
+                            else:
+                                T_active = T_elec_end_val
+                            
+                            t_max_mode = t_max
+                            curr_idx = int(round((T_gas_end_val - t_min) * 2))
+                            if 0 <= curr_idx < num_states:
+                                T_curr = t_min + curr_idx * 0.5
+                                if T_curr >= t_min_limit and T_curr <= t_max_mode:
+                                    if T_active >= t_min_limit:
+                                        kwh = max(0.0, T_elec_end_val - T_elec_cooled) / eff_elec_only if eff_elec_only > 0.0 else 0.0
+                                        cost = kwh * tariff
+                                        energy = kwh
+                                        
+                                        penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
+                                        reward = temp_reward * (T_active - t_min)
+                                        new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
+                                        if new_cost < dp[h][curr_idx]:
+                                            dp[h][curr_idx] = new_cost
+                                            prev_state[h][curr_idx] = prev_idx
+                                            prev_mode[h][curr_idx] = mode
+                                            prev_cost[h][curr_idx] = cost
+                                            prev_energy[h][curr_idx] = energy
+                                            elec_temp[h][curr_idx] = T_elec_end_val
+                                            bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC_PUMP":
                         # Bypass is open, pump is running. Mixed temperature.
@@ -405,6 +408,7 @@ def run_boiler_dp(
                     "temp_active_end": round(active_end, 2),
                     "temp_start": round(active_start, 2),
                     "temp_end": round(active_end, 2),
+                    "bypass": bypass_end_step,
                 })
                 curr_idx = prev_idx
 
@@ -461,6 +465,7 @@ def run_boiler_dp(
             "temp_elec_end": step["temp_elec_end"],
             "temp_active_start": step["temp_active_start"],
             "temp_active_end": step["temp_active_end"],
+            "bypass": step["bypass"],
             "cost": step["cost"],
             "energy": step["energy"],
             "cost_per_c_gas": round(c_per_gas, 4),

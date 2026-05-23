@@ -3191,6 +3191,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         self.entity_id = "sensor.boiler_dp"
 
         self._state: str = "IDLE"
+        self._recommended_bypass: str = "OFF"
         self._schedule: list[dict] = []
         self._stats: dict = {}
         self._t_start: float | None = None
@@ -3228,6 +3229,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         return {
             "schedule": self._schedule,
             "stats": self._stats,
+            "recommended_bypass": self._recommended_bypass,
             "t_start": self._t_start,
             "t_gas": self._t_gas,
             "t_elec": self._t_elec,
@@ -3251,6 +3253,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             attrs = last_state.attributes
             self._schedule = attrs.get("schedule", [])
             self._stats = attrs.get("stats", {})
+            self._recommended_bypass = attrs.get("recommended_bypass", "OFF")
             self._t_start = attrs.get("t_start")
             self._t_min = attrs.get("t_min")
             self._t_max_elec = attrs.get("t_max_elec")
@@ -3441,11 +3444,17 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._state = current_action
             self._schedule = schedule_list
             self._stats = stats_dict
+            if schedule_list:
+                first_bypass = schedule_list[0].get("bypass", False)
+                self._recommended_bypass = "ON" if first_bypass else "OFF"
+            else:
+                self._recommended_bypass = "OFF"
         except Exception as err:
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Error running boiler DP optimizer: {err}", exc_info=True)
             self._state = "error"
             self._schedule = []
             self._stats = {"error": str(err)}
+            self._recommended_bypass = "OFF"
 
         self._t_start = round(t_curr, 2)
         self._t_gas = round(t_gas_val, 2)

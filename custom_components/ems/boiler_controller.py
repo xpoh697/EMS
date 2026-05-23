@@ -92,15 +92,11 @@ class BoilerController:
         
     async def _async_safety_check(self, event):
         """Жёсткая аппаратная блокировка.
-        valve OFF = электробойлер ИЗОЛИРОВАН → немедленно гасим ТЭН и насос.
+        valve OFF = электробойлер ИЗОЛИРОВАН → немедленно гасим насос.
         """
         valve_state = self.hass.states.get(self.bypass_valve)
 
         if valve_state and valve_state.state == STATE_OFF:
-            if self.elec_heater:
-                await self.hass.services.async_call(
-                    SWITCH_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: self.elec_heater}
-                )
             if self.pump:
                 await self.hass.services.async_call(
                     SWITCH_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: self.pump}
@@ -128,8 +124,8 @@ class BoilerController:
                 service = "turn_on" if old_state.state == STATE_ON else "turn_off"
                 await self.hass.services.async_call(SWITCH_DOMAIN, service, {ATTR_ENTITY_ID: entity_id})
 
-        # Блокировка 2: Попытка включить насос/ТЭН при изолированном электробойлере (valve OFF)
-        elif valve_state and valve_state.state == STATE_OFF and new_state and new_state.state == STATE_ON:
+        # Блокировка 2: Попытка включить насос при изолированном электробойлере (valve OFF)
+        elif entity_id == self.pump and valve_state and valve_state.state == STATE_OFF and new_state and new_state.state == STATE_ON:
             await self.hass.services.async_call(SWITCH_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: entity_id})
                 
     async def _async_calculate_costs(self, _now):
