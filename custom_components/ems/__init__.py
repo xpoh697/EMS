@@ -171,7 +171,7 @@ async def _async_register_card(hass: HomeAssistant) -> None:
 
 
 async def _async_register_lovelace_resource(hass: HomeAssistant, url: str) -> bool:
-    """Create or update the Lovelace resource entry for the card."""
+    """Create or update the Lovelace resource entry for the card, cleaning up duplicates."""
     lovelace_data = hass.data.get("lovelace")
     if lovelace_data is None:
         return False
@@ -183,22 +183,30 @@ async def _async_register_lovelace_resource(hass: HomeAssistant, url: str) -> bo
     if not hasattr(resources, "async_create_item") or not hasattr(resources, "async_update_item"):
         return False
 
-    existing = None
+    base_url = url.split("?")[0]
+    existing_items = []
     try:
         for item in resources.async_items():
             existing_url = item.get("url") or ""
-            base_url = url.split("?")[0]
-            if base_url in existing_url:
-                existing = item
-                break
+            existing_base = existing_url.split("?")[0]
+            if existing_base == base_url:
+                existing_items.append(item)
     except Exception:
         return False
 
     try:
-        if existing is not None:
-            if existing.get("url") != url:
-                await resources.async_update_item(existing["id"], {"res_type": "module", "url": url})
+        if existing_items:
+            # Update the first resource
+            first_item = existing_items[0]
+            if first_item.get("url") != url:
+                await resources.async_update_item(first_item["id"], {"res_type": "module", "url": url})
                 _LOGGER.info("Updated Lovelace resource: %s", url)
+            
+            # Safely delete duplicates in separate step
+            if len(existing_items) > 1 and hasattr(resources, "async_delete_item"):
+                for duplicate in existing_items[1:]:
+                    await resources.async_delete_item(duplicate["id"])
+                    _LOGGER.info("Deleted duplicate Lovelace resource: %s", duplicate.get("url"))
         else:
             await resources.async_create_item({"res_type": "module", "url": url})
             _LOGGER.info("Created Lovelace resource: %s", url)
