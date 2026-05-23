@@ -70,6 +70,7 @@ from .const import (
     DEFAULT_THERMOSTAT_SET_TEMP,
     DEFAULT_ELEC_BOILER_MAX_TEMP,
     DEFAULT_GAS_BOILER_MAX_TEMP,
+    STANDBY_LOSSES_PRESETS,
 )
 from .utils import ems_log, calculate_battery_degradation, parse_price_sensor
 from .dp_engine import run_unified_dp, DPConfig
@@ -2830,8 +2831,8 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
             "50_45", "45_40", "40_35", "35_30", "30_25", "25_20",
         ]
         self._standby_losses = {
-            "gas":  {b: 0.0 for b in _lut_brackets},
-            "elec": {b: 0.0 for b in _lut_brackets},
+            "gas":  STANDBY_LOSSES_PRESETS["gas"].copy(),
+            "elec": STANDBY_LOSSES_PRESETS["elec"].copy(),
             "last_calibrated": None,
         }
         self._standby_costs = {}  # real-time cost metrics от _async_calculate_costs
@@ -2889,6 +2890,8 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
                 stored_sl = data.get("standby_losses", {})
                 self._standby_losses = self._migrate_standby_losses(stored_sl)
                 store_loaded = True
+                store.update_phase("standby_losses", self._standby_losses)
+                self.hass.async_create_task(store.async_save())
 
         last_state = await self.async_get_last_state()
         if last_state:
@@ -2949,20 +2952,39 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
 
     @staticmethod
     def _migrate_standby_losses(data: dict) -> dict:
-        """Мигрирует старый плоский формат {gas_hourly_loss_c: X} в новый LUT."""
+        """Мигрирует старый формат и выполняет умное слияние с пресетными значениями."""
         _lut_brackets = [
             "75_70", "70_65", "65_60", "60_55", "55_50",
             "50_45", "45_40", "40_35", "35_30", "30_25", "25_20",
         ]
-        # Если уже новый формат — возвращаем как есть
         if "gas" in data and isinstance(data["gas"], dict):
-            return data
-        # Миграция: заполняем все брэкеты старым средним значением
-        old_gas  = float(data.get("gas_hourly_loss_c",  0.0))
-        old_elec = float(data.get("elec_hourly_loss_c", 0.0))
+            gas_lut = data["gas"]
+            elec_lut = data.get("elec", {})
+        else:
+            old_gas  = float(data.get("gas_hourly_loss_c",  0.0))
+            old_elec = float(data.get("elec_hourly_loss_c", 0.0))
+            gas_lut  = {b: old_gas for b in _lut_brackets}
+            elec_lut = {b: old_elec for b in _lut_brackets}
+
+        merged_gas = {}
+        for b in _lut_brackets:
+            val = float(gas_lut.get(b, 0.0))
+            if val <= 0.0:
+                merged_gas[b] = float(STANDBY_LOSSES_PRESETS["gas"][b])
+            else:
+                merged_gas[b] = val
+
+        merged_elec = {}
+        for b in _lut_brackets:
+            val = float(elec_lut.get(b, 0.0))
+            if val <= 0.0:
+                merged_elec[b] = float(STANDBY_LOSSES_PRESETS["elec"][b])
+            else:
+                merged_elec[b] = val
+
         return {
-            "gas":  {b: old_gas  for b in _lut_brackets},
-            "elec": {b: old_elec for b in _lut_brackets},
+            "gas":  merged_gas,
+            "elec": merged_elec,
             "last_calibrated": data.get("last_calibrated"),
         }
 

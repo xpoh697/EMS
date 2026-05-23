@@ -151,14 +151,16 @@ class EmsScheduleStorage:
 CALIBRATION_STORAGE_VERSION = 1
 CALIBRATION_STORAGE_KEY = "ems_calibration_{entry_id}"
 
+from .const import STANDBY_LOSSES_PRESETS
+
 _CALIBRATION_DEFAULTS: dict = {
     "gas_only":       {"efficiency_c_per_m3": 0.0, "last_calibrated": None},
     "gas_with_pump":  {"efficiency_c_per_m3": 0.0, "last_calibrated": None},
     "elec_only":      {"efficiency_c_per_kwh": 0.0, "heater_power_kw": 2.5, "last_calibrated": None},
     "elec_with_pump": {"efficiency_c_per_kwh": 0.0, "heater_power_kw": 2.5, "last_calibrated": None},
     "standby_losses": {
-        "gas_hourly_loss_c": 0.0,
-        "elec_hourly_loss_c": 0.0,
+        "gas":            STANDBY_LOSSES_PRESETS["gas"].copy(),
+        "elec":           STANDBY_LOSSES_PRESETS["elec"].copy(),
         "last_calibrated": None,
     },
 }
