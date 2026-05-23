@@ -3415,12 +3415,20 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             t_gas_val = t_gas if gas_ok else 20.0
             t_elec_val = t_elec if elec_ok else 20.0
 
+            bypass_valve = options.get("bypass_valve", config.get("bypass_valve"))
+            bypass_start = False
+            if bypass_valve:
+                state = self.hass.states.get(bypass_valve)
+                if state and state.state == "on":
+                    bypass_start = True
+
             from .boiler_dp_engine import run_boiler_dp
             current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(
                 run_boiler_dp,
                 slots,
                 t_gas_val,
                 t_elec_val,
+                bypass_start,
                 t_min,
                 t_max_elec,
                 t_max_gas,

@@ -47,6 +47,7 @@ def run_boiler_dp(
     slots: List[Dict[str, Any]],
     t_gas_start: float,
     t_elec_start: float,
+    bypass_start: bool,
     t_min: float,
     t_max_elec: float,
     t_max_gas: float,
@@ -116,10 +117,13 @@ def run_boiler_dp(
         
         # elec_temp[h][state_idx] -> temperature of electric boiler at end of slot h
         elec_temp = [[20.0] * num_states for _ in range(N + 1)]
+        # bypass_state[h][state_idx] -> True if bypass is open (serial) at end of slot h
+        bypass_state = [[False] * num_states for _ in range(N + 1)]
 
         # Initial state (hour 0)
         dp[0][start_idx] = 0.0
         elec_temp[0][start_idx] = t_elec_start
+        bypass_state[0][start_idx] = bypass_start
 
         for h in range(1, N + 1):
             slot = slots[h - 1]
@@ -151,6 +155,7 @@ def run_boiler_dp(
 
                 T_gas_prev = t_min + prev_idx * 0.5
                 T_elec_prev = elec_temp[h - 1][prev_idx]
+                T_bypass_prev = bypass_state[h - 1][prev_idx]
 
                 # Standby cooling
                 R_gas = get_lut_rate(standby_losses.get("gas", {}), T_gas_prev)
@@ -169,11 +174,19 @@ def run_boiler_dp(
 
                     # Mode-specific transitions
                     if mode == "IDLE":
-                        # Bypass is open, pump is off. Both cool down.
+                        # Bypass state is inherited from previous state
+                        T_bypass_end_val = T_bypass_prev
                         T_gas_end_val = T_gas_cooled
                         T_elec_end_val = T_elec_cooled
-                        T_active = T_elec_end_val
+                        
+                        # Active temperature is T_elec if bypass is open, else T_gas
+                        if not T_bypass_end_val:
+                            T_active = T_gas_end_val
+                        else:
+                            T_active = T_elec_end_val
+                            
                         t_max_mode = t_max
+                        max_rise = 0.25
 
                         # Grid index represents T_gas
                         curr_idx = int(round((T_gas_end_val - t_min) * 2))
@@ -194,12 +207,15 @@ def run_boiler_dp(
                                         prev_cost[h][curr_idx] = cost
                                         prev_energy[h][curr_idx] = energy
                                         elec_temp[h][curr_idx] = T_elec_end_val
+                                        bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "GAS":
                         # Bypass is closed. Electric cools. Gas heats.
                         # Active temperature is T_gas_end (T_curr).
                         T_elec_end_val = T_elec_cooled
+                        T_bypass_end_val = False
                         t_max_mode = t_max_gas
+                        max_rise = 40.0
 
                         for curr_idx in range(num_states):
                             T_curr = t_min + curr_idx * 0.5
@@ -211,7 +227,7 @@ def run_boiler_dp(
                                 continue
                             
                             delta_T = T_curr - T_gas_cooled
-                            if delta_T < -0.25:
+                            if delta_T < -0.25 or delta_T > max_rise:
                                 continue
                             
                             heat_rise = max(0.0, delta_T)
@@ -229,11 +245,14 @@ def run_boiler_dp(
                                 prev_cost[h][curr_idx] = cost
                                 prev_energy[h][curr_idx] = energy
                                 elec_temp[h][curr_idx] = T_elec_end_val
+                                bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "GAS_PUMP":
                         # Bypass is open, pump is running. Mixed temperature.
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
+                        T_bypass_end_val = True
                         t_max_mode = t_max_gas
+                        max_rise = 40.0
 
                         for curr_idx in range(num_states):
                             T_curr = t_min + curr_idx * 0.5
@@ -263,6 +282,7 @@ def run_boiler_dp(
                                 prev_cost[h][curr_idx] = cost
                                 prev_energy[h][curr_idx] = energy
                                 elec_temp[h][curr_idx] = T_curr
+                                bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC":
                         # Bypass is open, pump is off. Gas cools. Electric heats.
@@ -273,6 +293,7 @@ def run_boiler_dp(
                         max_rise_elec = power_kw * eff_elec_only
                         T_elec_end_val = min(t_max_elec, T_elec_cooled + max_rise_elec)
                         T_active = T_elec_end_val
+                        T_bypass_end_val = True
                         t_max_mode = t_max
                         
                         curr_idx = int(round((T_gas_end_val - t_min) * 2))
@@ -294,10 +315,12 @@ def run_boiler_dp(
                                         prev_cost[h][curr_idx] = cost
                                         prev_energy[h][curr_idx] = energy
                                         elec_temp[h][curr_idx] = T_elec_end_val
+                                        bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC_PUMP":
                         # Bypass is open, pump is running. Mixed temperature.
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
+                        T_bypass_end_val = True
                         power_kw = cal_data.get("elec_with_pump", {}).get("heater_power_kw", 2.5)
                         max_rise = power_kw * eff_elec_pump
                         t_max_mode = t_max_elec
@@ -330,6 +353,7 @@ def run_boiler_dp(
                                 prev_cost[h][curr_idx] = cost
                                 prev_energy[h][curr_idx] = energy
                                 elec_temp[h][curr_idx] = T_curr
+                                bypass_state[h][curr_idx] = T_bypass_end_val
 
         # Backtrack if path found
         best_idx = min(range(num_states), key=lambda i: dp[N][i])
@@ -347,17 +371,26 @@ def run_boiler_dp(
                 gas_end = t_min + curr_idx * 0.5
                 elec_start = elec_temp[h - 1][prev_idx]
                 elec_end = elec_temp[h][curr_idx]
+                bypass_end_step = bypass_state[h][curr_idx]
 
-                if mode in ("GAS_PUMP", "ELEC_PUMP"):
+                if mode == "GAS":
+                    active_start = gas_start
+                    active_end = gas_end
+                elif mode in ("GAS_PUMP", "ELEC_PUMP"):
                     mix_start = (gas_start * vol_gas + elec_start * vol_elec) / total_vol if total_vol > 0.0 else (gas_start + elec_start) / 2.0
                     active_start = mix_start
                     active_end = gas_end
-                elif mode == "GAS":
-                    active_start = gas_start
-                    active_end = gas_end
                 else: # IDLE, ELEC
-                    active_start = elec_start
-                    active_end = elec_end
+                    if mode == "ELEC":
+                        active_start = elec_start
+                        active_end = elec_end
+                    else: # IDLE
+                        if not bypass_end_step:
+                            active_start = gas_start
+                            active_end = gas_end
+                        else:
+                            active_start = elec_start
+                            active_end = elec_end
 
                 path.append({
                     "hour_index": h - 1,
