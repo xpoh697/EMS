@@ -90,12 +90,13 @@ def run_boiler_dp(
         _LOGGER.error("EMS Boiler DP: Invalid temperature ranges: T_min (%s) >= T_max (%s)", t_min, t_max)
         return "ERROR", [], {}
 
-    # Total grid size
-    num_states = int(round((t_max - t_min) * 2)) + 1
+    # Total grid size with lower bound at 20.0°C (water supply temp) to allow unused boiler to cool freely
+    GRID_MIN_TEMP = min(20.0, t_min)
+    num_states = int(round((t_max - GRID_MIN_TEMP) * 2)) + 1
     
     # Clamp starting gas temp to grid range
-    t_gas_start_clamped = max(t_min, min(t_gas_start, t_max))
-    start_idx = int(round((t_gas_start_clamped - t_min) * 2))
+    t_gas_start_clamped = max(GRID_MIN_TEMP, min(t_gas_start, t_max))
+    start_idx = int(round((t_gas_start_clamped - GRID_MIN_TEMP) * 2))
 
     N = len(slots)
     if N == 0:
@@ -116,7 +117,7 @@ def run_boiler_dp(
         prev_energy = [[0.0] * num_states for _ in range(N + 1)]
         
         # elec_temp[h][state_idx] -> temperature of electric boiler at end of slot h
-        elec_temp = [[20.0] * num_states for _ in range(N + 1)]
+        elec_temp = [[GRID_MIN_TEMP] * num_states for _ in range(N + 1)]
         # bypass_state[h][state_idx] -> True if bypass is open (serial) at end of slot h
         bypass_state = [[False] * num_states for _ in range(N + 1)]
 
@@ -153,7 +154,7 @@ def run_boiler_dp(
                 if dp[h - 1][prev_idx] == float("inf"):
                     continue
 
-                T_gas_prev = t_min + prev_idx * 0.5
+                T_gas_prev = GRID_MIN_TEMP + prev_idx * 0.5
                 T_elec_prev = elec_temp[h - 1][prev_idx]
                 T_bypass_prev = bypass_state[h - 1][prev_idx]
 
@@ -161,8 +162,8 @@ def run_boiler_dp(
                 R_gas = get_lut_rate(standby_losses.get("gas", {}), T_gas_prev)
                 R_elec = get_lut_rate(standby_losses.get("elec", {}), T_elec_prev)
                 
-                T_gas_cooled = max(20.0, T_gas_prev - R_gas)
-                T_elec_cooled = max(20.0, T_elec_prev - R_elec)
+                T_gas_cooled = max(GRID_MIN_TEMP, T_gas_prev - R_gas)
+                T_elec_cooled = max(GRID_MIN_TEMP, T_elec_prev - R_elec)
                 total_vol = vol_gas + vol_elec
 
                 # Iterate modes
@@ -189,9 +190,9 @@ def run_boiler_dp(
                         max_rise = 0.25
 
                         # Grid index represents T_gas
-                        curr_idx = int(round((T_gas_end_val - t_min) * 2))
+                        curr_idx = int(round((T_gas_end_val - GRID_MIN_TEMP) * 2))
                         if 0 <= curr_idx < num_states:
-                            T_curr = t_min + curr_idx * 0.5
+                            T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             if T_curr >= t_min_limit and T_curr <= t_max_mode:
                                 if T_active >= t_min_limit:
                                     cost = 0.0
@@ -221,7 +222,7 @@ def run_boiler_dp(
                         max_rise = 40.0
 
                         for curr_idx in range(num_states):
-                            T_curr = t_min + curr_idx * 0.5
+                            T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
                             
                             if T_curr < t_min_limit or T_curr > t_max_mode:
@@ -261,7 +262,7 @@ def run_boiler_dp(
                         max_rise = 40.0
 
                         for curr_idx in range(num_states):
-                            T_curr = t_min + curr_idx * 0.5
+                            T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
 
                             if T_curr < t_min_limit or T_curr > t_max_mode:
@@ -308,9 +309,9 @@ def run_boiler_dp(
                                 T_active = T_elec_end_val
                             
                             t_max_mode = t_max
-                            curr_idx = int(round((T_gas_end_val - t_min) * 2))
+                            curr_idx = int(round((T_gas_end_val - GRID_MIN_TEMP) * 2))
                             if 0 <= curr_idx < num_states:
-                                T_curr = t_min + curr_idx * 0.5
+                                T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                                 if T_curr >= t_min_limit and T_curr <= t_max_mode:
                                     if T_active >= t_min_limit:
                                         kwh = max(0.0, T_elec_end_val - T_elec_cooled) / eff_elec_only if eff_elec_only > 0.0 else 0.0
@@ -341,7 +342,7 @@ def run_boiler_dp(
                         t_max_mode = t_max_elec
 
                         for curr_idx in range(num_states):
-                            T_curr = t_min + curr_idx * 0.5
+                            T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
 
                             if T_curr < t_min_limit or T_curr > t_max_mode:
@@ -385,8 +386,8 @@ def run_boiler_dp(
                 cost = prev_cost[h][curr_idx]
                 energy = prev_energy[h][curr_idx]
 
-                gas_start = t_min + prev_idx * 0.5
-                gas_end = t_min + curr_idx * 0.5
+                gas_start = GRID_MIN_TEMP + prev_idx * 0.5
+                gas_end = GRID_MIN_TEMP + curr_idx * 0.5
                 elec_start = elec_temp[h - 1][prev_idx]
                 elec_end = elec_temp[h][curr_idx]
                 bypass_end_step = bypass_state[h][curr_idx]
