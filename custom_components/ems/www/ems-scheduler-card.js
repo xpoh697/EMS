@@ -121,6 +121,7 @@ class EmsSchedulerCard extends HTMLElement {
   }
 
   setConfig(config) {
+    this._cleanupTemplateSubscriptions();
     this._config = config;
     if (!this.shadowRoot) {
       this.attachShadow({ mode: 'open' });
@@ -131,6 +132,10 @@ class EmsSchedulerCard extends HTMLElement {
       this._consumptionEntityId = config.consumption_entity;
       this._wsConfigFetched = true;
     }
+  }
+
+  disconnectedCallback() {
+    this._cleanupTemplateSubscriptions();
   }
 
   _fetchWsConfig() {
@@ -650,12 +655,12 @@ class EmsSchedulerCard extends HTMLElement {
                 <span id="profit-label" class="hero-label">Est. Value</span>
               </div>
             </div>
-            <div class="stats-grid" id="stats-container">
-              <div class="stat-card" id="dp-advice-card" onclick="this.getRootNode().host._handleMoreInfo('sensor.dp')">
-                <span class="stat-label">Degradation / Value</span>
-                <div class="stat-value" id="proj-morning">--</div>
-              </div>
-            </div>
+             <div class="stats-grid" id="stats-container">
+               <div class="stat-card" id="dp-advice-card" onclick="this.getRootNode().host._handleMoreInfo('sensor.dp')">
+                 <span class="stat-label">Remaining charge price</span>
+                 <div class="stat-value" id="proj-morning">--</div>
+               </div>
+             </div>
           </div>
           <div id="timeline-container"></div>
         </div>
@@ -902,6 +907,7 @@ class EmsSchedulerCard extends HTMLElement {
       }
     }
 
+    this._setupTemplateSubscriptions();
     this._updateExtraIndicators();
 
     // Status Badge
@@ -953,41 +959,137 @@ class EmsSchedulerCard extends HTMLElement {
     if (!container || !this._hass) return;
 
     const extras = this._config.extra_indicators || [];
-    const expectedKeys = new Set(extras.map(item => item.entity));
 
-    // Remove obsolete cards
-    Array.from(container.querySelectorAll('.stat-card[data-entity]')).forEach(card => {
-      if (card.id === 'dp-advice-card') return;
-      if (!expectedKeys.has(card.getAttribute('data-entity'))) {
+    // Remove any card with class "extra-indicator-card" whose index is >= extras.length
+    Array.from(container.querySelectorAll('.extra-indicator-card')).forEach(card => {
+      const idx = parseInt(card.getAttribute('data-index'), 10);
+      if (isNaN(idx) || idx >= extras.length) {
         card.remove();
       }
     });
 
-    // Add/update cards
-    extras.forEach(item => {
-      const entityVal = item.entity;
-      const stateObj = this._hass.states[entityVal];
-      if (!stateObj) return;
-
-      const newLabel = item.name || stateObj.attributes.friendly_name || 'Sensor';
-      const newVal = `${stateObj.state} ${stateObj.attributes.unit_of_measurement || ''}`;
-
-      let card = container.querySelector(`.stat-card[data-entity="${entityVal}"]`);
+    // Update or create cards for each extra indicator
+    extras.forEach((item, idx) => {
+      let card = container.querySelector(`.extra-indicator-card[data-index="${idx}"]`);
       if (!card) {
         card = document.createElement('div');
-        card.className = 'stat-card';
-        card.setAttribute('data-entity', entityVal);
-        card.onclick = () => this._handleMoreInfo(entityVal);
+        card.className = 'stat-card extra-indicator-card';
+        card.setAttribute('data-index', idx);
         card.innerHTML = `<span class="stat-label"></span><div class="stat-value"></div>`;
         container.appendChild(card);
+      }
+
+      // Determine label and value
+      let newLabel = item.name || 'Sensor';
+      let newVal = '--';
+
+      if (item.template) {
+        if (this._templateSubs && this._templateSubs[idx]) {
+          newVal = this._templateSubs[idx].value;
+        }
+        card.onclick = item.entity ? () => this._handleMoreInfo(item.entity) : null;
+        card.style.cursor = item.entity ? 'pointer' : 'default';
+      } else if (item.entity) {
+        const stateObj = this._hass.states[item.entity];
+        if (stateObj) {
+          if (!item.name) {
+            newLabel = stateObj.attributes.friendly_name || item.entity;
+          }
+          newVal = `${stateObj.state} ${stateObj.attributes.unit_of_measurement || ''}`;
+        }
+        card.onclick = () => this._handleMoreInfo(item.entity);
+        card.style.cursor = 'pointer';
       }
 
       const label = card.querySelector('.stat-label');
       const value = card.querySelector('.stat-value');
 
-      if (label.innerText !== newLabel) label.innerText = newLabel;
-      if (value.innerText !== newVal) value.innerText = newVal;
+      if (label && label.innerText !== newLabel) label.innerText = newLabel;
+      if (value && value.innerText !== newVal) value.innerText = newVal;
     });
+  }
+
+  _setupTemplateSubscriptions() {
+    if (!this._hass || !this._hass.connection || !this._config) return;
+    
+    if (!this._templateSubs) {
+      this._templateSubs = {};
+    }
+
+    const extras = this._config.extra_indicators || [];
+    const currentTemplates = {};
+
+    extras.forEach((item, idx) => {
+      if (item.template) {
+        currentTemplates[idx] = item.template;
+      }
+    });
+
+    // Unsubscribe from any template indices that are no longer present or have changed
+    Object.keys(this._templateSubs).forEach(idx => {
+      if (currentTemplates[idx] !== this._templateSubs[idx].template) {
+        if (typeof this._templateSubs[idx].unsub === 'function') {
+          try {
+            this._templateSubs[idx].unsub();
+          } catch (e) {
+            console.error('[EmsCard] Error unsubscribing template:', e);
+          }
+        }
+        delete this._templateSubs[idx];
+      }
+    });
+
+    // Subscribe to new or changed templates
+    Object.keys(currentTemplates).forEach(idx => {
+      const templateStr = currentTemplates[idx];
+      if (!this._templateSubs[idx]) {
+        this._templateSubs[idx] = {
+          template: templateStr,
+          value: '--',
+          unsub: null
+        };
+
+        const callback = (msg) => {
+          if (msg && msg.result !== undefined) {
+            this._templateSubs[idx].value = msg.result;
+            // Trigger UI update to show the new value
+            this._updateExtraIndicators();
+          }
+        };
+
+        this._hass.connection.subscribeMessage(callback, {
+          type: 'render_template',
+          template: templateStr
+        }).then(unsub => {
+          if (this._templateSubs[idx]) {
+            this._templateSubs[idx].unsub = unsub;
+          } else {
+            unsub();
+          }
+        }).catch(err => {
+          console.warn('[EmsCard] Template subscription failed:', templateStr, err);
+          if (this._templateSubs[idx]) {
+            this._templateSubs[idx].value = 'Template Error';
+            this._updateExtraIndicators();
+          }
+        });
+      }
+    });
+  }
+
+  _cleanupTemplateSubscriptions() {
+    if (this._templateSubs) {
+      Object.keys(this._templateSubs).forEach(idx => {
+        if (typeof this._templateSubs[idx].unsub === 'function') {
+          try {
+            this._templateSubs[idx].unsub();
+          } catch (e) {
+            // ignore
+          }
+        }
+      });
+      this._templateSubs = {};
+    }
   }
 
   _renderTimeline(data) {
