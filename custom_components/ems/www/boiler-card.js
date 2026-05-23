@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.8.0";
+const CARD_VERSION = "1.8.1";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -181,6 +181,12 @@ const STYLES = `
     color: var(--secondary-text-color);
     background: var(--ha-card-background, #1c1c1e);
     padding: 0 4px;
+    cursor: pointer;
+    transition: color .2s;
+  }
+  .hw-return-temp:hover {
+    text-decoration: underline;
+    color: var(--primary-color, #2196f3);
   }
 
   .schema-container.manual-mode .pump-node,
@@ -238,7 +244,12 @@ const STYLES = `
     background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
     border-radius: 12px; padding: 14px 12px;
     display: flex; flex-direction: column; align-items: center; gap: 6px;
-    transition: background .2s;
+    transition: background .2s, border-color .2s;
+    cursor: pointer;
+  }
+  .tile:hover {
+    background: rgba(255,255,255,0.07);
+    border-color: rgba(255,255,255,0.12);
   }
   .tile ha-icon { --mdc-icon-size: 28px; transition: color .3s; }
   .tile .t-label { font-size: 11px; color: var(--secondary-text-color); text-transform: uppercase; letter-spacing: .5px; }
@@ -831,6 +842,16 @@ class BoilerCard extends HTMLElement {
       if (isManual && this._entities.hw_pump) {
         this._toggleEntity("switch", this._entities.hw_pump);
       }
+    });
+
+    this._tGas.addEventListener("click", () => {
+      this._openMoreInfo(this._entities?.gas_climate);
+    });
+    this._tElec.addEventListener("click", () => {
+      this._openMoreInfo(this._entities?.elec_temp);
+    });
+    this._schemaHwTemp.addEventListener("click", () => {
+      this._openMoreInfo(this._entities?.hw_return_temp);
     });
 
     schema.appendChild(this._tGas);
@@ -1529,6 +1550,16 @@ class BoilerCard extends HTMLElement {
   _toggleEntity(domain, entityId) {
     if (!entityId || !this._hass) return;
     this._hass.callService(domain, "toggle", { entity_id: entityId });
+  }
+
+  _openMoreInfo(entityId) {
+    if (!entityId) return;
+    const event = new CustomEvent("hass-more-info", {
+      detail: { entityId },
+      bubbles: true,
+      composed: true,
+    });
+    this.dispatchEvent(event);
   }
 
   // ── WebSocket fetch (once) ───────────────────────────────────────────────

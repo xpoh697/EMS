@@ -4,7 +4,7 @@
  */
 
 console.info(
-  "%c EMS SCHEDULER %c v0.3.0 ",
+  "%c EMS SCHEDULER %c v0.3.2 ",
   "color: white; background: #2196f3; font-weight: bold; border-radius: 4px 0 0 4px; padding: 2px 6px;",
   "color: white; background: #28a745; font-weight: bold; border-radius: 0 4px 4px 0; padding: 2px 6px;"
 );
@@ -1442,7 +1442,8 @@ class EmsSchedulerCard extends HTMLElement {
     const sliderVal = this.shadowRoot.getElementById('soc-slider-val');
     if (slider) {
       slider.min = minSocVal;
-      const defaultSoc = activeOverrideSoc !== null ? activeOverrideSoc : 80.0;
+      const rawDefaultSoc = activeOverrideSoc !== null ? activeOverrideSoc : (slot.soc !== undefined ? slot.soc : 80.0);
+      const defaultSoc = Math.round(rawDefaultSoc * 2) / 2;
       slider.value = Math.max(minSocVal, Math.min(100, defaultSoc));
       if (sliderVal) sliderVal.innerText = parseFloat(slider.value).toFixed(1) + '%';
     }
