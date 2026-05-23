@@ -128,3 +128,39 @@ start_calibration:
           max: 60
           step: 1
           mode: box
+
+start_manual_heating:
+  name: Start Manual Heating
+  description: Starts a manual heating cycle with the selected mode and target temperature setpoint.
+  fields:
+    mode:
+      name: Heating Mode
+      description: The heating mode to run.
+      required: true
+      example: ELEC
+      selector:
+        select:
+          options:
+            - label: GAS - gas only
+              value: GAS
+            - label: GAS_PUMP - Gas + pump
+              value: GAS_PUMP
+            - label: ELEC - Electro only
+              value: ELEC
+            - label: Elec_pump - eclectro + pump
+              value: ELEC_PUMP
+    setpoint:
+      name: Target Temperature Setpoint
+      description: Target temperature to heat the boiler up to.
+      required: true
+      example: 65.0
+      selector:
+        number:
+          min: 20.0
+          max: 85.0
+          step: 0.5
+          mode: box
+
+stop_manual_heating:
+  name: Stop Manual Heating
+  description: Stops the active manual heating cycle and shuts down heating elements.

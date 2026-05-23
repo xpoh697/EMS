@@ -50,6 +50,11 @@ START_CALIBRATION_SCHEMA = vol.Schema({
     vol.Optional("stabilization_minutes"): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
 })
 
+START_MANUAL_HEATING_SCHEMA = vol.Schema({
+    vol.Required("mode"): vol.In(["GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]),
+    vol.Required("setpoint"): vol.All(vol.Coerce(float), vol.Range(min=20.0, max=85.0)),
+})
+
 
 async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Set up EMS services."""
@@ -209,8 +214,32 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
     hass.services.async_register(
         DOMAIN, SERVICE_CLEAR_ALL_OVERRIDES, handle_clear_all_overrides
     )
+    async def handle_start_manual_heating(call: ServiceCall) -> None:
+        """Handle starting manual heating."""
+        mode = call.data["mode"]
+        setpoint = call.data["setpoint"]
+        controller = hass.data[DOMAIN][entry.entry_id].get("boiler_controller")
+        if not controller:
+            _LOGGER.error("Boiler controller not initialized for config entry %s", entry.entry_id)
+            return
+        await controller.async_start_manual_heating(mode, setpoint)
+
+    async def handle_stop_manual_heating(call: ServiceCall) -> None:
+        """Handle stopping manual heating."""
+        controller = hass.data[DOMAIN][entry.entry_id].get("boiler_controller")
+        if not controller:
+            _LOGGER.error("Boiler controller not initialized for config entry %s", entry.entry_id)
+            return
+        await controller.async_stop_manual_heating()
+
     hass.services.async_register(
         DOMAIN, SERVICE_START_CALIBRATION, handle_start_calibration, schema=START_CALIBRATION_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, "start_manual_heating", handle_start_manual_heating, schema=START_MANUAL_HEATING_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, "stop_manual_heating", handle_stop_manual_heating
     )
     _LOGGER.debug("EMS services successfully registered")
 
@@ -222,6 +251,8 @@ def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_CLEAR_OVERRIDE,
         SERVICE_CLEAR_ALL_OVERRIDES,
         SERVICE_START_CALIBRATION,
+        "start_manual_heating",
+        "stop_manual_heating",
     ]:
         try:
             hass.services.async_remove(DOMAIN, service)
