@@ -3203,6 +3203,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         self._last_calc_time: datetime | None = None
         self._last_calc_temp: float | None = None
         self._calc_duration: float | None = None
+        self._t_gas: float | None = None
+        self._t_elec: float | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -3227,6 +3229,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "schedule": self._schedule,
             "stats": self._stats,
             "t_start": self._t_start,
+            "t_gas": self._t_gas,
+            "t_elec": self._t_elec,
             "t_min": self._t_min,
             "t_max_elec": self._t_max_elec,
             "t_max_gas": self._t_max_gas,
@@ -3254,6 +3258,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._vol_elec = attrs.get("vol_elec")
             self._vol_gas = attrs.get("vol_gas")
             self._gas_cost_m3 = attrs.get("gas_cost_m3")
+            self._t_gas = attrs.get("t_gas")
+            self._t_elec = attrs.get("t_elec")
             if attrs.get("last_calculation"):
                 try:
                     self._last_calc_time = datetime.fromisoformat(attrs["last_calculation"])
@@ -3406,11 +3412,15 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         # 6. Execute run_boiler_dp in the executor thread pool
         start_time = time.perf_counter()
         try:
+            t_gas_val = t_gas if gas_ok else 20.0
+            t_elec_val = t_elec if elec_ok else 20.0
+
             from .boiler_dp_engine import run_boiler_dp
             current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(
                 run_boiler_dp,
                 slots,
-                t_curr,
+                t_gas_val,
+                t_elec_val,
                 t_min,
                 t_max_elec,
                 t_max_gas,
@@ -3430,6 +3440,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._stats = {"error": str(err)}
 
         self._t_start = round(t_curr, 2)
+        self._t_gas = round(t_gas_val, 2)
+        self._t_elec = round(t_elec_val, 2)
         self._t_min = t_min
         self._t_max_elec = t_max_elec
         self._t_max_gas = t_max_gas
