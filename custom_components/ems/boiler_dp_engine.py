@@ -461,6 +461,20 @@ def run_boiler_dp(
                             active_start = elec_start
                             active_end = elec_end
 
+                total_vol = vol_gas + vol_elec
+                if total_vol > 0.0:
+                    sys_start = (gas_start * vol_gas + elec_start * vol_elec) / total_vol
+                    sys_end = (gas_end * vol_gas + elec_end * vol_elec) / total_vol
+                else:
+                    sys_start = (gas_start + elec_start) / 2.0
+                    sys_end = (gas_end + elec_end) / 2.0
+
+                dhw_start = elec_start if bypass_end_step else gas_start
+                dhw_end = elec_end if bypass_end_step else gas_end
+
+                flow_start = min(t_min, dhw_start)
+                flow_end = min(t_min, dhw_end)
+
                 path.append({
                     "hour_index": h - 1,
                     "mode": mode,
@@ -472,6 +486,12 @@ def run_boiler_dp(
                     "temp_elec_end": round(elec_end, 2),
                     "temp_active_start": round(active_start, 2),
                     "temp_active_end": round(active_end, 2),
+                    "temp_sys_start": round(sys_start, 2),
+                    "temp_sys_end": round(sys_end, 2),
+                    "temp_dhw_start": round(dhw_start, 2),
+                    "temp_dhw_end": round(dhw_end, 2),
+                    "temp_flow_start": round(flow_start, 2),
+                    "temp_flow_end": round(flow_end, 2),
                     "temp_start": round(active_start, 2),
                     "temp_end": round(active_end, 2),
                     "bypass": bypass_end_step,
@@ -531,6 +551,12 @@ def run_boiler_dp(
             "temp_elec_end": step["temp_elec_end"],
             "temp_active_start": step["temp_active_start"],
             "temp_active_end": step["temp_active_end"],
+            "temp_sys_start": step.get("temp_sys_start"),
+            "temp_sys_end": step.get("temp_sys_end"),
+            "temp_dhw_start": step.get("temp_dhw_start"),
+            "temp_dhw_end": step.get("temp_dhw_end"),
+            "temp_flow_start": step.get("temp_flow_start"),
+            "temp_flow_end": step.get("temp_flow_end"),
             "bypass": step["bypass"],
             "cost": step["cost"],
             "energy": step["energy"],

@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.8.3";
+const CARD_VERSION = "1.8.4";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -277,6 +277,9 @@ const STYLES = `
   .setpoint-row { display: flex; align-items: center; gap: 10px; margin: 4px 16px 12px; }
   .setpoint-label { font-size: 13px; color: var(--secondary-text-color); flex: 1; }
   .setpoint-value { font-size: 13px; font-weight: 600; color: var(--primary-color, #2196f3); }
+  .status-info-row { display: flex; align-items: center; gap: 10px; margin: 4px 16px 12px; }
+  .status-info-label { font-size: 13px; color: var(--secondary-text-color); flex: 1; }
+  .status-info-value { font-size: 13px; font-weight: 600; color: var(--primary-text-color); }
   .mode-toggle { display: flex; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,.12); }
   .mode-toggle button {
     padding: 6px 18px; font-size: 13px; font-weight: 600;
@@ -914,6 +917,33 @@ class BoilerCard extends HTMLElement {
     this._statusContent.appendChild(setpointRow);
     this._setpointVal = setpointRow.querySelector("#setpoint-val");
 
+    // System Average row
+    const sysAvgRow = document.createElement("div");
+    sysAvgRow.className = "status-info-row";
+    sysAvgRow.innerHTML = `
+      <span class="status-info-label">Средняя температура системы</span>
+      <span class="status-info-value" id="sys-avg-val">–</span>`;
+    this._statusContent.appendChild(sysAvgRow);
+    this._sysAvgVal = sysAvgRow.querySelector("#sys-avg-val");
+
+    // DHW Outlet row
+    const dhwOutletRow = document.createElement("div");
+    dhwOutletRow.className = "status-info-row";
+    dhwOutletRow.innerHTML = `
+      <span class="status-info-label">ГВС на выходе из системы</span>
+      <span class="status-info-value" id="dhw-outlet-val">–</span>`;
+    this._statusContent.appendChild(dhwOutletRow);
+    this._dhwOutletVal = dhwOutletRow.querySelector("#dhw-outlet-val");
+
+    // House Flow row
+    const houseFlowRow = document.createElement("div");
+    houseFlowRow.className = "status-info-row";
+    houseFlowRow.innerHTML = `
+      <span class="status-info-label">Температура подачи в дом</span>
+      <span class="status-info-value" id="house-flow-val">–</span>`;
+    this._statusContent.appendChild(houseFlowRow);
+    this._houseFlowVal = houseFlowRow.querySelector("#house-flow-val");
+
     // Divider
     const div2 = document.createElement("div");
     div2.className = "divider";
@@ -1356,6 +1386,56 @@ class BoilerCard extends HTMLElement {
       this._setpointVal.textContent = currentSetpoint;
     }
 
+    // ── Update real-time System Avg, DHW Outlet, House Flow temperatures ──
+    const tGasVal = parseFloat(gasTemp);
+    const tElecVal = parseFloat(tmpS?.state);
+    const volGas = parseFloat(dpS?.attributes?.vol_gas) || 0;
+    const volElec = parseFloat(dpS?.attributes?.vol_elec) || 0;
+    const tMinVal = parseFloat(dpS?.attributes?.t_min) || 40.0;
+
+    let tempSys = "–";
+    if (!isNaN(tGasVal) && !isNaN(tElecVal)) {
+      const totalVol = volGas + volElec;
+      const calculatedSys = totalVol > 0 ? (tGasVal * volGas + tElecVal * volElec) / totalVol : (tGasVal + tElecVal) / 2.0;
+      tempSys = calculatedSys.toFixed(1) + " °C";
+    }
+
+    let tempDhw = "–";
+    let rawTempDhw = null;
+    if (elecConn) {
+      if (!isNaN(tElecVal)) {
+        rawTempDhw = tElecVal;
+        tempDhw = tElecVal.toFixed(1) + " °C";
+      }
+    } else {
+      if (!isNaN(tGasVal)) {
+        rawTempDhw = tGasVal;
+        tempDhw = tGasVal.toFixed(1) + " °C";
+      }
+    }
+
+    let tempFlow = "–";
+    if (rawTempDhw !== null && !isNaN(rawTempDhw)) {
+      const calculatedFlow = Math.min(tMinVal, rawTempDhw);
+      tempFlow = calculatedFlow.toFixed(1) + " °C";
+    }
+
+    if (this._sysAvgVal) {
+      this._sysAvgVal.textContent = tempSys;
+      const parsedSys = parseFloat(tempSys);
+      this._sysAvgVal.style.color = isNaN(parsedSys) ? "var(--primary-text-color)" : getTempColor(parsedSys);
+    }
+    if (this._dhwOutletVal) {
+      this._dhwOutletVal.textContent = tempDhw;
+      const parsedDhw = parseFloat(tempDhw);
+      this._dhwOutletVal.style.color = isNaN(parsedDhw) ? "var(--primary-text-color)" : getTempColor(parsedDhw);
+    }
+    if (this._houseFlowVal) {
+      this._houseFlowVal.textContent = tempFlow;
+      const parsedFlow = parseFloat(tempFlow);
+      this._houseFlowVal.style.color = isNaN(parsedFlow) ? "var(--primary-text-color)" : getTempColor(parsedFlow);
+    }
+
     // ── Update Schedule Grid (Lazy update) ────────────────────────────────
     const tabSchedule = this.shadowRoot.querySelector("#tab-schedule");
     const isScheduleActive = tabSchedule && tabSchedule.classList.contains("active");
@@ -1474,6 +1554,57 @@ class BoilerCard extends HTMLElement {
       ? (this._hass.config.currency === "RUB" ? " руб." : " " + this._hass.config.currency)
       : " руб.";
 
+    const volGas = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.vol_gas) || 0;
+    const volElec = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.vol_elec) || 0;
+    const tMinVal = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.t_min) || 40.0;
+
+    // Function to get temp_sys
+    const getSysStart = () => {
+      if (slot.temp_sys_start != null) return slot.temp_sys_start;
+      const total = volGas + volElec;
+      if (slot.temp_gas_start != null && slot.temp_elec_start != null) {
+        return total > 0 ? (slot.temp_gas_start * volGas + slot.temp_elec_start * volElec) / total : (slot.temp_gas_start + slot.temp_elec_start) / 2.0;
+      }
+      return null;
+    };
+    const getSysEnd = () => {
+      if (slot.temp_sys_end != null) return slot.temp_sys_end;
+      const total = volGas + volElec;
+      if (slot.temp_gas_end != null && slot.temp_elec_end != null) {
+        return total > 0 ? (slot.temp_gas_end * volGas + slot.temp_elec_end * volElec) / total : (slot.temp_gas_end + slot.temp_elec_end) / 2.0;
+      }
+      return null;
+    };
+
+    // Function to get temp_dhw
+    const getDhwStart = () => {
+      if (slot.temp_dhw_start != null) return slot.temp_dhw_start;
+      return slot.bypass ? slot.temp_elec_start : slot.temp_gas_start;
+    };
+    const getDhwEnd = () => {
+      if (slot.temp_dhw_end != null) return slot.temp_dhw_end;
+      return slot.bypass ? slot.temp_elec_end : slot.temp_gas_end;
+    };
+
+    // Function to get temp_flow
+    const getFlowStart = () => {
+      if (slot.temp_flow_start != null) return slot.temp_flow_start;
+      const dhw = getDhwStart();
+      return dhw != null ? Math.min(tMinVal, dhw) : null;
+    };
+    const getFlowEnd = () => {
+      if (slot.temp_flow_end != null) return slot.temp_flow_end;
+      const dhw = getDhwEnd();
+      return dhw != null ? Math.min(tMinVal, dhw) : null;
+    };
+
+    const sysStart = getSysStart();
+    const sysEnd = getSysEnd();
+    const dhwStart = getDhwStart();
+    const dhwEnd = getDhwEnd();
+    const flowStart = getFlowStart();
+    const flowEnd = getFlowEnd();
+
     contentEl.innerHTML = `
       <div class="modal-row-detail">
         <span class="m-label">Режим системы</span>
@@ -1502,8 +1633,16 @@ class BoilerCard extends HTMLElement {
         <span class="m-val">${fmt1(slot.temp_elec_start)}°C → ${fmt1(slot.temp_elec_end)}°C</span>
       </div>
       <div class="modal-row-detail">
-        <span class="m-label">ГВС (на выходе)</span>
-        <span class="m-val" style="color: ${getTempColor(slot.temp_active_end)}">${fmt1(slot.temp_active_start)}°C → ${fmt1(slot.temp_active_end)}°C</span>
+        <span class="m-label">Температура системы</span>
+        <span class="m-val" style="color: ${getTempColor(sysEnd)}">${fmt1(sysStart)}°C → ${fmt1(sysEnd)}°C</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">ГВС на выходе</span>
+        <span class="m-val" style="color: ${getTempColor(dhwEnd)}">${fmt1(dhwStart)}°C → ${fmt1(dhwEnd)}°C</span>
+      </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Подача в дом</span>
+        <span class="m-val" style="color: ${getTempColor(flowEnd)}">${fmt1(flowStart)}°C → ${fmt1(flowEnd)}°C</span>
       </div>
 
       <div class="modal-section-title">Стоимость нагрева на 1°C</div>
