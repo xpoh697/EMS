@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.8.2";
+const CARD_VERSION = "1.8.3";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -272,9 +272,11 @@ const STYLES = `
   .valve-bar .vb-label { flex: 1; }
   .valve-bar .vb-state { font-weight: 700; text-transform: uppercase; font-size: 12px; letter-spacing: .5px; }
 
-  /* ─── Mode toggle ────────────────────────────────────────────────────── */
   .mode-row { display: flex; align-items: center; gap: 10px; margin: 4px 16px 12px; }
   .mode-label { font-size: 13px; color: var(--secondary-text-color); flex: 1; }
+  .setpoint-row { display: flex; align-items: center; gap: 10px; margin: 4px 16px 12px; }
+  .setpoint-label { font-size: 13px; color: var(--secondary-text-color); flex: 1; }
+  .setpoint-value { font-size: 13px; font-weight: 600; color: var(--primary-color, #2196f3); }
   .mode-toggle { display: flex; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,.12); }
   .mode-toggle button {
     padding: 6px 18px; font-size: 13px; font-weight: 600;
@@ -903,6 +905,15 @@ class BoilerCard extends HTMLElement {
     this._btnAuto.addEventListener("click", () => this._setMode("Auto"));
     this._btnManual.addEventListener("click", () => this._setMode("Manual"));
 
+    // Setpoint row
+    const setpointRow = document.createElement("div");
+    setpointRow.className = "setpoint-row";
+    setpointRow.innerHTML = `
+      <span class="setpoint-label">Текущий сетпоинт</span>
+      <span class="setpoint-value" id="setpoint-val">–</span>`;
+    this._statusContent.appendChild(setpointRow);
+    this._setpointVal = setpointRow.querySelector("#setpoint-val");
+
     // Divider
     const div2 = document.createElement("div");
     div2.className = "divider";
@@ -965,7 +976,11 @@ class BoilerCard extends HTMLElement {
     });
 
     this._mhSetpointSlider.addEventListener("input", () => {
-      this._mhSetpointVal.textContent = parseFloat(this._mhSetpointSlider.value).toFixed(1) + " °C";
+      const val = parseFloat(this._mhSetpointSlider.value).toFixed(1) + " °C";
+      this._mhSetpointVal.textContent = val;
+      if (this._setpointVal) {
+        this._setpointVal.textContent = val;
+      }
       this._recalcEstimate();
     });
 
@@ -1305,6 +1320,40 @@ class BoilerCard extends HTMLElement {
       if (e.hw_pump) {
         this._updateCtrlBtn(this._btnHwPump, stateOn(hwPumpS));
       }
+    }
+
+    // ── Update Setpoint value ─────────────────────────────────────────────
+    let currentSetpoint = "–";
+    if (isManual) {
+      const manualActive = dpS?.attributes?.manual_heating_active === true;
+      if (manualActive) {
+        const mSetpoint = dpS?.attributes?.manual_heating_setpoint;
+        if (mSetpoint != null) {
+          currentSetpoint = parseFloat(mSetpoint).toFixed(1) + " °C";
+        }
+      } else {
+        const sliderVal = this._mhSetpointSlider ? parseFloat(this._mhSetpointSlider.value) : null;
+        if (sliderVal != null) {
+          currentSetpoint = sliderVal.toFixed(1) + " °C";
+        }
+      }
+    } else {
+      const activeMode = dpS?.state?.toUpperCase();
+      if (activeMode) {
+        if (activeMode.includes("ELEC")) {
+          const tMaxElec = dpS?.attributes?.t_max_elec;
+          currentSetpoint = (tMaxElec != null ? parseFloat(tMaxElec).toFixed(1) : "–") + " °C";
+        } else if (activeMode.includes("GAS")) {
+          const tMaxGas = dpS?.attributes?.t_max_gas;
+          currentSetpoint = (tMaxGas != null ? parseFloat(tMaxGas).toFixed(1) : "–") + " °C";
+        } else if (activeMode === "IDLE" || activeMode === "PUMP_ONLY") {
+          const tMin = dpS?.attributes?.t_min;
+          currentSetpoint = (tMin != null ? parseFloat(tMin).toFixed(1) : "–") + " °C (IDLE)";
+        }
+      }
+    }
+    if (this._setpointVal) {
+      this._setpointVal.textContent = currentSetpoint;
     }
 
     // ── Update Schedule Grid (Lazy update) ────────────────────────────────
