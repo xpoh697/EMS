@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.8.1";
+const CARD_VERSION = "1.8.2";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -535,11 +535,24 @@ const STYLES = `
     color: #4caf50;
   }
 
+  .schedule-tile.theme-pump_only {
+    background: rgba(33,150,243,0.12);
+    border-color: rgba(33,150,243,0.3);
+    color: #64b5f6;
+  }
+  .schedule-tile.theme-pump_only .st-hour {
+    color: #bbdefb;
+  }
+  .schedule-tile.theme-pump_only .st-icons ha-icon {
+    color: #2196f3;
+  }
+
   .mode-idle { background: rgba(255,255,255,0.06); color: var(--secondary-text-color); }
   .mode-gas { background: rgba(255,152,0,0.12); color: #ff9800; }
   .mode-gas_pump { background: rgba(255,152,0,0.22); color: #ffb74d; border: 1px dashed #ff9800; }
   .mode-elec { background: rgba(76,175,80,0.12); color: #4caf50; }
   .mode-elec_pump { background: rgba(76,175,80,0.22); color: #81c784; border: 1px dashed #4caf50; }
+  .mode-pump_only { background: rgba(33,150,243,0.18); color: #64b5f6; border: 1px dashed #2196f3; }
 
   /* ─── Modal Dialog Styling ───────────────────────────────────────────── */
   .modal-overlay {
@@ -912,6 +925,7 @@ class BoilerCard extends HTMLElement {
           <option value="GAS_PUMP">GAS_PUMP - Gas + pump</option>
           <option value="ELEC">ELEC - Electro only</option>
           <option value="ELEC_PUMP">Elec_pump - eclectro + pump</option>
+          <option value="PUMP_ONLY">PUMP_ONLY - Pump only (mixing)</option>
         </select>
       </div>
 
@@ -1349,6 +1363,8 @@ class BoilerCard extends HTMLElement {
         iconsHtml = `<ha-icon icon="mdi:lightning-bolt"></ha-icon>`;
       } else if (modeName === "ELEC_PUMP") {
         iconsHtml = `<ha-icon icon="mdi:lightning-bolt"></ha-icon><ha-icon icon="mdi:pump" class="pump-icon"></ha-icon>`;
+      } else if (modeName === "PUMP_ONLY") {
+        iconsHtml = `<ha-icon icon="mdi:pump" class="pump-icon"></ha-icon>`;
       }
 
       tile.innerHTML = `
@@ -1399,11 +1415,16 @@ class BoilerCard extends HTMLElement {
       "GAS": "Нагрев газом (GAS)",
       "GAS_PUMP": "Газ + Насос (GAS_PUMP)",
       "ELEC": "Нагрев ТЭН (ELEC)",
-      "ELEC_PUMP": "ТЭН + Насос (ELEC_PUMP)"
+      "ELEC_PUMP": "ТЭН + Насос (ELEC_PUMP)",
+      "PUMP_ONLY": "Только Насос (PUMP_ONLY)"
     };
     
     const bypassLabel = slot.bypass ? "Открыт (Последовательный)" : "Закрыт (Байпас)";
     
+    const currency = this._hass && this._hass.config && this._hass.config.currency
+      ? (this._hass.config.currency === "RUB" ? " руб." : " " + this._hass.config.currency)
+      : " руб.";
+
     contentEl.innerHTML = `
       <div class="modal-row-detail">
         <span class="m-label">Режим системы</span>
@@ -1415,7 +1436,7 @@ class BoilerCard extends HTMLElement {
       </div>
       <div class="modal-row-detail">
         <span class="m-label">Планируемый расход</span>
-        <span class="m-val">${slot.cost != null ? slot.cost.toFixed(2) + " руб." : "0.00 руб."}</span>
+        <span class="m-val">${slot.cost != null ? slot.cost.toFixed(2) + currency : "0.00" + currency}</span>
       </div>
       <div class="modal-row-detail">
         <span class="m-label">Энергия</span>
@@ -1439,19 +1460,19 @@ class BoilerCard extends HTMLElement {
       <div class="modal-section-title">Стоимость нагрева на 1°C</div>
       <div class="modal-row-detail">
         <span class="m-label">Газ (без насоса)</span>
-        <span class="m-val">${slot.cost_per_c_gas != null ? slot.cost_per_c_gas.toFixed(2) + " руб." : "–"}</span>
+        <span class="m-val">${slot.cost_per_c_gas != null ? slot.cost_per_c_gas.toFixed(2) + currency : "–"}</span>
       </div>
       <div class="modal-row-detail">
         <span class="m-label">Газ + Насос</span>
-        <span class="m-val">${slot.cost_per_c_gas_pump != null ? slot.cost_per_c_gas_pump.toFixed(2) + " руб." : "–"}</span>
+        <span class="m-val">${slot.cost_per_c_gas_pump != null ? slot.cost_per_c_gas_pump.toFixed(2) + currency : "–"}</span>
       </div>
       <div class="modal-row-detail">
         <span class="m-label">Электро (без насоса)</span>
-        <span class="m-val">${slot.cost_per_c_elec != null ? slot.cost_per_c_elec.toFixed(2) + " руб." : "–"}</span>
+        <span class="m-val">${slot.cost_per_c_elec != null ? slot.cost_per_c_elec.toFixed(2) + currency : "–"}</span>
       </div>
       <div class="modal-row-detail">
         <span class="m-label">Электро + Насос</span>
-        <span class="m-val">${slot.cost_per_c_elec_pump != null ? slot.cost_per_c_elec_pump.toFixed(2) + " руб." : "–"}</span>
+        <span class="m-val">${slot.cost_per_c_elec_pump != null ? slot.cost_per_c_elec_pump.toFixed(2) + currency : "–"}</span>
       </div>
     `;
     
@@ -1496,7 +1517,9 @@ class BoilerCard extends HTMLElement {
     let currentTemp = 20.0;
     let text = "–";
     
-    if (mode.includes("GAS")) {
+    if (mode === "PUMP_ONLY") {
+      text = "Расход энергии: 0.00 кВт";
+    } else if (mode.includes("GAS")) {
       const gasS = st[e.gas_climate];
       currentTemp = parseFloat(gasS?.attributes?.current_temperature ?? gasS?.state ?? 20.0);
       const eff = (mode === "GAS_PUMP") 

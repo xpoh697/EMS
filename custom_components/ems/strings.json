@@ -93,7 +93,9 @@
           "gas_boiler_max_temp": "Gas Boiler Maximum Temp",
           "gas_boiler_capacity": "Gas Boiler Capacity (L)",
           "elec_boiler_capacity": "Electric Boiler Capacity (L)",
-          "gas_cost_m3": "Cost per 1 m³ of gas"
+          "gas_cost_m3": "Cost per 1 m³ of gas",
+          "calibration_type": "Standby loss calibration mode",
+          "water_flow_sensor": "Instantaneous water flow sensor"
         }
       }
     }
@@ -106,6 +108,12 @@
         "financial": "Financial",
         "battery_optimization": "Battery optimization",
         "boiler": "Boiler Configuration"
+      }
+    },
+    "calibration_type": {
+      "options": {
+        "manual": "Manual",
+        "auto": "Auto"
       }
     }
   },

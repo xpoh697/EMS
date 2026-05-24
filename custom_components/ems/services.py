@@ -51,7 +51,7 @@ START_CALIBRATION_SCHEMA = vol.Schema({
 })
 
 START_MANUAL_HEATING_SCHEMA = vol.Schema({
-    vol.Required("mode"): vol.In(["GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]),
+    vol.Required("mode"): vol.In(["GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP", "PUMP_ONLY"]),
     vol.Required("setpoint"): vol.All(vol.Coerce(float), vol.Range(min=20.0, max=85.0)),
 })
 

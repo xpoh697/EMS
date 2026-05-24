@@ -495,6 +495,8 @@ async def async_setup_entry(
                 entry.title,
                 pv_today_id,
                 pv_generation_today_id,
+                inverter_modes_list_id,
+                bat_soc_entity_id,
             )
         )
 
@@ -875,7 +877,7 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
         self.async_write_ha_state()
 
 
-class EmsPvForecastTodaySensor(SensorEntity):
+class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
     """EMS sensor that tracks today's corrected PV forecast."""
 
     _attr_device_class = SensorDeviceClass.ENERGY
@@ -888,12 +890,16 @@ class EmsPvForecastTodaySensor(SensorEntity):
         device_name: str,
         source_forecast_id: str,
         actual_generation_id: str | None,
+        inverter_modes_list_id: str | None = None,
+        bat_soc_entity_id: str | None = None,
     ) -> None:
         """Initialize the forecast sensor."""
         self._entry_id = entry_id
         self._device_name = device_name
         self._source_forecast_id = source_forecast_id
         self._actual_generation_id = actual_generation_id
+        self._inverter_modes_list_id = inverter_modes_list_id
+        self._bat_soc_entity_id = bat_soc_entity_id
 
         self._attr_name = "PV Forecast Today"
         self._attr_unique_id = f"{entry_id}_pv_forecast_today"
@@ -905,6 +911,8 @@ class EmsPvForecastTodaySensor(SensorEntity):
         self._forecasts: list[float] = [0.0] * 24
         self._factor: float = 1.0
         self._is_fallback: bool = False
+        self._curtail_occurred_today: bool = False
+        self._last_day: int = dt_util.now().day
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -932,11 +940,38 @@ class EmsPvForecastTodaySensor(SensorEntity):
             "source_sensor": self._source_forecast_id,
             "actual_sensor": self._actual_generation_id,
             "forecast_type": "fallback" if self._is_fallback else "forecast",
+            "curtail_occurred_today": self._curtail_occurred_today,
+            "inverter_mode_sensor": self._inverter_modes_list_id,
+            "battery_soc_sensor": self._bat_soc_entity_id,
         }
 
     async def async_added_to_hass(self) -> None:
-        """Handle entity registry addition."""
+        """Handle entity registry addition and restore historical states."""
         await super().async_added_to_hass()
+
+        last_state = await self.async_get_last_state()
+        if last_state:
+            try:
+                self._state = float(last_state.state)
+            except (ValueError, TypeError):
+                self._state = 0.0
+
+            factor_attr = last_state.attributes.get("factor_today")
+            if factor_attr is not None:
+                try:
+                    self._factor = float(factor_attr)
+                except (ValueError, TypeError):
+                    self._factor = 1.0
+            else:
+                self._factor = 1.0
+
+            self._curtail_occurred_today = bool(last_state.attributes.get("curtail_occurred_today", False))
+        else:
+            self._state = 0.0
+            self._factor = 1.0
+            self._curtail_occurred_today = False
+
+        self._last_day = dt_util.now().day
 
         # Update initial forecast
         self._update_forecast()
@@ -956,7 +991,23 @@ class EmsPvForecastTodaySensor(SensorEntity):
                 )
             )
 
-        # Hourly trigger to update elapsed hours
+        # Track inverter mode changes if configured
+        if self._inverter_modes_list_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [self._inverter_modes_list_id], self._async_update_listener
+                )
+            )
+
+        # Track battery SOC changes if configured
+        if self._bat_soc_entity_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [self._bat_soc_entity_id], self._async_update_listener
+                )
+            )
+
+        # Hourly trigger to update elapsed hours and handle midnight transitions
         self.async_on_remove(
             async_track_time_change(
                 self.hass, self._async_hourly_trigger, minute=0, second=0
@@ -964,13 +1015,21 @@ class EmsPvForecastTodaySensor(SensorEntity):
         )
 
     def _update_forecast(self) -> None:
-        """Calculate probabilistic baseline and apply Layer 2 corrective factor."""
+        """Calculate probabilistic baseline and apply Layer 2 corrective factor with curtailment check."""
         state_obj = self.hass.states.get(self._source_forecast_id)
         if not state_obj:
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Source PV forecast sensor {self._source_forecast_id} not found!")
             return
 
         self._baselines, self._is_fallback = parse_solcast_forecast(self.hass, state_obj)
+
+        now = dt_util.now()
+        current_hour = now.hour
+
+        # Midnight transition check
+        if now.day != self._last_day:
+            self._curtail_occurred_today = False
+            self._last_day = now.day
 
         # Get actual today generation
         actual_today = 0.0
@@ -982,18 +1041,42 @@ class EmsPvForecastTodaySensor(SensorEntity):
                 except (ValueError, TypeError):
                     pass
 
-        # Calculate baseline for elapsed hours
-        now = dt_util.now()
-        current_hour = now.hour
+        # Check if curtailment is active in the current inverter mode and battery SOC >= calibration_limit_soc
+        curtail_active = False
+        if self._inverter_modes_list_id:
+            mode_state = self.hass.states.get(self._inverter_modes_list_id)
+            if mode_state and mode_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    from .const import INVERTER_MODES
+                    mode_config = INVERTER_MODES.get(mode_state.state)
+                    if mode_config and mode_config.curtail_pv:
+                        soc = 0.0
+                        if self._bat_soc_entity_id:
+                            soc_state = self.hass.states.get(self._bat_soc_entity_id)
+                            if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
+                                try:
+                                    soc = float(soc_state.state)
+                                except (ValueError, TypeError):
+                                    pass
+                        # Ограничение генерации действительно только если текущий SOC >= порога калибровки режима
+                        if soc >= mode_config.calibration_limit_soc:
+                            curtail_active = True
+                except Exception as err:
+                    ems_log(self.hass, _LOGGER, logging.ERROR, f"Error checking inverter mode curtail_pv: {err}")
 
-        # Sum baseline from hour 0 to current_hour - 1
-        baseline_elapsed = sum(self._baselines[0:current_hour])
+        if curtail_active:
+            self._curtail_occurred_today = True
 
-        # Calculate Layer 2 corrective factor (safeguard against division by zero)
-        if baseline_elapsed > 0.0:
-            self._factor = max(0.3, min(actual_today / baseline_elapsed, 1.5))
-        else:
-            self._factor = 1.0
+        # Only update Layer 2 factor if curtailment is not active and hasn't occurred today
+        if not self._curtail_occurred_today:
+            # Sum baseline from hour 0 to current_hour - 1
+            baseline_elapsed = sum(self._baselines[0:current_hour])
+
+            # Calculate Layer 2 corrective factor (safeguard against division by zero)
+            if baseline_elapsed > 0.0:
+                self._factor = max(0.3, min(actual_today / baseline_elapsed, 1.5))
+            else:
+                self._factor = 1.0
 
         # Apply factor to remaining hours of today
         new_forecasts = []
@@ -1010,16 +1093,20 @@ class EmsPvForecastTodaySensor(SensorEntity):
             self.hass,
             _LOGGER,
             logging.INFO,
-            f"Updated Today's PV Forecast: {self._state} kWh (Factor: {self._factor:.3f}, Actual Today: {actual_today} kWh)"
+            f"Updated Today's PV Forecast: {self._state} kWh (Factor: {self._factor:.3f}, Curtail: {self._curtail_occurred_today}, Actual Today: {actual_today} kWh)"
         )
 
     async def _async_update_listener(self, event) -> None:
-        """Handle state change event from source or actual generation sensors."""
+        """Handle state change event from source, actual generation, mode or SOC sensors."""
         self._update_forecast()
         self.async_write_ha_state()
 
     async def _async_hourly_trigger(self, datetime_now) -> None:
-        """Recalculate forecast on hourly transitions."""
+        """Recalculate forecast on hourly transitions and handle midnight transitions."""
+        now = dt_util.now()
+        if now.day != self._last_day:
+            self._curtail_occurred_today = False
+            self._last_day = now.day
         self._update_forecast()
         self.async_write_ha_state()
 
@@ -3200,6 +3287,9 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         self._attr_unique_id = f"{entry_id}_boiler_dp"
         self.entity_id = "sensor.boiler_dp"
 
+        self._gas_sensor: str | None = None
+        self._elec_sensor: str | None = None
+
         self._state: str = "IDLE"
         self._recommended_bypass: str = "OFF"
         self._schedule: list[dict] = []
@@ -3300,8 +3390,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         # Listen to target state changes
         config = self._entry.data
         options = self._entry.options
-        gas_sensor = options.get("gas_boiler_climate", config.get("gas_boiler_climate"))
-        elec_sensor = options.get("elec_boiler_temp", config.get("elec_boiler_temp"))
+        self._gas_sensor = options.get("gas_boiler_climate", config.get("gas_boiler_climate"))
+        self._elec_sensor = options.get("elec_boiler_temp", config.get("elec_boiler_temp"))
 
         listeners = [
             "sensor.dp",
@@ -3309,10 +3399,10 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "number.ems_boiler_heating_start_hour",
             "number.ems_boiler_heating_end_hour",
         ]
-        if gas_sensor:
-            listeners.append(gas_sensor)
-        if elec_sensor:
-            listeners.append(elec_sensor)
+        if self._gas_sensor:
+            listeners.append(self._gas_sensor)
+        if self._elec_sensor:
+            listeners.append(self._elec_sensor)
 
         self.async_on_remove(
             async_track_state_change_event(
@@ -3338,7 +3428,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         """Handle monitored entity state changes with debouncing."""
         entity_id = event.data.get("entity_id")
         force = False
-        if entity_id in ("number.ems_boiler_heating_start_hour", "number.ems_boiler_heating_end_hour"):
+        if entity_id not in (self._gas_sensor, self._elec_sensor):
             force = True
         await self.async_update_boiler_dp(force=force)
 
@@ -3396,7 +3486,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         if not force and self._last_calc_time is not None and self._last_calc_temp is not None:
             time_delta = (now - self._last_calc_time).total_seconds()
             temp_delta = abs(t_curr - self._last_calc_temp)
-            if time_delta < 60.0 and temp_delta < 0.5:
+            if time_delta < 3600.0 and temp_delta < 3.0:
                 return
 
         # 3. Retrieve schedule slots from sensor.dp

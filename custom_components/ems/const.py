@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -17,6 +17,8 @@ CONF_PV_FORECAST_TOMORROW = "pv_forecast_tomorrow"
 CONF_STATISTICS_DAYS = "statistics_days"
 CONF_FALLBACK_CONSUMPTION = "fallback_consumption"
 CONF_DEBUG = "debug"
+CONF_CALIBRATION_TYPE = "calibration_type"
+CONF_WATER_FLOW_SENSOR = "water_flow_sensor"
 
 CONF_HW_CIRCULATION_PUMP = "hw_circulation_pump"
 CONF_HW_CIRCULATION_RETURN_TEMP = "hw_circulation_return_temp"

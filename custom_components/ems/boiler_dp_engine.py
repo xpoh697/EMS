@@ -181,7 +181,7 @@ def run_boiler_dp(
                 slot_hour = slot.get("hour", 0)
                 allowed_heating = is_hour_in_range(slot_hour, start_h, end_h)
 
-                for mode in ["IDLE", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]:
+                for mode in ["IDLE", "PUMP_ONLY", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]:
                     if mode != "IDLE" and not allowed_heating:
                         continue
                     if mode in ("GAS", "GAS_PUMP") and vol_gas <= 0.0:
@@ -228,6 +228,40 @@ def run_boiler_dp(
                                         prev_energy[h][curr_idx] = energy
                                         elec_temp[h][curr_idx] = T_elec_end_val
                                         bypass_state[h][curr_idx] = T_bypass_end_val
+
+                    elif mode == "PUMP_ONLY":
+                        # Only mix if there is a significant temperature difference (>= 5.0 °C)
+                        if abs(T_gas_cooled - T_elec_cooled) < 5.0:
+                            continue
+                            
+                        # Bypass is open, pump is running. Mixed temperature.
+                        T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
+                        T_bypass_end_val = True
+                        t_max_mode = t_max
+
+                        curr_idx = int(round((T_mixed - GRID_MIN_TEMP) * 2))
+                        if 0 <= curr_idx < num_states:
+                            T_curr = GRID_MIN_TEMP + curr_idx * 0.5
+                            T_active = T_curr
+                            if T_active >= t_min_limit and T_active <= t_max_mode:
+                                # Pump consumes 100W (0.1 kW)
+                                cost = 0.1 * tariff
+                                energy = 0.1
+                                
+                                penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
+                                if tariff <= 0.0:
+                                    reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
+                                else:
+                                    reward = temp_reward * max(0.0, T_active - t_min)
+                                new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
+                                if new_cost < dp[h][curr_idx]:
+                                    dp[h][curr_idx] = new_cost
+                                    prev_state[h][curr_idx] = prev_idx
+                                    prev_mode[h][curr_idx] = mode
+                                    prev_cost[h][curr_idx] = cost
+                                    prev_energy[h][curr_idx] = energy
+                                    elec_temp[h][curr_idx] = T_curr
+                                    bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "GAS":
                         # Bypass is closed. Electric cools. Gas heats.
@@ -411,7 +445,7 @@ def run_boiler_dp(
                 if mode == "GAS":
                     active_start = gas_start
                     active_end = gas_end
-                elif mode in ("GAS_PUMP", "ELEC_PUMP"):
+                elif mode in ("GAS_PUMP", "ELEC_PUMP", "PUMP_ONLY"):
                     mix_start = (gas_start * vol_gas + elec_start * vol_elec) / total_vol if total_vol > 0.0 else (gas_start + elec_start) / 2.0
                     active_start = mix_start
                     active_end = gas_end

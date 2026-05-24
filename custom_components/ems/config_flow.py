@@ -20,6 +20,8 @@ from .const import (
     CONF_STATISTICS_DAYS,
     CONF_FALLBACK_CONSUMPTION,
     CONF_DEBUG,
+    CONF_CALIBRATION_TYPE,
+    CONF_WATER_FLOW_SENSOR,
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
     CONF_SYSTEM_COST,
@@ -473,6 +475,30 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         schema_dict[vol.Required("gas_cost_m3", default=gas_cost)] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=0.0, step=0.01, mode=selector.NumberSelectorMode.BOX)
         )
+
+        # Select for calibration mode: CONF_CALIBRATION_TYPE
+        cal_type = self._user_input.get(CONF_CALIBRATION_TYPE, "manual")
+        schema_dict[vol.Required(CONF_CALIBRATION_TYPE, default=cal_type)] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[
+                    {"value": "manual", "label": "Manual"},
+                    {"value": "auto", "label": "Auto"},
+                ],
+                mode=selector.SelectSelectorMode.DROPDOWN,
+                translation_key="calibration_type"
+            )
+        )
+
+        # Optional: CONF_WATER_FLOW_SENSOR
+        val_flow = get_value(CONF_WATER_FLOW_SENSOR)
+        if val_flow:
+            schema_dict[vol.Optional(CONF_WATER_FLOW_SENSOR, default=val_flow)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["sensor", "binary_sensor"])
+            )
+        else:
+            schema_dict[vol.Optional(CONF_WATER_FLOW_SENSOR)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["sensor", "binary_sensor"])
+            )
 
         return self.async_show_form(
             step_id="boiler",

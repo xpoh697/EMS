@@ -149,6 +149,8 @@ start_manual_heating:
               value: ELEC
             - label: Elec_pump - eclectro + pump
               value: ELEC_PUMP
+            - label: PUMP_ONLY - Pump only (mixing)
+              value: PUMP_ONLY
     setpoint:
       name: Target Temperature Setpoint
       description: Target temperature to heat the boiler up to.
