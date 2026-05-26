@@ -113,6 +113,94 @@ def run_boiler_dp(
     if N == 0:
         return "idle", [], {}
 
+    # 2. Curtailed PV Energy Budget Allocation (Arbitrage)
+    today_date = slots[0].get("date") if slots else None
+    
+    curtailed_pv_today = 0.0
+    curtailed_pv_tomorrow = 0.0
+    for slot in slots:
+        mode_name = slot.get("physical_mode", "idle")
+        mode_config = INVERTER_MODES.get(mode_name)
+        curtail_active = mode_config.curtail_pv if mode_config else False
+        if curtail_active:
+            pv_kwh = float(slot.get("pv_kwh", 0.0))
+            consumption_kwh = float(slot.get("consumption_kwh", 0.0))
+            action = slot.get("action", "idle")
+            battery_charge = float(slot.get("energy_kwh", 0.0)) if action in ("pv_charge", "grid_charge") else 0.0
+            wasted = max(0.0, pv_kwh - consumption_kwh - battery_charge)
+            if slot.get("date") == today_date:
+                curtailed_pv_today += wasted
+            else:
+                curtailed_pv_tomorrow += wasted
+
+    allocated_free_slots = set()
+    boiler_hourly_draw = cal_data.get("elec_with_pump", {}).get("heater_power_kw") or 2.5
+
+    # Распределение лимита для сегодняшнего дня
+    if curtailed_pv_today >= 0.5:
+        eligible_today = []
+        for idx, slot in enumerate(slots):
+            if slot.get("date") != today_date:
+                continue
+            mode_name = slot.get("physical_mode", "idle")
+            mode_config = INVERTER_MODES.get(mode_name)
+            allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
+            allow_elec_static = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
+            pv_kwh = float(slot.get("pv_kwh", 0.0))
+            
+            if allow_elec_static and pv_kwh > 0.5:
+                soc = float(slot.get("expected_soc", 50.0))
+                limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
+                already_free = mode_config.curtail_pv and soc >= limit_soc
+                if not already_free:
+                    eligible_today.append((idx, slot))
+
+        eligible_today.sort(key=lambda item: (float(item[1].get("buy_price", 0.0)), item[0]))
+        rem_today = curtailed_pv_today
+        for idx, slot in eligible_today:
+            if rem_today <= 0.0:
+                break
+            allocated_free_slots.add(idx)
+            rem_today -= boiler_hourly_draw
+
+    # Распределение лимита для завтрашнего дня
+    if curtailed_pv_tomorrow >= 0.5:
+        eligible_tomorrow = []
+        for idx, slot in enumerate(slots):
+            if slot.get("date") == today_date:
+                continue
+            mode_name = slot.get("physical_mode", "idle")
+            mode_config = INVERTER_MODES.get(mode_name)
+            allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
+            allow_elec_static = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
+            pv_kwh = float(slot.get("pv_kwh", 0.0))
+            
+            if allow_elec_static and pv_kwh > 0.5:
+                soc = float(slot.get("expected_soc", 50.0))
+                limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
+                already_free = mode_config.curtail_pv and soc >= limit_soc
+                if not already_free:
+                    eligible_tomorrow.append((idx, slot))
+
+        eligible_tomorrow.sort(key=lambda item: (float(item[1].get("buy_price", 0.0)), item[0]))
+        rem_tomorrow = curtailed_pv_tomorrow
+        for idx, slot in eligible_tomorrow:
+            if rem_tomorrow <= 0.0:
+                break
+            allocated_free_slots.add(idx)
+            rem_tomorrow -= boiler_hourly_draw
+
+    # Рассчитываем раздельные динамические лимиты температуры
+    dynamic_t_max_elec_today = t_max_elec
+    if curtailed_pv_today > 0.0 and eff_elec_pump > 0.0:
+        budget_rise = curtailed_pv_today * eff_elec_pump
+        dynamic_t_max_elec_today = min(t_max_elec, max(t_min, t_min + budget_rise))
+
+    dynamic_t_max_elec_tomorrow = t_max_elec
+    if curtailed_pv_tomorrow > 0.0 and eff_elec_pump > 0.0:
+        budget_rise = curtailed_pv_tomorrow * eff_elec_pump
+        dynamic_t_max_elec_tomorrow = min(t_max_elec, max(t_min, t_min + budget_rise))
+
     # Run DP with relaxed constraint fallback
     best_path = None
     relaxed_used = False
@@ -152,8 +240,16 @@ def run_boiler_dp(
                 tariff = buy_price
             elif mode_name in ("sale_pv", "idle"):
                 tariff = sell_price
-            elif mode_config and mode_config.curtail_pv and soc >= mode_config.calibration_limit_soc:
+            elif (h - 1) in allocated_free_slots:
+                # This slot is allocated free solar energy due to anticipated afternoon curtailment!
                 tariff = 0.0
+            elif mode_config and mode_config.curtail_pv:
+                limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
+                if soc >= limit_soc:
+                    tariff = 0.0
+                else:
+                    # Battery charging has priority, treat as buy_price to disincentivize parasitic heating
+                    tariff = buy_price
             else:
                 tariff = sell_price
 
@@ -191,21 +287,17 @@ def run_boiler_dp(
 
                     # Mode-specific transitions
                     if mode == "IDLE":
-                        # Bypass state is inherited from previous state
                         T_bypass_end_val = T_bypass_prev
                         T_gas_end_val = T_gas_cooled
                         T_elec_end_val = T_elec_cooled
                         
-                        # Active temperature is T_elec if bypass is open, else T_gas
                         if not T_bypass_end_val:
                             T_active = T_gas_end_val
                         else:
                             T_active = T_elec_end_val
                             
                         t_max_mode = t_max
-                        max_rise = 0.25
 
-                        # Grid index represents T_gas
                         curr_idx = int(round((T_gas_end_val - GRID_MIN_TEMP) * 2))
                         if 0 <= curr_idx < num_states:
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
@@ -230,11 +322,9 @@ def run_boiler_dp(
                                         bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "PUMP_ONLY":
-                        # Only mix if there is a significant temperature difference (>= 5.0 °C)
                         if abs(T_gas_cooled - T_elec_cooled) < 5.0:
                             continue
                             
-                        # Bypass is open, pump is running. Mixed temperature.
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
                         T_bypass_end_val = True
                         t_max_mode = t_max
@@ -244,7 +334,6 @@ def run_boiler_dp(
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
                             if T_active >= t_min_limit and T_active <= t_max_mode:
-                                # Pump consumes 100W (0.1 kW)
                                 cost = 0.1 * tariff
                                 energy = 0.1
                                 
@@ -264,8 +353,6 @@ def run_boiler_dp(
                                     bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "GAS":
-                        # Bypass is closed. Electric cools. Gas heats.
-                        # Active temperature is T_gas_end (T_curr).
                         T_elec_end_val = T_elec_cooled
                         T_bypass_end_val = False
                         t_max_mode = t_max_gas
@@ -305,7 +392,6 @@ def run_boiler_dp(
                                 bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "GAS_PUMP":
-                        # Bypass is open, pump is running. Mixed temperature.
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
                         T_bypass_end_val = True
                         t_max_mode = t_max_gas
@@ -321,7 +407,7 @@ def run_boiler_dp(
                                 continue
                             
                             delta_T = T_curr - T_mixed
-                            if delta_T < -0.25:
+                            if delta_T < -0.25 or delta_T > max_rise:
                                 continue
                             
                             heat_rise = max(0.0, delta_T)
@@ -345,11 +431,14 @@ def run_boiler_dp(
                                 bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC":
-                        # Bypass is open or closed, pump is off. Gas cools. Electric heats.
-                        # Grid state represents Gas (T_gas_cooled).
                         power_kw = cal_data.get("elec_only", {}).get("heater_power_kw", 2.5)
                         max_rise_elec = power_kw * eff_elec_only
-                        T_elec_end_val = min(t_max_elec, T_elec_cooled + max_rise_elec)
+                        
+                        is_solar_slot = (h - 1) in allocated_free_slots or (mode_config and mode_config.curtail_pv)
+                        is_today_slot = slot.get("date") == today_date
+                        current_t_max_elec = (dynamic_t_max_elec_today if is_today_slot else dynamic_t_max_elec_tomorrow) if is_solar_slot else t_max_elec
+                        
+                        T_elec_end_val = min(current_t_max_elec, T_elec_cooled + max_rise_elec)
                         T_gas_end_val = T_gas_cooled
                         
                         for T_bypass_end_val in (True, False):
@@ -384,12 +473,17 @@ def run_boiler_dp(
                                             bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC_PUMP":
-                        # Bypass is open, pump is running. Mixed temperature.
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
                         T_bypass_end_val = True
-                        power_kw = cal_data.get("elec_with_pump", {}).get("heater_power_kw", 2.5)
-                        max_rise = power_kw * eff_elec_pump
-                        t_max_mode = t_max_elec
+                        power_kw = cal_data.get("elec_with_pump", {}).get("heater_power_kw") or 2.5
+                        eff_elec_pump_val = eff_elec_pump if eff_elec_pump > 0.0 else 3.35
+                        max_rise = max(1.0, power_kw * eff_elec_pump_val)
+                        
+                        is_solar_slot = (h - 1) in allocated_free_slots or (mode_config and mode_config.curtail_pv)
+                        is_today_slot = slot.get("date") == today_date
+                        current_t_max_elec = (dynamic_t_max_elec_today if is_today_slot else dynamic_t_max_elec_tomorrow) if is_solar_slot else t_max_elec
+                        
+                        t_max_mode = current_t_max_elec
 
                         for curr_idx in range(num_states):
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
@@ -401,7 +495,7 @@ def run_boiler_dp(
                                 continue
                             
                             delta_T = T_curr - T_mixed
-                            if delta_T < -0.25:
+                            if delta_T < -0.25 or delta_T > max_rise:
                                 continue
                             
                             heat_rise = max(0.0, delta_T)
@@ -427,7 +521,6 @@ def run_boiler_dp(
         # Backtrack if path found
         best_idx = min(range(num_states), key=lambda i: dp[N][i])
         if dp[N][best_idx] != float("inf"):
-            # Backtrack
             path = []
             curr_idx = best_idx
             for h in range(N, 0, -1):
@@ -567,6 +660,15 @@ def run_boiler_dp(
         })
         total_cost += step["cost"]
 
+    # Рассчитываем плановое потребление электроэнергии бойлером сегодня
+    today_planned_elec = 0.0
+    if best_path and today_date:
+        for step in best_path:
+            if step.get("date") == today_date and step.get("mode") in ("ELEC", "ELEC_PUMP"):
+                today_planned_elec += step.get("energy", 0.0)
+
+    remaining_pv_today = max(0.0, curtailed_pv_today - today_planned_elec)
+
     # Final stats
     stats = {
         "horizon_hours": N,
@@ -574,6 +676,10 @@ def run_boiler_dp(
         "end_temp": best_path[-1]["temp_active_end"] if best_path else t_gas_start_clamped,
         "total_cost": round(total_cost, 4),
         "relaxed_constraint_used": relaxed_used,
+        "curtailed_pv_budget": round(curtailed_pv_today + curtailed_pv_tomorrow, 2),
+        "curtailed_pv_today": round(curtailed_pv_today, 2),
+        "curtailed_pv_tomorrow": round(curtailed_pv_tomorrow, 2),
+        "remaining_pv_today": round(remaining_pv_today, 2),
     }
 
     current_action = best_path[0]["mode"] if best_path else "IDLE"

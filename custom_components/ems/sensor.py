@@ -913,6 +913,8 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
         self._is_fallback: bool = False
         self._curtail_occurred_today: bool = False
         self._last_day: int = dt_util.now().day
+        self._actual_today_hourly: list[float] = [0.0] * 24
+        self._last_actual_total: float | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -943,6 +945,8 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             "curtail_occurred_today": self._curtail_occurred_today,
             "inverter_mode_sensor": self._inverter_modes_list_id,
             "battery_soc_sensor": self._bat_soc_entity_id,
+            "actual_today_hourly": self._actual_today_hourly,
+            "last_actual_total": self._last_actual_total,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -966,10 +970,20 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
                 self._factor = 1.0
 
             self._curtail_occurred_today = bool(last_state.attributes.get("curtail_occurred_today", False))
+
+            actual_hourly_attr = last_state.attributes.get("actual_today_hourly")
+            if isinstance(actual_hourly_attr, list) and len(actual_hourly_attr) == 24:
+                self._actual_today_hourly = [float(x) for x in actual_hourly_attr]
+            else:
+                self._actual_today_hourly = [0.0] * 24
+
+            self._last_actual_total = last_state.attributes.get("last_actual_total")
         else:
             self._state = 0.0
             self._factor = 1.0
             self._curtail_occurred_today = False
+            self._actual_today_hourly = [0.0] * 24
+            self._last_actual_total = None
 
         self._last_day = dt_util.now().day
 
@@ -1029,6 +1043,8 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
         # Midnight transition check
         if now.day != self._last_day:
             self._curtail_occurred_today = False
+            self._actual_today_hourly = [0.0] * 24
+            self._last_actual_total = None
             self._last_day = now.day
 
         # Get actual today generation
@@ -1098,6 +1114,42 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
 
     async def _async_update_listener(self, event) -> None:
         """Handle state change event from source, actual generation, mode or SOC sensors."""
+        entity_id = event.data.get("entity_id")
+        new_state = event.data.get("new_state")
+
+        # Double check midnight transition in case cron lagged
+        now = dt_util.now()
+        if now.day != self._last_day:
+            self._curtail_occurred_today = False
+            self._actual_today_hourly = [0.0] * 24
+            self._last_actual_total = None
+            self._last_day = now.day
+
+        if entity_id == self._actual_generation_id and new_state is not None:
+            if new_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    new_value = float(new_state.state)
+                    current_hour = now.hour
+
+                    if self._last_actual_total is None:
+                        # First update - initialize baseline without delta
+                        self._last_actual_total = new_value
+                    else:
+                        delta = new_value - self._last_actual_total
+                        if delta < 0:
+                            # Handle reset (e.g. at midnight or sensor reload)
+                            self._last_actual_total = new_value
+                        elif delta <= 15.0:  # Ignore anomalous jumps
+                            self._actual_today_hourly[current_hour] = round(
+                                self._actual_today_hourly[current_hour] + delta, 4
+                            )
+                            self._last_actual_total = new_value
+                        else:
+                            # Spike detected, sync baseline without adding delta
+                            self._last_actual_total = new_value
+                except (ValueError, TypeError):
+                    pass
+
         self._update_forecast()
         self.async_write_ha_state()
 
@@ -1106,6 +1158,8 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
         now = dt_util.now()
         if now.day != self._last_day:
             self._curtail_occurred_today = False
+            self._actual_today_hourly = [0.0] * 24
+            self._last_actual_total = None
             self._last_day = now.day
         self._update_forecast()
         self.async_write_ha_state()
@@ -3514,6 +3568,10 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 "sell_price": float(slot.get("sell_price", 0.0)),
                 "physical_mode": slot.get("physical_mode", "idle"),
                 "expected_soc": float(slot.get("expected_soc", 50.0)),
+                "pv_kwh": float(slot.get("pv_kwh", 0.0)),
+                "consumption_kwh": float(slot.get("consumption_kwh", 0.0)),
+                "action": slot.get("action", "idle"),
+                "energy_kwh": float(slot.get("energy_kwh", 0.0)),
             })
 
         # 4. Retrieve calibration coefficients from sensor.boiler_calibration

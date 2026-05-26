@@ -1,5 +1,9 @@
 import sqlite3
 import json
+import sys
+
+# Set standard output encoding to utf-8
+sys.stdout.reconfigure(encoding='utf-8')
 
 db_path = r"\\192.168.100.5\config\home-assistant_v2.db"
 conn = sqlite3.connect(db_path)
@@ -7,15 +11,12 @@ cursor = conn.cursor()
 
 entities = [
     "sensor.boiler_dp",
-    "sensor.dp",
-    "sensor.boiler_calibration",
-    "sensor.ems_diagnostic",
     "select.ems_boiler_mode",
-    "sensor.elec_boiler_temp",
-    "climate.gas_boiler",
-    "switch.elec_boiler_heater",
-    "switch.boiler_pump",
-    "switch.boiler_bypass",
+    "sensor.boiler_water_temperature",
+    "climate.mosquitto_broker_diyless_dhw",
+    "switch.152832116785770_power",
+    "switch.1st_power_plug_boiler_pump",
+    "input_boolean.boiler_used",
 ]
 
 for entity in entities:
@@ -35,16 +36,9 @@ for entity in entities:
             attrs = attributes
         print(f"Entity: {entity}")
         print(f"  State: {state}")
-        # Print only a summary of attributes to avoid too much verbosity
         if isinstance(attrs, dict):
             summary = {k: v for k, v in attrs.items() if k not in ['schedule', 'hourly_forecast', 'baseline', 'calibration_data']}
             print(f"  Attributes summary: {json.dumps(summary, indent=2, ensure_ascii=False)}")
-            if 'schedule' in attrs:
-                print(f"  Schedule length: {len(attrs['schedule'])}")
-                if len(attrs['schedule']) > 0:
-                    print("  First 3 slots in schedule:")
-                    for slot in attrs['schedule'][:3]:
-                        print(f"    Hour {slot.get('hour')}: mode={slot.get('mode')} temp={slot.get('temp_start')}->{slot.get('temp_end')} bypass={slot.get('bypass')} cost={slot.get('cost')}")
         else:
             print(f"  Attributes: {attrs}")
     else:

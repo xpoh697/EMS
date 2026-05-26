@@ -41,7 +41,6 @@ class BoilerController:
         # Флаги программной отсечки нагрева и перекачки тепла
         self._elec_cutoff_active = False
         self._gas_cutoff_active = False
-        self._elec_pump_dump_active = False
         
         # Флаги ручного цикла нагрева
         self._manual_heating_active = False
@@ -58,19 +57,11 @@ class BoilerController:
         """Регистрация безопасных слушателей событий и таймеров калибровки."""
         self._is_applying_dp_plan = False
 
-        # 1. Мгновенный Safety Interlock: следим за клапаном
-        if self.bypass_valve:
-            async_track_state_change_event(
-                self.hass, 
-                [self.bypass_valve], 
-                self._async_safety_check
-            )
-        
-        # 2. Защита от ручного включения в режиме Auto
-        if self.elec_heater and self.pump:
+        # 2. Защита от ручного включения в режиме Auto (только для электронагревателя)
+        if self.elec_heater:
             async_track_state_change_event(
                 self.hass,
-                [self.elec_heater, self.pump],
+                [self.elec_heater],
                 self._async_override_check
             )
 
@@ -135,24 +126,12 @@ class BoilerController:
             second=0
         )
         
-    async def _async_safety_check(self, event):
-        """Жёсткая аппаратная блокировка.
-        valve OFF = электробойлер ИЗОЛИРОВАН → немедленно гасим насос.
-        """
-        valve_state = self.hass.states.get(self.bypass_valve)
-
-        if valve_state and valve_state.state == STATE_OFF:
-            if self.pump:
-                await self.hass.services.async_call(
-                    SWITCH_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: self.pump}
-                )
-            
     def _update_cutoff_states(self):
         """Обновление флагов отсечки нагрева и перекачки с учетом гистерезиса и режима Fail-Safe."""
         # 1. Электробойлер
         t_elec = self._get_elec_temp()
         t_max_elec = float(self.config.get("elec_boiler_max_temp", 70.0))
-        hysteresis = 2.0
+        hysteresis = 5.0
         
         if t_elec is None:
             dp_state = self.hass.states.get("sensor.boiler_dp")
@@ -161,7 +140,6 @@ class BoilerController:
                 if not self._elec_cutoff_active:
                     _LOGGER.warning("EMS Boiler Controller: Temperature sensor for electric boiler is unavailable during active heating. Activating safety cutoff.")
                 self._elec_cutoff_active = True
-                self._elec_pump_dump_active = False
         else:
             # Общая остановка при достижении setpoint
             if t_elec >= t_max_elec:
@@ -172,18 +150,6 @@ class BoilerController:
                 if self._elec_cutoff_active:
                     _LOGGER.info("EMS Boiler Controller: Electric boiler cooled below hysteresis (%.1f < %.1f). Resuming heating.", t_elec, t_max_elec - hysteresis)
                 self._elec_cutoff_active = False
-
-            # Управление насосом перекачки (включение при setpoint - 5, выключение при setpoint - 10)
-            t_pump_on = t_max_elec - 5.0
-            t_pump_off = t_max_elec - 10.0
-            if t_elec >= t_pump_on:
-                if not self._elec_pump_dump_active:
-                    _LOGGER.info("EMS Boiler Controller: Electric boiler temperature high (%.1f >= %.1f). Activating pump dump override.", t_elec, t_pump_on)
-                self._elec_pump_dump_active = True
-            elif t_elec < t_pump_off:
-                if self._elec_pump_dump_active:
-                    _LOGGER.info("EMS Boiler Controller: Electric boiler cooled below dump threshold (%.1f < %.1f). Deactivating pump dump override.", t_elec, t_pump_off)
-                self._elec_pump_dump_active = False
 
         # 2. Газовый котел
         t_gas = self._get_gas_temp()
@@ -429,13 +395,6 @@ class BoilerController:
 
                 target_pump_service = SERVICE_TURN_ON if target_pump_state_logical else SERVICE_TURN_OFF
                 target_pump_state = STATE_ON if target_pump_state_logical else STATE_OFF
-
-                # Safety check: bypass must be open to run pump
-                if target_pump_service == SERVICE_TURN_ON and target_bypass != "ON":
-                    _LOGGER.warning("EMS Boiler Controller (Manual): Prevented turning pump ON because bypass is closed")
-                    target_pump_service = SERVICE_TURN_OFF
-                    target_pump_state = STATE_OFF
-                
                 current_pump = self.hass.states.get(self.pump)
                 if not current_pump or current_pump.state != target_pump_state:
                     _LOGGER.info("EMS Boiler Controller (Manual): Setting circulation pump from %s to %s", current_pump.state if current_pump else "unknown", target_pump_state)
@@ -450,7 +409,7 @@ class BoilerController:
             self._is_applying_dp_plan = False
 
     async def _async_override_check(self, event):
-        """Отклоняет ручные изменения в режиме Auto или если клапан перекрыт."""
+        """Отклоняет ручные изменения в режиме Auto."""
         # Пропускаем любые проверки, если сейчас выполняется калибровка или применяется DP-план
         if getattr(self, "_is_applying_dp_plan", False):
             return
@@ -462,11 +421,6 @@ class BoilerController:
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
         
-        if not self.bypass_valve:
-            return
-            
-        valve_state = self.hass.states.get(self.bypass_valve)
-        
         # Блокировка 1: Режим Auto запрещает ручное управление
         if self.current_mode.lower() == "auto":
             if new_state and old_state and new_state.state != old_state.state:
@@ -476,19 +430,11 @@ class BoilerController:
                     expected_state = STATE_OFF
                 else:
                     mode = dp_state.state.upper()
-                    recommended_bypass = dp_state.attributes.get("recommended_bypass", "OFF").upper()
                     if entity_id == self.elec_heater:
                         if "ELEC" in mode:
                             expected_state = STATE_OFF if self._elec_cutoff_active else STATE_ON
                         else:
                             expected_state = STATE_OFF
-                    elif entity_id == self.pump:
-                        if mode == "ELEC_PUMP":
-                            expected_state = STATE_ON if self._elec_pump_dump_active else STATE_OFF
-                        elif mode == "ELEC":
-                            expected_state = STATE_OFF
-                        else:
-                            expected_state = STATE_ON if ("PUMP" in mode and recommended_bypass == "ON") else STATE_OFF
                     else:
                         expected_state = None
 
@@ -500,10 +446,6 @@ class BoilerController:
                 target_state = expected_state if expected_state is not None else old_state.state
                 service = "turn_on" if target_state == STATE_ON else "turn_off"
                 await self.hass.services.async_call(SWITCH_DOMAIN, service, {ATTR_ENTITY_ID: entity_id})
-
-        # Блокировка 2: Попытка включить насос при изолированном электробойлере (valve OFF)
-        elif entity_id == self.pump and valve_state and valve_state.state == STATE_OFF and new_state and new_state.state == STATE_ON:
-            await self.hass.services.async_call(SWITCH_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: entity_id})
                 
     async def _async_calculate_costs(self, _now):
         """Real-time расчёт стоимости стендбай-потерь через LUT текущего брэкета."""
@@ -1702,7 +1644,7 @@ class BoilerController:
                 current_pump = self.hass.states.get(self.pump)
                 
                 if mode == "ELEC_PUMP":
-                    target_pump_state_logical = self._elec_pump_dump_active
+                    target_pump_state_logical = not self._elec_cutoff_active
                 elif mode == "ELEC":
                     target_pump_state_logical = False
                 else:
@@ -1711,11 +1653,6 @@ class BoilerController:
                 target_pump_service = SERVICE_TURN_ON if target_pump_state_logical else SERVICE_TURN_OFF
                 target_pump_state = STATE_ON if target_pump_state_logical else STATE_OFF
                 
-                # Safety check: bypass must be open to run pump
-                if target_pump_service == SERVICE_TURN_ON and target_bypass != "ON":
-                    _LOGGER.warning("EMS Boiler Controller: Prevented turning pump ON in Auto mode because bypass is closed")
-                    target_pump_service = SERVICE_TURN_OFF
-                    target_pump_state = STATE_OFF
                 if not current_pump or current_pump.state != target_pump_state:
                     _LOGGER.info("EMS Boiler Controller: Setting circulation pump from %s to %s", current_pump.state if current_pump else "unknown", target_pump_state)
                     await self.hass.services.async_call(

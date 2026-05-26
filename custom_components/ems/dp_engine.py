@@ -203,7 +203,16 @@ def run_unified_dp(
 
             # === SOL: battery idle, PV surplus -> grid ===
             if (not override_action or override_action in ("idle", "sale_pv", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")) and (target_nsi is None or target_nsi == state_idx):
-                _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
+                is_sol_allowed = True
+                if override_action:
+                    if override_action == "sale_pv":
+                        if pv_surplus > 0 and avail_cap >= energy_step:
+                            is_sol_allowed = False
+                    elif override_action == "stop_sale":
+                        if (pv_surplus > 0 and avail_cap >= energy_step) or (pv_deficit >= energy_step and usable_energy >= energy_step):
+                            is_sol_allowed = False
+                if is_sol_allowed:
+                    _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
 
             # === DIS: discharge battery to grid ===
             if (override_action == "discharge" or ((not config.disable_discharge and not override_action) and sell_price >= config.min_discharge_price and sell_price > 0)) and (target_nsi is None or target_nsi < state_idx):

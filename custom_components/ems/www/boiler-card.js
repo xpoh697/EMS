@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.8.4";
+const CARD_VERSION = "1.9.0";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -944,6 +944,24 @@ class BoilerCard extends HTMLElement {
     this._statusContent.appendChild(houseFlowRow);
     this._houseFlowVal = houseFlowRow.querySelector("#house-flow-val");
 
+    // PV Limit Today row
+    const pvLimitTodayRow = document.createElement("div");
+    pvLimitTodayRow.className = "status-info-row hidden";
+    pvLimitTodayRow.innerHTML = `
+      <span class="status-info-label">Свободный PV-лимит сегодня</span>
+      <span class="status-info-value" id="pv-limit-today-val">–</span>`;
+    this._statusContent.appendChild(pvLimitTodayRow);
+    this._pvLimitTodayVal = pvLimitTodayRow.querySelector("#pv-limit-today-val");
+
+    // PV Limit Tomorrow row
+    const pvLimitTomorrowRow = document.createElement("div");
+    pvLimitTomorrowRow.className = "status-info-row hidden";
+    pvLimitTomorrowRow.innerHTML = `
+      <span class="status-info-label">Свободный PV-лимит завтра</span>
+      <span class="status-info-value" id="pv-limit-tomorrow-val">–</span>`;
+    this._statusContent.appendChild(pvLimitTomorrowRow);
+    this._pvLimitTomorrowVal = pvLimitTomorrowRow.querySelector("#pv-limit-tomorrow-val");
+
     // Divider
     const div2 = document.createElement("div");
     div2.className = "divider";
@@ -1304,6 +1322,8 @@ class BoilerCard extends HTMLElement {
     this._autoHint.classList.toggle("hidden",  isManual);
 
     if (!isManual) {
+      this._autoHint.innerHTML = `<ha-icon icon="mdi:robot-outline"></ha-icon> Автоуправление`;
+
       const startEnt = st[this._entities.heating_start_hour || "number.ems_boiler_heating_start_hour"];
       const endEnt = st[this._entities.heating_end_hour || "number.ems_boiler_heating_end_hour"];
       
@@ -1436,6 +1456,35 @@ class BoilerCard extends HTMLElement {
       this._houseFlowVal.style.color = isNaN(parsedFlow) ? "var(--primary-text-color)" : getTempColor(parsedFlow);
     }
 
+    // ── Update PV Limits ──────────────────────────────────────────────────
+    const curtailedToday = dpS?.attributes?.stats?.curtailed_pv_today;
+    const remainingToday = dpS?.attributes?.stats?.remaining_pv_today;
+    const curtailedTomorrow = dpS?.attributes?.stats?.curtailed_pv_tomorrow;
+
+    if (this._pvLimitTodayVal) {
+      if (curtailedToday !== undefined && curtailedToday !== null && curtailedToday > 0.0) {
+        let text = `${curtailedToday.toFixed(1)} кВтч`;
+        if (remainingToday !== undefined && remainingToday !== null) {
+          text += ` (осталось: ${remainingToday.toFixed(1)} кВтч)`;
+        }
+        this._pvLimitTodayVal.textContent = text;
+        this._pvLimitTodayVal.parentElement.classList.remove("hidden");
+      } else {
+        this._pvLimitTodayVal.textContent = "–";
+        this._pvLimitTodayVal.parentElement.classList.add("hidden");
+      }
+    }
+
+    if (this._pvLimitTomorrowVal) {
+      if (curtailedTomorrow !== undefined && curtailedTomorrow !== null && curtailedTomorrow > 0.0) {
+        this._pvLimitTomorrowVal.textContent = `${curtailedTomorrow.toFixed(1)} кВтч`;
+        this._pvLimitTomorrowVal.parentElement.classList.remove("hidden");
+      } else {
+        this._pvLimitTomorrowVal.textContent = "–";
+        this._pvLimitTomorrowVal.parentElement.classList.add("hidden");
+      }
+    }
+
     // ── Update Schedule Grid (Lazy update) ────────────────────────────────
     const tabSchedule = this.shadowRoot.querySelector("#tab-schedule");
     const isScheduleActive = tabSchedule && tabSchedule.classList.contains("active");
@@ -1565,7 +1614,7 @@ class BoilerCard extends HTMLElement {
       if (slot.temp_gas_start != null && slot.temp_elec_start != null) {
         return total > 0 ? (slot.temp_gas_start * volGas + slot.temp_elec_start * volElec) / total : (slot.temp_gas_start + slot.temp_elec_start) / 2.0;
       }
-      return null;
+      return None;
     };
     const getSysEnd = () => {
       if (slot.temp_sys_end != null) return slot.temp_sys_end;
@@ -1573,7 +1622,7 @@ class BoilerCard extends HTMLElement {
       if (slot.temp_gas_end != null && slot.temp_elec_end != null) {
         return total > 0 ? (slot.temp_gas_end * volGas + slot.temp_elec_end * volElec) / total : (slot.temp_gas_end + slot.temp_elec_end) / 2.0;
       }
-      return null;
+      return None;
     };
 
     // Function to get temp_dhw
@@ -1736,7 +1785,6 @@ class BoilerCard extends HTMLElement {
 
   // ── DOM helpers ──────────────────────────────────────────────────────────
   _setTile(tile, stClass, value, sub, rawTemp) {
-    // Remove all st-* classes, add the new one
     tile.className = "tile " + stClass;
     const valueEl = tile.querySelector(".t-value");
     valueEl.textContent = value;
@@ -1784,7 +1832,6 @@ class BoilerCard extends HTMLElement {
 
       const result = await this._hass.connection.sendMessagePromise(msg);
 
-      // Debug: log what we got
       console.info("[boiler-card] WS config received:", result);
 
       this._entities    = result;

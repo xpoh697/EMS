@@ -150,7 +150,15 @@ class EmsSchedulerCard extends HTMLElement {
         // Reset chart cache so it redraws with the correct entity
         const container = this.shadowRoot && this.shadowRoot.getElementById('chart-svg-container');
         if (container) container._lastStatsKey = null;
-        if (this._activeTab === 'stats') this._drawStatsChart();
+        const solarContainer = this.shadowRoot && this.shadowRoot.getElementById('solar-chart-svg-container');
+        if (solarContainer) solarContainer._lastSolarKey = null;
+        const priceContainer = this.shadowRoot && this.shadowRoot.getElementById('price-chart-svg-container');
+        if (priceContainer) priceContainer._lastPriceKey = null;
+        if (this._activeTab === 'stats') {
+          this._drawStatsChart();
+          this._drawSolarChart();
+          this._drawPriceChart();
+        }
       }
     }).catch(err => {
       console.warn('[EmsCard] WS config fetch failed, using fallback entity:', err);
@@ -667,6 +675,7 @@ class EmsSchedulerCard extends HTMLElement {
 
         <!-- Statistics View -->
         <div id="stats-view" class="hidden">
+          <!-- Load Consumption Profile -->
           <div class="stats-header">
             <span class="stats-title">Load Consumption Profile</span>
             <select id="day-select" class="day-select">
@@ -680,7 +689,7 @@ class EmsSchedulerCard extends HTMLElement {
               <option value="sunday">Sunday Average</option>
             </select>
           </div>
-          <div class="chart-container">
+          <div class="chart-container" style="margin-bottom: 24px;">
             <div id="chart-tooltip" class="chart-tooltip"></div>
             <div id="chart-svg-container"></div>
             <div class="chart-legend">
@@ -692,6 +701,59 @@ class EmsSchedulerCard extends HTMLElement {
                 <div class="legend-color" style="background: #ffe082;"></div>
                 <span>Average Profile</span>
               </div>
+            </div>
+          </div>
+
+          <!-- Solar Generation Profile -->
+          <div class="stats-header">
+            <span class="stats-title">Solar Generation & Forecast</span>
+          </div>
+          <div class="chart-container" style="margin-bottom: 24px;">
+            <div id="solar-chart-tooltip" class="chart-tooltip"></div>
+            <div id="solar-chart-svg-container"></div>
+            <div class="chart-legend">
+              <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(to bottom, #ff9800, rgba(255,152,0,0.1));"></div>
+                <span>Actual Today</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #ffd54f;"></div>
+                <span>Corrected Forecast</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Electricity Prices Horizon -->
+          <div class="stats-header">
+            <span class="stats-title">Electricity Prices Horizon</span>
+          </div>
+          <div class="chart-container">
+            <div id="price-chart-tooltip" class="chart-tooltip"></div>
+            <div id="price-chart-svg-container"></div>
+            <div class="chart-legend">
+              <div class="legend-item">
+                <div class="legend-color" style="background: #ff5252;"></div>
+                <span>Buy Price</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #4caf50;"></div>
+                <span>Sell Price</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Optimization Diagnostic -->
+          <div class="stats-header" style="margin-top: 24px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 16px;">
+            <span class="stats-title" style="color: rgba(255, 255, 255, 0.4); font-size: 0.8rem;">Optimization Diagnostic</span>
+          </div>
+          <div class="diagnostic-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px;">
+            <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;">
+              <span style="font-size: 0.72rem; color: rgba(255, 255, 255, 0.4); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">Last Calculation</span>
+              <span id="dp-calc-time" style="font-size: 0.85rem; font-weight: 800; color: #4dabf5; font-family: 'Roboto Mono', monospace;">--</span>
+            </div>
+            <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;">
+              <span style="font-size: 0.72rem; color: rgba(255, 255, 255, 0.4); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">Calculation Duration</span>
+              <span id="dp-calc-duration" style="font-size: 0.85rem; font-weight: 800; color: #ffd54f; font-family: 'Roboto Mono', monospace;">--</span>
             </div>
           </div>
         </div>
@@ -907,6 +969,38 @@ class EmsSchedulerCard extends HTMLElement {
       }
     }
 
+    // Update Optimization Diagnostic details in Statistics tab
+    const dpState = this._hass.states['sensor.dp'];
+    const calcTimeEl = this.shadowRoot.getElementById('dp-calc-time');
+    const calcDurEl = this.shadowRoot.getElementById('dp-calc-duration');
+    if (calcTimeEl && calcDurEl) {
+      if (dpState && dpState.attributes) {
+        const lastCalc = dpState.attributes.last_calculation;
+        const calcDur = dpState.attributes.calculation_duration;
+
+        if (lastCalc) {
+          const date = new Date(lastCalc);
+          if (isNaN(date.getTime())) {
+            calcTimeEl.innerText = '--';
+          } else {
+            const pad = (num) => String(num).padStart(2, '0');
+            calcTimeEl.innerText = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())} ${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()}`;
+          }
+        } else {
+          calcTimeEl.innerText = '--';
+        }
+
+        if (calcDur !== undefined && calcDur !== null) {
+          calcDurEl.innerText = `${parseFloat(calcDur).toFixed(3)} сек`;
+        } else {
+          calcDurEl.innerText = '--';
+        }
+      } else {
+        calcTimeEl.innerText = '--';
+        calcDurEl.innerText = '--';
+      }
+    }
+
     this._setupTemplateSubscriptions();
     this._updateExtraIndicators();
 
@@ -951,6 +1045,8 @@ class EmsSchedulerCard extends HTMLElement {
       this._renderTimeline(hourlyData);
     } else if (this._activeTab === 'stats') {
       this._drawStatsChart();
+      this._drawSolarChart();
+      this._drawPriceChart();
     }
   }
 
@@ -1346,7 +1442,8 @@ class EmsSchedulerCard extends HTMLElement {
       const actVal = actual[i].toFixed(2);
       const avgVal = average[i].toFixed(2);
       const hourStr = String(i).padStart(2, '0') + ':00';
-      hoverHtml += `<rect class="hov" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" data-hour="${hourStr}" data-act="${actVal}" data-avg="${avgVal}" style="cursor:crosshair"/>`;
+      const centerX = padL + i * barSpacing + barSpacing / 2;
+      hoverHtml += `<rect class="hov" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" data-hour="${hourStr}" data-act="${actVal}" data-avg="${avgVal}" data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>`;
     }
 
     container.innerHTML = `
@@ -1356,6 +1453,8 @@ class EmsSchedulerCard extends HTMLElement {
         <!-- X axis -->
         <line x1="${padL}" y1="${padT + chartH}" x2="${W - padR}" y2="${padT + chartH}" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
         ${xLabelsHtml}
+        <!-- Hover Line -->
+        <line class="hover-line" x1="0" y1="${padT}" x2="0" y2="${padT + chartH}" stroke="rgba(255, 255, 255, 0.3)" stroke-width="1.5" stroke-dasharray="3 3" style="opacity: 0; pointer-events: none; transition: opacity 0.1s;"/>
         <!-- Bars -->
         ${barsHtml}
         <!-- Average Line glow -->
@@ -1371,7 +1470,6 @@ class EmsSchedulerCard extends HTMLElement {
     // Tooltip logic
     const tooltip = this.shadowRoot.getElementById('chart-tooltip');
     if (!tooltip) return;
-    const chartContainer = this.shadowRoot.querySelector('.chart-container');
 
     container.querySelectorAll('.hov').forEach(zone => {
       zone.addEventListener('mousemove', (e) => {
@@ -1389,6 +1487,7 @@ class EmsSchedulerCard extends HTMLElement {
             <span class="tooltip-val" style="color:#ffe082">${avg} kWh</span>
           </div>
         `;
+        const chartContainer = zone.closest('.chart-container');
         if (chartContainer) {
           const rect = chartContainer.getBoundingClientRect();
           let left = e.clientX - rect.left + 16;
@@ -1399,8 +1498,384 @@ class EmsSchedulerCard extends HTMLElement {
           tooltip.style.top = `${top}px`;
         }
         tooltip.style.opacity = '1';
+
+        const xPos = zone.getAttribute('data-x');
+        const hoverLine = container.querySelector('.hover-line');
+        if (hoverLine && hoverLine.getAttribute('x1') !== xPos) {
+          hoverLine.setAttribute('x1', xPos);
+          hoverLine.setAttribute('x2', xPos);
+          hoverLine.style.opacity = '1';
+        }
       });
-      zone.addEventListener('mouseleave', () => { tooltip.style.opacity = '0'; });
+      zone.addEventListener('mouseleave', () => { 
+        tooltip.style.opacity = '0'; 
+        const hoverLine = container.querySelector('.hover-line');
+        if (hoverLine) {
+          hoverLine.style.opacity = '0';
+        }
+      });
+    });
+  }
+
+  _drawSolarChart() {
+    if (!this._hass) return;
+
+    const solarEntityId = 'sensor.pv_forecast_today';
+    const solarState = this._hass.states[solarEntityId];
+
+    let actual = Array(24).fill(0);
+    let forecast = Array(24).fill(0);
+
+    if (solarState && solarState.attributes) {
+      const attrs = solarState.attributes;
+
+      const toArray = (val) => {
+        if (!val) return null;
+        if (Array.isArray(val)) return val;
+        if (typeof val === 'object') return Object.values(val);
+        return null;
+      };
+
+      const actualRaw = toArray(attrs.actual_today_hourly);
+      if (actualRaw) {
+        actual = actualRaw.map(v => parseFloat(v) || 0);
+      }
+
+      const forecastRaw = toArray(attrs.hourly_forecast);
+      if (forecastRaw) {
+        forecast = forecastRaw.map(v => parseFloat(v) || 0);
+      }
+    }
+
+    // Normalize arrays to exactly 24 entries
+    while (actual.length < 24) actual.push(0);
+    actual = actual.slice(0, 24);
+    while (forecast.length < 24) forecast.push(0);
+    forecast = forecast.slice(0, 24);
+
+    const container = this.shadowRoot.getElementById('solar-chart-svg-container');
+    if (!container) return;
+
+    // Cache key guard
+    const solarKey = [actual.join(','), forecast.join(',')].join('|');
+    if (container._lastSolarKey === solarKey) return;
+    container._lastSolarKey = solarKey;
+
+    const maxVal = Math.max(1.0, ...actual, ...forecast);
+
+    // Chart dimensions
+    const W = 540, H = 260;
+    const padL = 42, padR = 12, padT = 18, padB = 38;
+    const chartW = W - padL - padR;
+    const chartH = H - padT - padB;
+    const barW = Math.floor(chartW / 24) - 2;
+    const barSpacing = Math.floor(chartW / 24);
+
+    // Grid lines + Y labels
+    let gridHtml = '';
+    const gridCount = 4;
+    for (let i = 0; i <= gridCount; i++) {
+      const frac = i / gridCount;
+      const val = maxVal * frac;
+      const y = padT + chartH - chartH * frac;
+      gridHtml += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>`;
+      gridHtml += `<text x="${padL - 4}" y="${(y + 3).toFixed(1)}" fill="rgba(255,255,255,0.35)" font-size="8" text-anchor="end" font-weight="700">${val.toFixed(1)}</text>`;
+    }
+
+    // X axis labels (every 3 hours)
+    let xLabelsHtml = '';
+    for (let i = 0; i < 24; i += 3) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      xLabelsHtml += `<text x="${x.toFixed(1)}" y="${H - padB + 13}" fill="rgba(255,255,255,0.4)" font-size="8" text-anchor="middle" font-weight="700">${String(i).padStart(2,'0')}:00</text>`;
+    }
+
+    // Bars (actual today)
+    let barsHtml = '<defs><linearGradient id="solar-bar-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ff9800" stop-opacity="0.85"/><stop offset="100%" stop-color="#ff9800" stop-opacity="0.08"/></linearGradient></defs>';
+    for (let i = 0; i < 24; i++) {
+      const val = actual[i];
+      const bh = (val / maxVal) * chartH;
+      const x = padL + i * barSpacing + (barSpacing - barW) / 2;
+      const y = padT + chartH - bh;
+      if (bh > 0.5) {
+        barsHtml += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW}" height="${bh.toFixed(1)}" fill="url(#solar-bar-grad)" rx="3" ry="3"/>`;
+      }
+    }
+
+    // Corrected Forecast Line
+    let points = [];
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      const y = padT + chartH - (forecast[i] / maxVal) * chartH;
+      points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    const linePath = `M ${points.join(' L ')}`;
+
+    // Dot markers on forecast line
+    let dotsHtml = '';
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      const y = padT + chartH - (forecast[i] / maxVal) * chartH;
+      dotsHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="#ffd54f" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
+    }
+
+    // Invisible hover zones
+    let hoverHtml = '';
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing;
+      const actVal = actual[i].toFixed(2);
+      const foreVal = forecast[i].toFixed(2);
+      const hourStr = String(i).padStart(2, '0') + ':00';
+      const centerX = padL + i * barSpacing + barSpacing / 2;
+      hoverHtml += `<rect class="hov-solar" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" data-hour="${hourStr}" data-act="${actVal}" data-fore="${foreVal}" data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>`;
+    }
+
+    container.innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;overflow:visible;">
+        ${gridHtml}
+        <line x1="${padL}" y1="${padT + chartH}" x2="${W - padR}" y2="${padT + chartH}" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+        ${xLabelsHtml}
+        <!-- Hover Line -->
+        <line class="hover-line" x1="0" y1="${padT}" x2="0" y2="${padT + chartH}" stroke="rgba(255, 255, 255, 0.3)" stroke-width="1.5" stroke-dasharray="3 3" style="opacity: 0; pointer-events: none; transition: opacity 0.1s;"/>
+        ${barsHtml}
+        <filter id="solar-line-glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        <path d="${linePath}" fill="none" stroke="#ffd54f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" filter="url(#solar-line-glow)"/>
+        ${dotsHtml}
+        ${hoverHtml}
+      </svg>
+    `;
+
+    // Tooltip logic
+    const tooltip = this.shadowRoot.getElementById('solar-chart-tooltip');
+    if (!tooltip) return;
+
+    container.querySelectorAll('.hov-solar').forEach(zone => {
+      zone.addEventListener('mousemove', (e) => {
+        const hour = zone.getAttribute('data-hour');
+        const act = zone.getAttribute('data-act');
+        const fore = zone.getAttribute('data-fore');
+        tooltip.innerHTML = `
+          <div class="tooltip-hour" style="color:#ff9800">${hour}</div>
+          <div class="tooltip-row">
+            <span class="tooltip-label">Actual:</span>
+            <span class="tooltip-val" style="color:#ff9800">${act} kWh</span>
+          </div>
+          <div class="tooltip-row">
+            <span class="tooltip-label">Corrected:</span>
+            <span class="tooltip-val" style="color:#ffd54f">${fore} kWh</span>
+          </div>
+        `;
+        const chartContainer = zone.closest('.chart-container');
+        if (chartContainer) {
+          const rect = chartContainer.getBoundingClientRect();
+          let left = e.clientX - rect.left + 16;
+          let top = e.clientY - rect.top - 80;
+          if (left + 160 > rect.width) left = e.clientX - rect.left - 170;
+          if (top < 0) top = e.clientY - rect.top + 16;
+          tooltip.style.left = `${left}px`;
+          tooltip.style.top = `${top}px`;
+        }
+        tooltip.style.opacity = '1';
+
+        const xPos = zone.getAttribute('data-x');
+        const hoverLine = container.querySelector('.hover-line');
+        if (hoverLine && hoverLine.getAttribute('x1') !== xPos) {
+          hoverLine.setAttribute('x1', xPos);
+          hoverLine.setAttribute('x2', xPos);
+          hoverLine.style.opacity = '1';
+        }
+      });
+      zone.addEventListener('mouseleave', () => { 
+        tooltip.style.opacity = '0'; 
+        const hoverLine = container.querySelector('.hover-line');
+        if (hoverLine) {
+          hoverLine.style.opacity = '0';
+        }
+      });
+    });
+  }
+
+  _drawPriceChart() {
+    if (!this._hass) return;
+
+    const entityId = this._resolveConfigValue('entity', 'sensor.scheduler');
+    if (!entityId) return;
+    const stateObj = this._hass.states[entityId];
+    if (!stateObj || !stateObj.attributes) return;
+
+    const plan = stateObj.attributes.current_plan || [];
+    if (plan.length === 0) {
+      const container = this.shadowRoot.getElementById('price-chart-svg-container');
+      if (container) container.innerHTML = '<div style="text-align:center; padding:20px; opacity:0.5;">No price schedule data available</div>';
+      return;
+    }
+
+    // Filter to start from current local hour
+    const now = new Date();
+    const currentHour = now.getHours();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const todayStr = `${year}-${month}-${day}`;
+
+    let displayPlan = plan.filter(slot => {
+      return slot.date > todayStr || (slot.date === todayStr && slot.hour >= currentHour);
+    });
+    if (displayPlan.length === 0) {
+      displayPlan = plan; // fallback
+    }
+
+    const container = this.shadowRoot.getElementById('price-chart-svg-container');
+    if (!container) return;
+
+    // Cache key guard
+    const buyPrices = displayPlan.map(s => parseFloat(s.buy_price) || 0);
+    const sellPrices = displayPlan.map(s => parseFloat(s.sell_price) || 0);
+    const priceKey = buyPrices.join(',') + '|' + sellPrices.join(',');
+    if (container._lastPriceKey === priceKey) return;
+    container._lastPriceKey = priceKey;
+
+    const N = displayPlan.length;
+    const allPrices = [...buyPrices, ...sellPrices];
+    let maxVal = Math.max(0.1, ...allPrices);
+    let minVal = Math.min(0.0, ...allPrices);
+    if (maxVal === minVal) {
+      maxVal += 0.5;
+      minVal -= 0.5;
+    }
+
+    // Chart dimensions
+    const W = 540, H = 260;
+    const padL = 42, padR = 12, padT = 18, padB = 38;
+    const chartW = W - padL - padR;
+    const chartH = H - padT - padB;
+    const stepX = N > 1 ? chartW / (N - 1) : chartW;
+
+    // Grid lines + Y labels
+    let gridHtml = '';
+    const gridCount = 4;
+    for (let i = 0; i <= gridCount; i++) {
+      const frac = i / gridCount;
+      const val = minVal + (maxVal - minVal) * frac;
+      const y = padT + chartH - chartH * frac;
+      gridHtml += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>`;
+      gridHtml += `<text x="${padL - 4}" y="${(y + 3).toFixed(1)}" fill="rgba(255,255,255,0.35)" font-size="8" text-anchor="end" font-weight="700">${val.toFixed(2)}</text>`;
+    }
+
+    // X axis labels (draw label every 4 hours to avoid overlap)
+    let xLabelsHtml = '';
+    for (let i = 0; i < N; i++) {
+      if (i % 4 === 0 || i === N - 1) {
+        const slot = displayPlan[i];
+        const x = padL + i * stepX;
+        xLabelsHtml += `<text x="${x.toFixed(1)}" y="${H - padB + 13}" fill="rgba(255,255,255,0.4)" font-size="8" text-anchor="middle" font-weight="700">${String(slot.hour).padStart(2,'0')}:00</text>`;
+      }
+    }
+
+    // Line Paths
+    let buyPoints = [];
+    let sellPoints = [];
+    for (let i = 0; i < N; i++) {
+      const x = padL + i * stepX;
+      const buyY = padT + chartH - ((buyPrices[i] - minVal) / (maxVal - minVal)) * chartH;
+      const sellY = padT + chartH - ((sellPrices[i] - minVal) / (maxVal - minVal)) * chartH;
+      if (isFinite(buyY)) buyPoints.push(`${x.toFixed(1)},${buyY.toFixed(1)}`);
+      if (isFinite(sellY)) sellPoints.push(`${x.toFixed(1)},${sellY.toFixed(1)}`);
+    }
+
+    const buyPath = `M ${buyPoints.join(' L ')}`;
+    const sellPath = `M ${sellPoints.join(' L ')}`;
+
+    // Dot markers
+    let dotsHtml = '';
+    for (let i = 0; i < N; i++) {
+      const x = padL + i * stepX;
+      const buyY = padT + chartH - ((buyPrices[i] - minVal) / (maxVal - minVal)) * chartH;
+      const sellY = padT + chartH - ((sellPrices[i] - minVal) / (maxVal - minVal)) * chartH;
+      if (isFinite(buyY)) {
+        dotsHtml += `<circle cx="${x.toFixed(1)}" cy="${buyY.toFixed(1)}" r="2.5" fill="#ff5252" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
+      }
+      if (isFinite(sellY)) {
+        dotsHtml += `<circle cx="${x.toFixed(1)}" cy="${sellY.toFixed(1)}" r="2.5" fill="#4caf50" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
+      }
+    }
+
+    // Hover Zones
+    let hoverHtml = '';
+    const hovW = N > 1 ? chartW / N : chartW;
+    for (let i = 0; i < N; i++) {
+      const slot = displayPlan[i];
+      const x = padL + i * stepX - hovW / 2;
+      const buyVal = buyPrices[i].toFixed(2);
+      const sellVal = sellPrices[i].toFixed(2);
+      const dayLabel = slot.date === todayStr ? 'Today' : (slot.date > todayStr ? 'Tomorrow' : slot.date);
+      const timeStr = `${String(slot.hour).padStart(2, '0')}:00 (${dayLabel})`;
+      const centerX = padL + i * stepX;
+      hoverHtml += `<rect class="hov-price" x="${x.toFixed(1)}" y="${padT}" width="${hovW.toFixed(1)}" height="${chartH}" fill="transparent" data-time="${timeStr}" data-buy="${buyVal}" data-sell="${sellVal}" data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>`;
+    }
+
+    container.innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;overflow:visible;">
+        ${gridHtml}
+        <line x1="${padL}" y1="${padT + chartH}" x2="${W - padR}" y2="${padT + chartH}" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+        ${xLabelsHtml}
+        <!-- Hover Line -->
+        <line class="hover-line" x1="0" y1="${padT}" x2="0" y2="${padT + chartH}" stroke="rgba(255, 255, 255, 0.3)" stroke-width="1.5" stroke-dasharray="3 3" style="opacity: 0; pointer-events: none; transition: opacity 0.1s;"/>
+        <filter id="buy-line-glow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        <path d="${buyPath}" fill="none" stroke="#ff5252" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" filter="url(#buy-line-glow)"/>
+        <filter id="sell-line-glow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        <path d="${sellPath}" fill="none" stroke="#4caf50" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" filter="url(#sell-line-glow)"/>
+        ${dotsHtml}
+        ${hoverHtml}
+      </svg>
+    `;
+
+    // Tooltip logic
+    const tooltip = this.shadowRoot.getElementById('price-chart-tooltip');
+    if (!tooltip) return;
+
+    container.querySelectorAll('.hov-price').forEach(zone => {
+      zone.addEventListener('mousemove', (e) => {
+        const time = zone.getAttribute('data-time');
+        const buy = zone.getAttribute('data-buy');
+        const sell = zone.getAttribute('data-sell');
+        tooltip.innerHTML = `
+          <div class="tooltip-hour" style="color:#ffffff">${time}</div>
+          <div class="tooltip-row">
+            <span class="tooltip-label">Buy:</span>
+            <span class="tooltip-val" style="color:#ff5252">${buy} PLN/kWh</span>
+          </div>
+          <div class="tooltip-row">
+            <span class="tooltip-label">Sell:</span>
+            <span class="tooltip-val" style="color:#4caf50">${sell} PLN/kWh</span>
+          </div>
+        `;
+        const chartContainer = zone.closest('.chart-container');
+        if (chartContainer) {
+          const rect = chartContainer.getBoundingClientRect();
+          let left = e.clientX - rect.left + 16;
+          let top = e.clientY - rect.top - 80;
+          if (left + 160 > rect.width) left = e.clientX - rect.left - 170;
+          if (top < 0) top = e.clientY - rect.top + 16;
+          tooltip.style.left = `${left}px`;
+          tooltip.style.top = `${top}px`;
+        }
+        tooltip.style.opacity = '1';
+
+        const xPos = zone.getAttribute('data-x');
+        const hoverLine = container.querySelector('.hover-line');
+        if (hoverLine && hoverLine.getAttribute('x1') !== xPos) {
+          hoverLine.setAttribute('x1', xPos);
+          hoverLine.setAttribute('x2', xPos);
+          hoverLine.style.opacity = '1';
+        }
+      });
+      zone.addEventListener('mouseleave', () => { 
+        tooltip.style.opacity = '0'; 
+        const hoverLine = container.querySelector('.hover-line');
+        if (hoverLine) {
+          hoverLine.style.opacity = '0';
+        }
+      });
     });
   }
 
@@ -1470,7 +1945,20 @@ class EmsSchedulerCard extends HTMLElement {
     if (genEl) genEl.innerText = slot.pv_kwh !== undefined ? slot.pv_kwh.toFixed(2) : '0.00';
     if (loadEl) loadEl.innerText = slot.consumption_kwh !== undefined ? slot.consumption_kwh.toFixed(2) : '0.00';
 
-    this.shadowRoot.getElementById('info-power').innerText = `${((slot.power_w || 0) / 1000).toFixed(2)} kW / ${slot.current_a || 0} A`;
+    // Show/hide power row based on mode
+    const powerRow = this.shadowRoot.getElementById('info-power-row');
+    if (powerRow) {
+      if (activeOverrideAction === 'grid_charge' || activeOverrideAction === 'discharge') {
+        powerRow.style.display = 'flex';
+      } else {
+        powerRow.style.display = 'none';
+      }
+    }
+
+    const infoPower = this.shadowRoot.getElementById('info-power');
+    if (infoPower) {
+      infoPower.innerText = `${((slot.power_w || 0) / 1000).toFixed(2)} kW / ${slot.current_a || 0} A`;
+    }
     
     const reasonEl = this.shadowRoot.getElementById('info-reason');
     if (reasonEl) {
@@ -1537,11 +2025,13 @@ class EmsSchedulerCard extends HTMLElement {
 
   _onModeChange(value) {
     const sliderGroup = this.shadowRoot.getElementById('soc-slider-group');
-    if (!sliderGroup) return;
+    const powerRow = this.shadowRoot.getElementById('info-power-row');
     if (value === 'grid_charge' || value === 'discharge') {
-      sliderGroup.classList.add('visible');
+      if (sliderGroup) sliderGroup.classList.add('visible');
+      if (powerRow) powerRow.style.display = 'flex';
     } else {
-      sliderGroup.classList.remove('visible');
+      if (sliderGroup) sliderGroup.classList.remove('visible');
+      if (powerRow) powerRow.style.display = 'none';
     }
   }
 
