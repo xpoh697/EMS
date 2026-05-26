@@ -202,11 +202,13 @@ def run_unified_dp(
                 state_updated = True
 
             # === SOL: battery idle, PV surplus -> grid ===
-            if (not override_action or override_action in ("idle", "sale_pv", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")) and (target_nsi is None or target_nsi == state_idx):
+            if (not override_action or override_action in ("idle", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "self_consume")) and (target_nsi is None or target_nsi == state_idx):
                 is_sol_allowed = True
                 if override_action:
-                    if override_action == "sale_pv":
+                    if override_action in ("sale_pv", "sale_pv_bat", "self_consume"):
                         if pv_surplus > 0 and avail_cap >= energy_step:
+                            is_sol_allowed = False
+                        elif pv_deficit >= energy_step and usable_energy >= energy_step:
                             is_sol_allowed = False
                     elif override_action == "stop_sale":
                         if (pv_surplus > 0 and avail_cap >= energy_step) or (pv_deficit >= energy_step and usable_energy >= energy_step):
@@ -242,7 +244,7 @@ def run_unified_dp(
 
             # === PV_CHARGE: PV surplus -> battery, overflow -> grid ===
             avail_cap = usable_capacity - usable_energy
-            if (not override_action or override_action in ("grid_charge", "pv_charge", "sale_pv", "stop_sale")) and pv_surplus > 0 and avail_cap >= energy_step and (target_nsi is None or target_nsi > state_idx):
+            if (not override_action or override_action in ("grid_charge", "pv_charge", "sale_pv", "sale_pv_bat", "stop_sale", "self_consume")) and pv_surplus > 0 and avail_cap >= energy_step and (target_nsi is None or target_nsi > state_idx):
                 max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_charge_power *= remaining_hour_fraction
@@ -286,7 +288,7 @@ def run_unified_dp(
                         _update(nsi, sell_price * pv_surplus - buy_price * (chg + pv_deficit) - cycle_cost * chg, ACT_GRID_CHARGE, chg)
 
             # === SELF_CONSUME: battery covers consumption deficit ===
-            if (not override_action or override_action in ("self_consume", "stop_sale")) and pv_deficit >= energy_step and usable_energy >= energy_step and (target_nsi is None or target_nsi < state_idx):
+            if (not override_action or override_action in ("self_consume", "stop_sale", "sale_pv", "sale_pv_bat", "discharge")) and pv_deficit >= energy_step and usable_energy >= energy_step and (target_nsi is None or target_nsi < state_idx):
                 max_sc = min(usable_energy, pv_deficit)
                 
                 if target_nsi is not None:
