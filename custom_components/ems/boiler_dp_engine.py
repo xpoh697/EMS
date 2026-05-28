@@ -7,7 +7,10 @@ from .const import INVERTER_MODES
 _LOGGER = logging.getLogger(__name__)
 
 def get_lut_rate(lut: dict, temp: float) -> float:
-    """Find standby cooling rate (°C/h) for the given temperature from LUT."""
+    """Find standby cooling rate (°C/h) for the given temperature from LUT.
+
+    Supports both old format (float/int) and new format (dict: {"value": X, "updated_at": Y}).
+    """
     if not lut:
         return 0.0
 
@@ -18,15 +21,31 @@ def get_lut_rate(lut: dict, temp: float) -> float:
         bracket_bottom = bracket_top - 5.0
 
     key = f"{int(bracket_top)}_{int(bracket_bottom)}"
-    rate = lut.get(key)
-    if rate is not None and rate > 0:
-        return float(rate)
+    raw_rate = lut.get(key)
+    if raw_rate is not None:
+        rate_val = raw_rate.get("value") if isinstance(raw_rate, dict) else raw_rate
+        if rate_val is not None:
+            try:
+                rate_float = float(rate_val)
+                if rate_float > 0:
+                    return rate_float
+            except (ValueError, TypeError):
+                pass
 
+    # Fallback to the closest available non-zero bracket
     best_key = None
     best_delta = float("inf")
     for k, v in lut.items():
-        if not isinstance(v, (int, float)) or v <= 0:
+        val = v.get("value") if isinstance(v, dict) else v
+        if val is None:
             continue
+        try:
+            val_float = float(val)
+            if val_float <= 0:
+                continue
+        except (ValueError, TypeError):
+            continue
+
         try:
             parts = k.split("_")
             k_top = int(parts[0])
@@ -40,7 +59,13 @@ def get_lut_rate(lut: dict, temp: float) -> float:
             continue
 
     if best_key:
-        return float(lut[best_key])
+        best_val = lut[best_key]
+        rate_val = best_val.get("value") if isinstance(best_val, dict) else best_val
+        if rate_val is not None:
+            try:
+                return float(rate_val)
+            except (ValueError, TypeError):
+                pass
     return 0.0
 
 def is_hour_in_range(hour: int, start: int, end: int) -> bool:
@@ -148,14 +173,21 @@ def run_boiler_dp(
             allow_elec_static = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
             pv_kwh = float(slot.get("pv_kwh", 0.0))
             
-            if allow_elec_static and pv_kwh > 0.5:
+            is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
+            if allow_elec_static and pv_kwh > 0.5 and is_curtailed:
                 soc = float(slot.get("expected_soc", 50.0))
                 limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
-                already_free = mode_config.curtail_pv and soc >= limit_soc
+                already_free = soc >= limit_soc
                 if not already_free:
                     eligible_today.append((idx, slot))
 
-        eligible_today.sort(key=lambda item: (float(item[1].get("buy_price", 0.0)), item[0]))
+        eligible_today.sort(
+            key=lambda item: (
+                -float(item[1].get("pv_kwh", 0.0) or 0.0),
+                float(item[1].get("buy_price", 0.0) or 0.0),
+                item[0]
+            )
+        )
         rem_today = curtailed_pv_today
         for idx, slot in eligible_today:
             if rem_today <= 0.0:
@@ -175,14 +207,21 @@ def run_boiler_dp(
             allow_elec_static = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
             pv_kwh = float(slot.get("pv_kwh", 0.0))
             
-            if allow_elec_static and pv_kwh > 0.5:
+            is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
+            if allow_elec_static and pv_kwh > 0.5 and is_curtailed:
                 soc = float(slot.get("expected_soc", 50.0))
                 limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
-                already_free = mode_config.curtail_pv and soc >= limit_soc
+                already_free = soc >= limit_soc
                 if not already_free:
                     eligible_tomorrow.append((idx, slot))
 
-        eligible_tomorrow.sort(key=lambda item: (float(item[1].get("buy_price", 0.0)), item[0]))
+        eligible_tomorrow.sort(
+            key=lambda item: (
+                -float(item[1].get("pv_kwh", 0.0) or 0.0),
+                float(item[1].get("buy_price", 0.0) or 0.0),
+                item[0]
+            )
+        )
         rem_tomorrow = curtailed_pv_tomorrow
         for idx, slot in eligible_tomorrow:
             if rem_tomorrow <= 0.0:
@@ -368,11 +407,13 @@ def run_boiler_dp(
                                 continue
                             
                             delta_T = T_curr - T_gas_cooled
-                            if delta_T < -0.25 or delta_T > max_rise:
+                            if delta_T <= 0.0 or delta_T > max_rise:
                                 continue
                             
-                            heat_rise = max(0.0, delta_T)
+                            heat_rise = delta_T
                             gas_qty = heat_rise / eff_gas_only if eff_gas_only > 0.0 else 0.0
+                            if gas_qty <= 0.0:
+                                continue
                             cost = gas_qty * gas_cost_m3
                             energy = gas_qty
                             
@@ -407,12 +448,14 @@ def run_boiler_dp(
                                 continue
                             
                             delta_T = T_curr - T_mixed
-                            if delta_T < -0.25 or delta_T > max_rise:
+                            if delta_T <= 0.0 or delta_T > max_rise:
                                 continue
                             
-                            heat_rise = max(0.0, delta_T)
+                            heat_rise = delta_T
                             gas_qty = heat_rise / eff_gas_pump if eff_gas_pump > 0.0 else 0.0
-                            cost = gas_qty * gas_cost_m3
+                            if gas_qty <= 0.0:
+                                continue
+                            cost = gas_qty * gas_cost_m3 + 0.1 * tariff
                             energy = gas_qty
                             
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
@@ -453,7 +496,12 @@ def run_boiler_dp(
                                 T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                                 if T_curr >= GRID_MIN_TEMP and T_curr <= t_max_mode:
                                     if T_active >= t_min_limit:
-                                        kwh = max(0.0, T_elec_end_val - T_elec_cooled) / eff_elec_only if eff_elec_only > 0.0 else 0.0
+                                        delta_T = T_elec_end_val - T_elec_cooled
+                                        if delta_T <= 0.0:
+                                            continue
+                                        kwh = delta_T / eff_elec_only if eff_elec_only > 0.0 else 0.0
+                                        if kwh <= 0.0:
+                                            continue
                                         cost = kwh * tariff
                                         energy = kwh
                                         
@@ -495,13 +543,15 @@ def run_boiler_dp(
                                 continue
                             
                             delta_T = T_curr - T_mixed
-                            if delta_T < -0.25 or delta_T > max_rise:
+                            if delta_T <= 0.0 or delta_T > max_rise:
                                 continue
                             
-                            heat_rise = max(0.0, delta_T)
+                            heat_rise = delta_T
                             kwh = heat_rise / eff_elec_pump if eff_elec_pump > 0.0 else 0.0
-                            cost = kwh * tariff
-                            energy = kwh
+                            if kwh <= 0.0:
+                                continue
+                            cost = (kwh + 0.1) * tariff
+                            energy = kwh + 0.1
                             
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                             if tariff <= 0.0:
@@ -617,16 +667,22 @@ def run_boiler_dp(
             tariff = buy_price
         elif mode_name in ("sale_pv", "idle"):
             tariff = sell_price
-        elif mode_config and mode_config.curtail_pv and soc >= mode_config.calibration_limit_soc:
+        elif idx in allocated_free_slots:
             tariff = 0.0
+        elif mode_config and mode_config.curtail_pv:
+            limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
+            if soc >= limit_soc:
+                tariff = 0.0
+            else:
+                tariff = buy_price
         else:
             tariff = sell_price
 
         # Cost per 1°C rise calculations for each mode
         c_per_gas = (1.0 / eff_gas_only if eff_gas_only > 0.0 else 0.0) * gas_cost_m3
-        c_per_gas_pump = (1.0 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * gas_cost_m3
+        c_per_gas_pump = (1.0 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * gas_cost_m3 + (0.1 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * tariff
         c_per_elec = (1.0 / eff_elec_only if eff_elec_only > 0.0 else 0.0) * tariff
-        c_per_elec_pump = (1.0 / eff_elec_pump if eff_elec_pump > 0.0 else 0.0) * tariff
+        c_per_elec_pump = (1.1 / eff_elec_pump if eff_elec_pump > 0.0 else 0.0) * tariff
 
         # Determine electric heating allowance
         allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False

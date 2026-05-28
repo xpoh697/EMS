@@ -41,6 +41,7 @@ class BoilerController:
         # Флаги программной отсечки нагрева и перекачки тепла
         self._elec_cutoff_active = False
         self._gas_cutoff_active = False
+        self._gas_heating_delayed = False
         
         # Флаги ручного цикла нагрева
         self._manual_heating_active = False
@@ -52,6 +53,11 @@ class BoilerController:
         self.gas_capacity = config.get("gas_boiler_capacity", 100)
         self.elec_capacity = config.get("elec_boiler_capacity", 100)
         self.gas_cost_m3 = config.get("gas_cost_m3", 0.0)
+        
+        # EMA solar deficit variables to protect home battery
+        self._solar_deficit_cutoff = False
+        self._avg_pv = None
+        self._avg_load = None
         
     async def async_setup(self):
         """Регистрация безопасных слушателей событий и таймеров калибровки."""
@@ -126,6 +132,13 @@ class BoilerController:
             second=0
         )
         
+        # 6. Регистрация периодического опроса дефицита солнца (каждые 10 секунд)
+        async_track_time_interval(
+            self.hass,
+            self._async_solar_deficit_monitor,
+            datetime.timedelta(seconds=10)
+        )
+        
     def _update_cutoff_states(self):
         """Обновление флагов отсечки нагрева и перекачки с учетом гистерезиса и режима Fail-Safe."""
         # 1. Электробойлер
@@ -141,10 +154,12 @@ class BoilerController:
                     _LOGGER.warning("EMS Boiler Controller: Temperature sensor for electric boiler is unavailable during active heating. Activating safety cutoff.")
                 self._elec_cutoff_active = True
         else:
-            # Общая остановка при достижении setpoint
+            # Общая остановка при достижении setpoint или дефиците солнца
             if t_elec >= t_max_elec:
                 if not self._elec_cutoff_active:
                     _LOGGER.info("EMS Boiler Controller: Electric boiler reached setpoint (%.1f >= %.1f). Stopping heating.", t_elec, t_max_elec)
+                self._elec_cutoff_active = True
+            elif self._solar_deficit_cutoff:
                 self._elec_cutoff_active = True
             elif t_elec < t_max_elec - hysteresis:
                 if self._elec_cutoff_active:
@@ -1531,7 +1546,7 @@ class BoilerController:
     @staticmethod
     def _get_lut_rate(lut: dict, temp: float) -> float | None:
         """Находит скорость потерь (°C/h) для текущей температуры по LUT.
-        
+
         Брэкеты: 75_70, 70_65, 65_60 ... 25_20
         Для T=63°C → брэкет '65_60'.
         Для T ниже нижней границы LUT → берём ближайший нижний брэкет.
@@ -1550,17 +1565,32 @@ class BoilerController:
             bracket_bottom  = bracket_top - 5.0
 
         key = f"{int(bracket_top)}_{int(bracket_bottom)}"
-        rate = lut.get(key)
-        if rate is not None and rate > 0:
-            return float(rate)
+        raw_rate = lut.get(key)
+        if raw_rate is not None:
+            rate_val = raw_rate.get("value") if isinstance(raw_rate, dict) else raw_rate
+            if rate_val is not None:
+                try:
+                    rate_float = float(rate_val)
+                    if rate_float > 0:
+                        return rate_float
+                except (ValueError, TypeError):
+                    pass
 
         # Fallback: ищем ближайший существующий брэкет с ненулевым значением
         # (бойлер мог быть холоднее чем диапазон LUT)
         best_key   = None
         best_delta = float("inf")
         for k, v in lut.items():
-            if not isinstance(v, (int, float)) or v <= 0:
+            val = v.get("value") if isinstance(v, dict) else v
+            if val is None:
                 continue
+            try:
+                val_float = float(val)
+                if val_float <= 0:
+                    continue
+            except (ValueError, TypeError):
+                continue
+
             try:
                 parts = k.split("_")
                 k_top = int(parts[0])
@@ -1574,7 +1604,13 @@ class BoilerController:
                 continue
 
         if best_key:
-            return float(lut[best_key])
+            best_val = lut[best_key]
+            rate_val = best_val.get("value") if isinstance(best_val, dict) else best_val
+            if rate_val is not None:
+                try:
+                    return float(rate_val)
+                except (ValueError, TypeError):
+                    pass
         return None
 
     async def _async_dp_plan_changed(self, event):
@@ -1597,12 +1633,43 @@ class BoilerController:
 
         dp_state = self.hass.states.get("sensor.boiler_dp")
         if not dp_state or dp_state.state in ("unknown", "unavailable", "error", "idle_bypass", "NO PATH", "NO CALIB DATA"):
+            self._gas_heating_delayed = False
             # Safe default to IDLE mode, closed bypass (OFF)
             await self._async_set_boiler_mode("IDLE", "OFF")
             return
 
         mode = dp_state.state.upper()
         recommended_bypass = dp_state.attributes.get("recommended_bypass", "OFF").upper()
+
+        if mode == "GAS":
+            t_min = float(self.config.get("thermostat_set_temp", 45.0))
+            t_elec = self._get_elec_temp()
+            if t_elec is not None:
+                threshold = t_min - 10.0
+                limit = threshold + 1.0 if self._gas_heating_delayed else threshold
+                if t_elec > limit:
+                    if not self._gas_heating_delayed:
+                        _LOGGER.info(
+                            "EMS Boiler Controller: DP recommends GAS, but electric boiler is warm (%.1f°C > %.1f°C). "
+                            "Delaying gas activation and keeping bypass ON to consume electric heat.",
+                            t_elec, threshold
+                        )
+                        self._gas_heating_delayed = True
+                    await self._async_set_boiler_mode("IDLE", "ON")
+                    return
+                else:
+                    if self._gas_heating_delayed:
+                        _LOGGER.info(
+                            "EMS Boiler Controller: Electric boiler temperature (%.1f°C) dropped to/below threshold (%.1f°C). "
+                            "Terminating delay and activating GAS mode.",
+                            t_elec, threshold
+                        )
+                        self._gas_heating_delayed = False
+            else:
+                self._gas_heating_delayed = False
+        else:
+            self._gas_heating_delayed = False
+
         await self._async_set_boiler_mode(mode, recommended_bypass)
 
     async def _async_set_boiler_mode(self, mode: str, recommended_bypass: str):
@@ -1698,3 +1765,75 @@ class BoilerController:
             _LOGGER.error("Error applying DP mode %s: %s", mode, ex)
         finally:
             self._is_applying_dp_plan = False
+
+    async def _async_solar_deficit_monitor(self, _now=None):
+        """Мониторинг 5-минутного скользящего дефицита солнечной генерации."""
+        pv_sensor = self.config.get("current_pv_generation")
+        load_sensor = self.config.get("current_house_consumption")
+
+        # Если один из датчиков не настроен — пропускаем проверку
+        if not pv_sensor or not load_sensor:
+            return
+
+        pv_state = self.hass.states.get(pv_sensor)
+        load_state = self.hass.states.get(load_sensor)
+
+        if not pv_state or pv_state.state in (None, "unknown", "unavailable"):
+            return
+        if not load_state or load_state.state in (None, "unknown", "unavailable"):
+            return
+
+        try:
+            # Получаем текущие значения в Вт
+            raw_pv = float(pv_state.state)
+            curr_pv = raw_pv * 1000.0 if raw_pv < 50.0 else raw_pv
+
+            raw_load = float(load_state.state)
+            curr_load = raw_load * 1000.0 if raw_load < 50.0 else raw_load
+        except (ValueError, TypeError):
+            return
+
+        # Инициализация EMA при первом запуске (Cold Start)
+        alpha = 0.0645  # 5 минут при 10-секундных интервалах (N = 30)
+        if self._avg_pv is None:
+            self._avg_pv = curr_pv
+        else:
+            self._avg_pv = alpha * curr_pv + (1.0 - alpha) * self._avg_pv
+
+        if self._avg_load is None:
+            self._avg_load = curr_load
+        else:
+            self._avg_load = alpha * curr_load + (1.0 - alpha) * self._avg_load
+
+        # Проверяем состояние ТЭНа
+        is_heater_on = False
+        if self.elec_heater:
+            heater_state = self.hass.states.get(self.elec_heater)
+            is_heater_on = heater_state and heater_state.state == STATE_ON
+
+        # Логика отсечки с гистерезисом включения/выключения
+        if is_heater_on:
+            # Если ТЭН включен и средний дефицит (потребление - генерация) >= 500 Вт
+            if self._avg_load - self._avg_pv >= 500.0:
+                if not self._solar_deficit_cutoff:
+                    _LOGGER.info(
+                        "EMS Boiler Controller: 5-minute solar deficit detected (Avg Load: %.0f W, Avg PV: %.0f W). Activating solar deficit cutoff.",
+                        self._avg_load,
+                        self._avg_pv
+                    )
+                    self._solar_deficit_cutoff = True
+                    # Принудительно обновляем физическое состояние
+                    await self._async_apply_current_dp_plan()
+        else:
+            # Если ТЭН выключен, сбрасываем отсечку только когда избыток солнца превышает 2500 Вт
+            # (это гарантирует, что ТЭН мощностью 2.5 кВт будет полностью питаться от солнца без АКБ)
+            if self._avg_pv - self._avg_load >= 2500.0:
+                if self._solar_deficit_cutoff:
+                    _LOGGER.info(
+                        "EMS Boiler Controller: Solar excess recovered (Avg PV: %.0f W, Avg Load: %.0f W). Deactivating solar deficit cutoff.",
+                        self._avg_pv,
+                        self._avg_load
+                    )
+                    self._solar_deficit_cutoff = False
+                    # Принудительно возобновляем план
+                    await self._async_apply_current_dp_plan()

@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.9.0";
+const CARD_VERSION = "1.9.1";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -654,6 +654,30 @@ const STYLES = `
     letter-spacing: 0.5px;
   }
 
+  /* ─── Schedule calc info footer ─────────────────────────────────────── */
+  .sched-calc-info {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px 12px;
+    font-size: 11px;
+    color: var(--secondary-text-color);
+    opacity: 0.7;
+  }
+  .sched-calc-info ha-icon {
+    --mdc-icon-size: 13px;
+    opacity: 0.6;
+  }
+  .sched-calc-dur {
+    background: rgba(255,255,255,0.06);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 10px;
+    font-family: monospace;
+    color: var(--primary-color, #2196f3);
+  }
+
   /* ─── Auto settings panel ────────────────────────────────────────────── */
   .auto-settings-panel {
     background: rgba(255,255,255,0.02);
@@ -1140,6 +1164,13 @@ class BoilerCard extends HTMLElement {
       <div id="sched-hdr-tomorrow" class="schedule-day-header hidden">Завтра</div>
       <div class="schedule-grid hidden" id="sched-grid-tomorrow"></div>
     `;
+
+    // Calc info footer for schedule tab
+    this._schedCalcInfo = document.createElement("div");
+    this._schedCalcInfo.className = "sched-calc-info";
+    this._schedCalcInfo.innerHTML = `<ha-icon icon="mdi:clock-check-outline"></ha-icon><span id="sched-calc-time">–</span>`;
+    this._scheduleContent.appendChild(this._schedCalcInfo);
+
     card.appendChild(this._scheduleContent);
 
     // Modal Dialog overlay
@@ -1217,7 +1248,8 @@ class BoilerCard extends HTMLElement {
       elecS?.state, powS?.state, tmpS?.state,
       pumpS?.state, valveS?.state, modeS?.state,
       hwPumpS?.state, hwTempS?.state,
-      dpS?.state, dpS?.attributes?.schedule?.length
+      dpS?.state, dpS?.attributes?.schedule?.length,
+      dpS?.attributes?.gas_heating_delayed
     ].join("|");
     if (key === this._prevKey) return;
     this._prevKey = key;
@@ -1322,7 +1354,14 @@ class BoilerCard extends HTMLElement {
     this._autoHint.classList.toggle("hidden",  isManual);
 
     if (!isManual) {
-      this._autoHint.innerHTML = `<ha-icon icon="mdi:robot-outline"></ha-icon> Автоуправление`;
+      const gasDelayed = dpS?.attributes?.gas_heating_delayed === true;
+      if (gasDelayed) {
+        this._autoHint.innerHTML = `<ha-icon icon="mdi:clock-outline" style="color: var(--warning-color, #ff9800);"></ha-icon> <span style="color: var(--warning-color, #ff9800); font-weight: bold;">Отсрочка газа (выработка эл-ва)</span>`;
+        this._autoHint.style.opacity = "1";
+      } else {
+        this._autoHint.innerHTML = `<ha-icon icon="mdi:robot-outline"></ha-icon> Автоуправление`;
+        this._autoHint.style.opacity = "";
+      }
 
       const startEnt = st[this._entities.heating_start_hour || "number.ems_boiler_heating_start_hour"];
       const endEnt = st[this._entities.heating_end_hour || "number.ems_boiler_heating_end_hour"];
@@ -1498,6 +1537,28 @@ class BoilerCard extends HTMLElement {
   _updateSchedule() {
     this._scheduleNeedsUpdate = false;
     if (!this._hass) return;
+
+    // Update calc info footer
+    if (this._schedCalcInfo) {
+      const dpAttr = this._hass.states["sensor.boiler_dp"]?.attributes;
+      const lastCalc = dpAttr?.last_calculation;
+      const calcDur  = dpAttr?.calculation_duration;
+      let timeStr = "–";
+      let durStr  = "";
+      if (lastCalc) {
+        try {
+          const d = new Date(lastCalc);
+          const dateStr = d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+          const timeOnly = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+          timeStr = `${dateStr} ${timeOnly}`;
+        } catch (e) { timeStr = lastCalc; }
+      }
+      if (calcDur != null && typeof calcDur === "number") {
+        durStr = ` <span class="sched-calc-dur">${Math.round(calcDur * 1000)} ms</span>`;
+      }
+      const span = this._schedCalcInfo.querySelector("#sched-calc-time");
+      if (span) span.innerHTML = timeStr + durStr;
+    }
 
     const dpS = this._hass.states["sensor.boiler_dp"];
     const schedule = dpS?.attributes?.schedule || [];

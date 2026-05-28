@@ -72,7 +72,7 @@ from .const import (
     DEFAULT_GAS_BOILER_MAX_TEMP,
     STANDBY_LOSSES_PRESETS,
 )
-from .utils import ems_log, calculate_battery_degradation, parse_price_sensor
+from .utils import ems_log, calculate_battery_degradation, parse_price_sensor, map_dp_to_physical, map_override_to_physical
 from .dp_engine import run_unified_dp, DPConfig
 
 _LOGGER = logging.getLogger(__name__)
@@ -90,47 +90,6 @@ def safe_float_list(val, default_val, length=24) -> list[float]:
     if len(cleaned) < length:
         cleaned.extend([default_val] * (length - len(cleaned)))
     return cleaned[:length]
-
-def map_dp_to_physical(
-    action: str | None,
-    sell_price: float,
-    pv_kwh: float,
-    min_sell_price: float,
-    min_discharge_price: float,
-    cheap_ahead: bool,
-) -> tuple[str | None, str]:
-    """Map a DP algorithmic action to a physical inverter mode, returning (mode, reason)."""
-    price_cond = "sell_price > min_sell_price" if sell_price > min_sell_price else "sell_price <= min_sell_price"
-    discharge_price_cond = "sell_price >= min_discharge_price" if sell_price >= min_discharge_price else "sell_price < min_discharge_price"
-    pv_cond = "pv_kwh > 0.01" if pv_kwh > 0.01 else "pv_kwh <= 0.01"
-    cheap_cond = f"cheap_ahead={cheap_ahead}"
-    reason = f"{price_cond} | {discharge_price_cond} | {pv_cond} | {cheap_cond}"
-
-    if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency"):
-        return action, "direct_mapping"
-
-    # Direct mapping for idle
-    if action == "idle":
-        return "idle", f"idle_bypass | {reason}"
-
-    if action == "discharge":
-        if sell_price >= min_discharge_price:
-            return "sale_pv_bat", reason
-        return "stop_sale", reason
-
-    if action in ("grid_charge", "paid_import"):
-        return "buy", reason
-
-    # Actions: pv_charge, self_consume, solar_export
-    if sell_price > min_sell_price:
-        if action == "solar_export" and pv_kwh > 0.01:
-            return "sale_pv_no_bat", reason
-        return "sale_pv", reason
-
-    # sell_price <= min_sell_price
-    if cheap_ahead:
-        return "no_pv_sale_no_bat", reason
-    return "stop_sale", reason
 
 def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float], bool]:
     """Parse Solcast detailedForecast, detailedHourly, and forecasts attributes to compute baseline hourly kWh."""
@@ -1942,7 +1901,12 @@ class EmsDpSensor(SensorEntity):
                         cheap_ahead = True
                         break
 
-            physical_mode, mapping_reason = map_dp_to_physical(
+            _is_override_slot = (
+                (action == "discharge" and dis_keys.get(key, {}).get("override", False))
+                or (action == "grid_charge" and chg_keys.get(key, {}).get("override", False))
+            )
+            _map_fn = map_override_to_physical if _is_override_slot else map_dp_to_physical
+            physical_mode, mapping_reason = _map_fn(
                 action=action,
                 sell_price=slot["sell_price"],
                 pv_kwh=slot["pv_kwh"],
@@ -2138,7 +2102,7 @@ class EmsSchedulerSensor(SensorEntity):
                         cheap_ahead = True
                         break
 
-            physical_mode, _ = map_dp_to_physical(
+            physical_mode, _ = map_override_to_physical(
                 action=active_override_action,
                 sell_price=sell_price,
                 pv_kwh=pv_kwh,
@@ -2235,7 +2199,6 @@ class EmsSchedulerSensor(SensorEntity):
                     if 0.0 <= val <= 100.0:
                         soc = val
                     else:
-                        from .utils import ems_log
                         ems_log(
                             self.hass,
                             _LOGGER,
@@ -2347,7 +2310,7 @@ class EmsSchedulerSensor(SensorEntity):
                         cheap_ahead = True
                         break
 
-            _, override_reason = map_dp_to_physical(
+            _, override_reason = map_override_to_physical(
                 action=raw_mode,
                 sell_price=sell_price,
                 pv_kwh=pv_kwh,
@@ -2985,8 +2948,8 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
             "50_45", "45_40", "40_35", "35_30", "30_25", "25_20",
         ]
         self._standby_losses = {
-            "gas":  STANDBY_LOSSES_PRESETS["gas"].copy(),
-            "elec": STANDBY_LOSSES_PRESETS["elec"].copy(),
+            "gas":  {k: {"value": v, "updated_at": None} for k, v in STANDBY_LOSSES_PRESETS["gas"].items()},
+            "elec": {k: {"value": v, "updated_at": None} for k, v in STANDBY_LOSSES_PRESETS["elec"].items()},
             "last_calibrated": None,
         }
         self._standby_costs = {}  # real-time cost metrics от _async_calculate_costs
@@ -3106,7 +3069,13 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
 
     @staticmethod
     def _migrate_standby_losses(data: dict) -> dict:
-        """Мигрирует старый формат и выполняет умное слияние с пресетными значениями."""
+        """Мигрирует старый формат и выполняет умное слияние с пресетными значениями.
+
+        Поддерживает три формата входных данных:
+        - Старый flat float: {"gas_hourly_loss_c": X, "elec_hourly_loss_c": Y}
+        - Старый LUT float: {"gas": {"75_70": 4.36, ...}, "elec": {...}}
+        - Новый LUT dict: {"gas": {"75_70": {"value": 4.36, "updated_at": "..."}}, ...}
+        """
         _lut_brackets = [
             "75_70", "70_65", "65_60", "60_55", "55_50",
             "50_45", "45_40", "40_35", "35_30", "30_25", "25_20",
@@ -3115,26 +3084,35 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
             gas_lut = data["gas"]
             elec_lut = data.get("elec", {})
         else:
+            # Очень старый flat-формат — разворачиваем в LUT
             old_gas  = float(data.get("gas_hourly_loss_c",  0.0))
             old_elec = float(data.get("elec_hourly_loss_c", 0.0))
-            gas_lut  = {b: old_gas for b in _lut_brackets}
+            gas_lut  = {b: old_gas  for b in _lut_brackets}
             elec_lut = {b: old_elec for b in _lut_brackets}
+
+        def _extract_bracket(raw_val, preset_val: float) -> dict:
+            """Возвращает брэкет в новом формате {value, updated_at}."""
+            if isinstance(raw_val, dict):
+                # Уже новый формат
+                extracted = float(raw_val.get("value", 0.0))
+                updated_at = raw_val.get("updated_at")
+            else:
+                extracted = float(raw_val) if raw_val is not None else 0.0
+                updated_at = None
+            value = extracted if extracted > 0.0 else preset_val
+            return {"value": value, "updated_at": updated_at}
 
         merged_gas = {}
         for b in _lut_brackets:
-            val = float(gas_lut.get(b, 0.0))
-            if val <= 0.0:
-                merged_gas[b] = float(STANDBY_LOSSES_PRESETS["gas"][b])
-            else:
-                merged_gas[b] = val
+            merged_gas[b] = _extract_bracket(
+                gas_lut.get(b), float(STANDBY_LOSSES_PRESETS["gas"][b])
+            )
 
         merged_elec = {}
         for b in _lut_brackets:
-            val = float(elec_lut.get(b, 0.0))
-            if val <= 0.0:
-                merged_elec[b] = float(STANDBY_LOSSES_PRESETS["elec"][b])
-            else:
-                merged_elec[b] = val
+            merged_elec[b] = _extract_bracket(
+                elec_lut.get(b), float(STANDBY_LOSSES_PRESETS["elec"][b])
+            )
 
         return {
             "gas":  merged_gas,
@@ -3386,10 +3364,12 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         manual_active = False
         manual_mode = None
         manual_setpoint = None
+        gas_heating_delayed = False
         if controller:
             manual_active = getattr(controller, "_manual_heating_active", False)
             manual_mode = getattr(controller, "_manual_heating_mode", None)
             manual_setpoint = getattr(controller, "_manual_heating_setpoint", None)
+            gas_heating_delayed = getattr(controller, "_gas_heating_delayed", False)
 
         return {
             "schedule": self._schedule,
@@ -3409,6 +3389,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "manual_heating_active": manual_active,
             "manual_heating_mode": manual_mode,
             "manual_heating_setpoint": manual_setpoint,
+            "gas_heating_delayed": gas_heating_delayed,
             "heating_start_hour": self._heating_start_hour,
             "heating_end_hour": self._heating_end_hour,
         }

@@ -138,3 +138,88 @@ def parse_price_sensor(state_obj) -> tuple[list[float], list[float]]:
                     pass
 
     return price_today, price_tomorrow
+
+def map_dp_to_physical(
+    action: str | None,
+    sell_price: float,
+    pv_kwh: float,
+    min_sell_price: float,
+    min_discharge_price: float,
+    cheap_ahead: bool,
+) -> tuple[str | None, str]:
+    """Map a DP algorithmic action to a physical inverter mode, returning (mode, reason)."""
+    price_cond = "sell_price > min_sell_price" if sell_price > min_sell_price else "sell_price <= min_sell_price"
+    discharge_price_cond = "sell_price >= min_discharge_price" if sell_price >= min_discharge_price else "sell_price < min_discharge_price"
+    pv_cond = "pv_kwh > 0.01" if pv_kwh > 0.01 else "pv_kwh <= 0.01"
+    cheap_cond = f"cheap_ahead={cheap_ahead}"
+    reason = f"{price_cond} | {discharge_price_cond} | {pv_cond} | {cheap_cond}"
+
+    if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency"):
+        return action, "direct_mapping"
+
+    # Direct mapping for idle
+    if action == "idle":
+        return "idle", f"idle_bypass | {reason}"
+
+    if action == "discharge":
+        if sell_price >= min_discharge_price:
+            return "sale_pv_bat", reason
+        return "stop_sale", reason
+
+    if action in ("grid_charge", "paid_import"):
+        return "buy", reason
+
+    # Actions: pv_charge, self_consume, solar_export
+    if sell_price > min_sell_price:
+        if action == "solar_export" and pv_kwh > 0.01:
+            return "sale_pv_no_bat", reason
+        return "sale_pv", reason
+
+    # sell_price <= min_sell_price
+    if cheap_ahead:
+        return "no_pv_sale_no_bat", reason
+    return "stop_sale", reason
+
+
+def map_override_to_physical(
+    action: str | None,
+    sell_price: float,
+    pv_kwh: float,
+    min_sell_price: float,
+    min_discharge_price: float,
+    cheap_ahead: bool,
+) -> tuple[str | None, str]:
+    """Map a MANUAL override action to a physical inverter mode.
+
+    Differs from map_dp_to_physical in that 'discharge' always maps to
+    'sale_pv_bat' regardless of sell_price — this prevents solar surplus
+    from charging the battery during a forced-discharge override.
+    """
+    price_cond = "sell_price > min_sell_price" if sell_price > min_sell_price else "sell_price <= min_sell_price"
+    discharge_price_cond = "sell_price >= min_discharge_price" if sell_price >= min_discharge_price else "sell_price < min_discharge_price"
+    pv_cond = "pv_kwh > 0.01" if pv_kwh > 0.01 else "pv_kwh <= 0.01"
+    cheap_cond = f"cheap_ahead={cheap_ahead}"
+    reason = f"{price_cond} | {discharge_price_cond} | {pv_cond} | {cheap_cond}"
+
+    if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency"):
+        return action, "direct_mapping"
+
+    if action == "idle":
+        return "idle", f"idle_bypass | {reason}"
+
+    # For manual overrides: discharge always forces sale_pv_bat
+    # (disables charge_from_pv, enables discharge_to_grid/discharge_to_house)
+    if action == "discharge":
+        return "sale_pv_bat", f"override_discharge_forced | {reason}"
+
+    if action in ("grid_charge", "paid_import"):
+        return "buy", reason
+
+    if sell_price > min_sell_price:
+        if action == "solar_export" and pv_kwh > 0.01:
+            return "sale_pv_no_bat", reason
+        return "sale_pv", reason
+
+    if cheap_ahead:
+        return "no_pv_sale_no_bat", reason
+    return "stop_sale", reason

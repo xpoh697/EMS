@@ -167,8 +167,8 @@ _CALIBRATION_DEFAULTS: dict = {
     "elec_only":      {"efficiency_c_per_kwh": 0.0, "heater_power_kw": 2.5, "last_calibrated": None},
     "elec_with_pump": {"efficiency_c_per_kwh": 0.0, "heater_power_kw": 2.5, "last_calibrated": None},
     "standby_losses": {
-        "gas":            STANDBY_LOSSES_PRESETS["gas"].copy(),
-        "elec":           STANDBY_LOSSES_PRESETS["elec"].copy(),
+        "gas":  {k: {"value": v, "updated_at": None} for k, v in STANDBY_LOSSES_PRESETS["gas"].items()},
+        "elec": {k: {"value": v, "updated_at": None} for k, v in STANDBY_LOSSES_PRESETS["elec"].items()},
         "last_calibrated": None,
     },
 }
@@ -217,8 +217,22 @@ class EmsCalibrationStore:
         return copy.deepcopy(self._data)
 
     def update_phase(self, phase: str, data: dict) -> None:
-        """Update coefficients for a specific phase in memory (call async_save to persist)."""
-        if phase in self._data:
-            self._data[phase].update(data)
-        else:
+        """Update coefficients for a specific phase in memory (call async_save to persist).
+
+        For 'standby_losses', performs a nested merge into gas/elec sub-dicts so that
+        a partial bracket update does not overwrite the remaining brackets.
+        """
+        if phase not in self._data:
             _LOGGER.warning("EmsCalibrationStore: unknown phase '%s', skipping.", phase)
+            return
+
+        if phase == "standby_losses":
+            # Nested merge: only update the brackets that are explicitly passed
+            for boiler in ("gas", "elec"):
+                if boiler in data and isinstance(data[boiler], dict):
+                    self._data[phase].setdefault(boiler, {})
+                    self._data[phase][boiler].update(data[boiler])
+            if "last_calibrated" in data:
+                self._data[phase]["last_calibrated"] = data["last_calibrated"]
+        else:
+            self._data[phase].update(data)
