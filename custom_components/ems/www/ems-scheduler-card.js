@@ -202,6 +202,30 @@ class EmsSchedulerCard extends HTMLElement {
           background: rgba(255,255,255,0.02);
         }
 
+        .vacation-banner {
+          background: rgba(244, 67, 54, 0.12);
+          border: 1px solid rgba(244, 67, 54, 0.3);
+          border-radius: 16px;
+          padding: 10px 14px;
+          margin-bottom: 16px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          color: #ef5350;
+          font-size: 0.8rem;
+          font-weight: 800;
+          box-shadow: 0 4px 12px rgba(244, 67, 54, 0.08);
+        }
+        .vacation-banner ha-icon {
+          --mdc-icon-size: 18px;
+          color: #ef5350;
+          animation: plane-bounce 2s infinite ease-in-out;
+        }
+        @keyframes plane-bounce {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-3px); }
+        }
+
         .stats-panel {
           background: rgba(255,255,255,0.02);
           border: 1px solid rgba(255,255,255,0.08);
@@ -644,6 +668,10 @@ class EmsSchedulerCard extends HTMLElement {
           <div class="title">EMS Scheduler</div>
           <div id="status-badge" class="status-badge">AI Operational</div>
         </div>
+        <div id="vacation-banner" class="vacation-banner hidden">
+          <ha-icon icon="mdi:airplane"></ha-icon>
+          <span>Режим отпуска активирован</span>
+        </div>
 
         <div class="tabs-row">
           <button class="tab-btn active" id="tab-plan-btn">Plan</button>
@@ -700,6 +728,10 @@ class EmsSchedulerCard extends HTMLElement {
               <div class="legend-item">
                 <div class="legend-color" style="background: #ffe082;"></div>
                 <span>Average Profile</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #26a69a;"></div>
+                <span>Average (no Boiler)</span>
               </div>
             </div>
           </div>
@@ -1003,6 +1035,17 @@ class EmsSchedulerCard extends HTMLElement {
 
     this._setupTemplateSubscriptions();
     this._updateExtraIndicators();
+
+    // Vacation Banner
+    const vacationBanner = this.shadowRoot.getElementById('vacation-banner');
+    const isVacation = attrs.vacation_mode === true || (dpState && dpState.attributes && dpState.attributes.vacation_mode === true);
+    if (vacationBanner) {
+      if (isVacation) {
+        vacationBanner.classList.remove('hidden');
+      } else {
+        vacationBanner.classList.add('hidden');
+      }
+    }
 
     // Status Badge
     const badge = this.shadowRoot.getElementById('status-badge');
@@ -1337,6 +1380,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     let actual = Array(24).fill(0);
     let average = Array(24).fill(0);
+    let boilerAverage = Array(24).fill(0);
 
     if (consumptionState && consumptionState.attributes) {
       const attrs = consumptionState.attributes;
@@ -1360,6 +1404,12 @@ class EmsSchedulerCard extends HTMLElement {
         average = avgRaw.map(v => parseFloat(v) || 0);
       }
 
+      const boilerKey = this._selectedDay === 'today' ? 'boiler_average_today' : `boiler_average_${this._selectedDay}`;
+      const boilerRaw = toArray(attrs[boilerKey]) || toArray(attrs.boiler_average_today);
+      if (boilerRaw) {
+        boilerAverage = boilerRaw.map(v => parseFloat(v) || 0);
+      }
+
       console.debug('[EmsStats] actual (first 3):', actual.slice(0, 3), 'average (first 3):', average.slice(0, 3), 'entity:', consumptionEntityId);
     }
 
@@ -1368,12 +1418,16 @@ class EmsSchedulerCard extends HTMLElement {
     actual = actual.slice(0, 24);
     while (average.length < 24) average.push(0);
     average = average.slice(0, 24);
+    while (boilerAverage.length < 24) boilerAverage.push(0);
+    boilerAverage = boilerAverage.slice(0, 24);
+
+    const netAverage = average.map((avgVal, idx) => Math.max(0, avgVal - (boilerAverage[idx] || 0)));
 
     const container = this.shadowRoot.getElementById('chart-svg-container');
     if (!container) return;
 
     // Cache key guard
-    const statsKey = [this._selectedDay, actual.join(','), average.join(',')].join('|');
+    const statsKey = [this._selectedDay, actual.join(','), average.join(','), boilerAverage.join(',')].join('|');
     if (container._lastStatsKey === statsKey) return;
     container._lastStatsKey = statsKey;
 
@@ -1435,15 +1489,33 @@ class EmsSchedulerCard extends HTMLElement {
       dotsHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="#ffe082" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
     }
 
+    // Net average profile line (no boiler)
+    let netPoints = [];
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      const y = padT + chartH - (netAverage[i] / maxVal) * chartH;
+      netPoints.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    const netLinePath = `M ${netPoints.join(' L ')}`;
+
+    // Dot markers on net average line
+    let netDotsHtml = '';
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      const y = padT + chartH - (netAverage[i] / maxVal) * chartH;
+      netDotsHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.0" fill="#26a69a" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
+    }
+
     // Invisible hover zones
     let hoverHtml = '';
     for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing;
       const actVal = actual[i].toFixed(2);
       const avgVal = average[i].toFixed(2);
+      const netVal = netAverage[i].toFixed(2);
       const hourStr = String(i).padStart(2, '0') + ':00';
       const centerX = padL + i * barSpacing + barSpacing / 2;
-      hoverHtml += `<rect class="hov" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" data-hour="${hourStr}" data-act="${actVal}" data-avg="${avgVal}" data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>`;
+      hoverHtml += `<rect class="hov" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" data-hour="${hourStr}" data-act="${actVal}" data-avg="${avgVal}" data-net="${netVal}" data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>`;
     }
 
     container.innerHTML = `
@@ -1460,8 +1532,11 @@ class EmsSchedulerCard extends HTMLElement {
         <!-- Average Line glow -->
         <filter id="line-glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
         <path d="${linePath}" fill="none" stroke="#ffe082" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" filter="url(#line-glow)"/>
+        <!-- Net Average Line (no boiler) -->
+        <path d="${netLinePath}" fill="none" stroke="#26a69a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4 2"/>
         <!-- Dots -->
         ${dotsHtml}
+        ${netDotsHtml}
         <!-- Hover Zones -->
         ${hoverHtml}
       </svg>
@@ -1476,6 +1551,7 @@ class EmsSchedulerCard extends HTMLElement {
         const hour = zone.getAttribute('data-hour');
         const act = zone.getAttribute('data-act');
         const avg = zone.getAttribute('data-avg');
+        const net = zone.getAttribute('data-net');
         tooltip.innerHTML = `
           <div class="tooltip-hour">${hour}</div>
           <div class="tooltip-row">
@@ -1485,6 +1561,10 @@ class EmsSchedulerCard extends HTMLElement {
           <div class="tooltip-row">
             <span class="tooltip-label">Avg Profile:</span>
             <span class="tooltip-val" style="color:#ffe082">${avg} kWh</span>
+          </div>
+          <div class="tooltip-row">
+            <span class="tooltip-label">Avg (no Boiler):</span>
+            <span class="tooltip-val" style="color:#26a69a">${net} kWh</span>
           </div>
         `;
         const chartContainer = zone.closest('.chart-container');

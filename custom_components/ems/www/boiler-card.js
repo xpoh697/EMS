@@ -31,6 +31,30 @@ const STYLES = `
   .card-header .title  { font-size: 17px; font-weight: 600; color: var(--primary-text-color); }
   .card-header .ver    { font-size: 11px; color: var(--secondary-text-color); opacity: 0.5; }
 
+  .vacation-banner {
+    background: rgba(244, 67, 54, 0.12);
+    border: 1px solid rgba(244, 67, 54, 0.3);
+    border-radius: 12px;
+    padding: 10px 14px;
+    margin: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #ef5350;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 4px 12px rgba(244, 67, 54, 0.08);
+  }
+  .vacation-banner ha-icon {
+    --mdc-icon-size: 18px;
+    color: #ef5350;
+    animation: plane-bounce 2s infinite ease-in-out;
+  }
+  @keyframes plane-bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
+  }
+
   /* ─── Tabs ───────────────────────────────────────────────────────────── */
   .card-tabs {
     display: flex;
@@ -796,6 +820,15 @@ class BoilerCard extends HTMLElement {
 
     const card = document.createElement("ha-card");
 
+    // Vacation banner
+    const vacBanner = document.createElement("div");
+    vacBanner.id = "vacation-banner";
+    vacBanner.className = "vacation-banner hidden";
+    vacBanner.innerHTML = `
+      <ha-icon icon="mdi:airplane"></ha-icon>
+      <span>Режим отпуска активирован</span>`;
+    card.appendChild(vacBanner);
+
     // Header
     const hdr = document.createElement("div");
     hdr.className = "card-header";
@@ -1253,6 +1286,16 @@ class BoilerCard extends HTMLElement {
     ].join("|");
     if (key === this._prevKey) return;
     this._prevKey = key;
+
+    const vacBanner = this.shadowRoot.getElementById("vacation-banner");
+    const isVacation = dpS?.attributes?.vacation_mode === true;
+    if (vacBanner) {
+      if (isVacation) {
+        vacBanner.classList.remove("hidden");
+      } else {
+        vacBanner.classList.add("hidden");
+      }
+    }
 
     // ── Gas tile ──────────────────────────────────────────────────────────
     const gasTemp   = gasS?.attributes?.current_temperature ?? gasS?.state ?? "–";

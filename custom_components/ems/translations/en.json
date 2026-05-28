@@ -36,7 +36,8 @@
           "inverter_modes_list": "Inverter modes list selector",
           "statistics_days": "Number of history days for averaging",
           "fallback_consumption": "Fallback consumption per hour (kWh)",
-          "debug": "Enable debug logging"
+          "debug": "Enable debug logging",
+          "vacation_mode_entity": "Vacation Mode Entity (input_boolean/switch)"
         }
       },
       "pv_forecast": {

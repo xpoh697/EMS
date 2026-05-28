@@ -20,6 +20,7 @@ from .const import (
     CONF_STATISTICS_DAYS,
     CONF_FALLBACK_CONSUMPTION,
     CONF_DEBUG,
+    CONF_VACATION_MODE_ENTITY,
     CONF_CALIBRATION_TYPE,
     CONF_WATER_FLOW_SENSOR,
     CONF_PRICE_BUY_SENSOR,
@@ -137,6 +138,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         stats_days = self._user_input.get(CONF_STATISTICS_DAYS, DEFAULT_STATISTICS_DAYS)
         fallback_cons = self._user_input.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION)
         debug_val = self._user_input.get(CONF_DEBUG, DEFAULT_DEBUG)
+        vacation_entity_val = self._user_input.get(CONF_VACATION_MODE_ENTITY)
 
         schema_dict = {}
 
@@ -217,6 +219,16 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
         # 4. System Settings
         schema_dict[vol.Required(CONF_DEBUG, default=debug_val)] = selector.BooleanSelector()
+
+        # 5. Vacation Mode Entity (Optional)
+        if vacation_entity_val:
+            schema_dict[vol.Optional(CONF_VACATION_MODE_ENTITY, default=vacation_entity_val)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["input_boolean", "switch"])
+            )
+        else:
+            schema_dict[vol.Optional(CONF_VACATION_MODE_ENTITY)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["input_boolean", "switch"])
+            )
 
         return self.async_show_form(
             step_id="basic_settings",

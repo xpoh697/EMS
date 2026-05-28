@@ -36,7 +36,8 @@
           "inverter_modes_list": "Сенсор/селектор списка режимов инвертора",
           "statistics_days": "Количество дней истории для усреднения",
           "fallback_consumption": "Фолбэк потребления в час (кВтч)",
-          "debug": "Включить отладочное логирование (debug)"
+          "debug": "Включить отладочное логирование (debug)",
+          "vacation_mode_entity": "Сущность режима отпуска (input_boolean/switch)"
         }
       },
       "pv_forecast": {

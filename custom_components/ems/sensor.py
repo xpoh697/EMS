@@ -42,6 +42,7 @@ from .const import (
     CONF_STATISTICS_DAYS,
     CONF_FALLBACK_CONSUMPTION,
     CONF_DEBUG,
+    CONF_VACATION_MODE_ENTITY,
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
     CONF_SYSTEM_COST,
@@ -1260,6 +1261,7 @@ class EmsDpSensor(SensorEntity):
         self._last_calc_pv_tomorrow: float | None = None
         self._calc_duration: float | None = None
         self._reactive_debounce_time: datetime | None = None
+        self._vacation_mode: bool = False
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -1294,6 +1296,7 @@ class EmsDpSensor(SensorEntity):
             "last_calculation": self._last_calc_time.isoformat() if self._last_calc_time else None,
             "calculation_duration": self._calc_duration,
             "overrides": storage.get_overrides(),
+            "vacation_mode": self._vacation_mode,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -1335,6 +1338,9 @@ class EmsDpSensor(SensorEntity):
 
         # Listen for tariff, consumption and forecast changes
         generic_listeners = []
+        vacation_entity_id = options.get(CONF_VACATION_MODE_ENTITY, config.get(CONF_VACATION_MODE_ENTITY))
+        if vacation_entity_id:
+            generic_listeners.append(vacation_entity_id)
         if price_buy_sensor_id:
             generic_listeners.append(price_buy_sensor_id)
         if price_sell_sensor_id:
@@ -1621,9 +1627,54 @@ class EmsDpSensor(SensorEntity):
 
             consumption_today = [fallback_consumption] * 24
             consumption_tomorrow = [fallback_consumption] * 24
-            load_state = self.hass.states.get("sensor.load_consumption")
+            boiler_today = [0.0] * 24
+            boiler_tomorrow = [0.0] * 24
+
+            # Шаг 2 Плана А: Сбор фактически запланированного потребления бойлера из sensor.boiler_dp
+            planned_boiler_today = [0.0] * 24
+            planned_boiler_tomorrow = [0.0] * 24
+            boiler_dp_state = self.hass.states.get("sensor.boiler_dp")
+            ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: boiler_dp_state found=%s state=%s", boiler_dp_state is not None, boiler_dp_state.state if boiler_dp_state else "None")
+            if boiler_dp_state and boiler_dp_state.state not in (None, "unknown", "unavailable"):
+                boiler_schedule = boiler_dp_state.attributes.get("schedule", []) or []
+                ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: boiler_schedule length=%d", len(boiler_schedule))
+                now = dt_util.now()
+                today_str = now.strftime("%Y-%m-%d")
+                tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+                for slot in boiler_schedule:
+                    slot_date = slot.get("date")
+                    slot_hour = slot.get("hour")
+                    if slot_date and slot_hour is not None:
+                        try:
+                            slot_hour = int(slot_hour)
+                        except (ValueError, TypeError):
+                            continue
+                        if 0 <= slot_hour < 24:
+                            mode = slot.get("mode", "IDLE")
+                            try:
+                                energy = float(slot.get("energy", 0.0) or 0.0)
+                            except (ValueError, TypeError):
+                                energy = 0.0
+                            
+                            planned_kwh = 0.0
+                            if mode in ("ELEC", "ELEC_PUMP"):
+                                planned_kwh = energy
+                            elif mode in ("PUMP_ONLY", "GAS_PUMP"):
+                                planned_kwh = 0.1
+                            
+                            if slot_date == today_str:
+                                planned_boiler_today[slot_hour] = planned_kwh
+                            elif slot_date == tomorrow_str:
+                                planned_boiler_tomorrow[slot_hour] = planned_kwh
+                ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: planned_boiler_today sum=%.2fkWh, planned_boiler_tomorrow sum=%.2fkWh", sum(planned_boiler_today), sum(planned_boiler_tomorrow))
+
+            from homeassistant.helpers import entity_registry as _er_mod
+            _load_registry = _er_mod.async_get(self.hass)
+            _load_entity_id = _load_registry.async_get_entity_id("sensor", DOMAIN, f"{self._entry_id}_load_consumption") or "sensor.load_consumption"
+            load_state = self.hass.states.get(_load_entity_id)
+            ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: load_consumption entity=%s found=%s", _load_entity_id, load_state is not None)
             if load_state:
-                consumption_today = load_state.attributes.get("average_today", [fallback_consumption] * 24)
+                raw_today = load_state.attributes.get("average_today", [fallback_consumption] * 24)
                 now = dt_util.now()
                 tomorrow_weekday = (now + timedelta(days=1)).weekday()
                 day_keys = [
@@ -1632,7 +1683,64 @@ class EmsDpSensor(SensorEntity):
                     "average_sunday",
                 ]
                 tomorrow_key = day_keys[tomorrow_weekday]
-                consumption_tomorrow = load_state.attributes.get(tomorrow_key, [fallback_consumption] * 24)
+                raw_tomorrow = load_state.attributes.get(tomorrow_key, [fallback_consumption] * 24)
+
+                boiler_today = load_state.attributes.get("boiler_average_today", [0.0] * 24)
+                boiler_tomorrow = load_state.attributes.get(f"boiler_{tomorrow_key}", [0.0] * 24)
+
+            vacation_entity_id = options.get(CONF_VACATION_MODE_ENTITY) or config.get(CONF_VACATION_MODE_ENTITY)
+            vacation_mode = False
+            if vacation_entity_id:
+                _vac_state = self.hass.states.get(vacation_entity_id)
+                if _vac_state is not None:
+                    vacation_mode = (_vac_state.state == "on")
+            self._vacation_mode = vacation_mode
+
+            if vacation_mode:
+                if len(raw_today) == 24 and len(boiler_today) == 24:
+                    consumption_today = [max(0.0, float(c) - float(b)) for c, b in zip(raw_today, boiler_today)]
+                else:
+                    consumption_today = raw_today
+
+                if len(raw_tomorrow) == 24 and len(boiler_tomorrow) == 24:
+                    consumption_tomorrow = [max(0.0, float(c) - float(b)) for c, b in zip(raw_tomorrow, boiler_tomorrow)]
+                else:
+                    consumption_tomorrow = raw_tomorrow
+                
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.INFO,
+                    "EMS DP: Vacation mode is ENABLED. Net house load used (boiler average subtracted: sum_today=%.2f, sum_tomorrow=%.2f)",
+                    sum(boiler_today),
+                    sum(boiler_tomorrow)
+                )
+            else:
+                if len(raw_today) == 24 and len(boiler_today) == 24:
+                    consumption_today = raw_today
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.DEBUG,
+                        "EMS DP: Using total average load profile today (sum: %.2fkWh, boiler average portion: %.2fkWh)",
+                        sum(raw_today),
+                        sum(boiler_today)
+                    )
+                else:
+                    consumption_today = raw_today
+
+                if len(raw_tomorrow) == 24 and len(boiler_tomorrow) == 24:
+                    consumption_tomorrow = raw_tomorrow
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.DEBUG,
+                        "EMS DP: Using total average load profile tomorrow (sum: %.2fkWh, boiler average portion: %.2fkWh)",
+                        sum(raw_tomorrow),
+                        sum(boiler_tomorrow)
+                    )
+                else:
+                    consumption_tomorrow = raw_tomorrow
 
             # Sanitize lists with safe_float_list
             buy_prices_today = safe_float_list(buy_prices_today, 0.0)
@@ -1668,6 +1776,8 @@ class EmsDpSensor(SensorEntity):
                 consumption_tomorrow,
                 fallback_consumption,
                 overrides,
+                boiler_today,
+                boiler_tomorrow,
             )
 
             self._state = result.get("current_action", "idle")
@@ -1732,9 +1842,16 @@ class EmsDpSensor(SensorEntity):
         consumption_tomorrow: list[float],
         fallback_consumption: float,
         overrides: dict[str, dict[str, str]],
+        planned_boiler_today: list[float] = None,
+        planned_boiler_tomorrow: list[float] = None,
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
         from .dp_engine import run_unified_dp, DPConfig
+
+        if planned_boiler_today is None:
+            planned_boiler_today = [0.0] * 24
+        if planned_boiler_tomorrow is None:
+            planned_boiler_tomorrow = [0.0] * 24
 
         now = dt_util.now()
         current_hour = now.hour
@@ -1757,6 +1874,7 @@ class EmsDpSensor(SensorEntity):
                 "sell_price": sell_prices_today[h] if h < len(sell_prices_today) else 0.0,
                 "pv_kwh": pv_today[h] if h < len(pv_today) else 0.0,
                 "consumption_kwh": consumption_today[h] if h < len(consumption_today) else fallback_consumption,
+                "planned_boiler_kwh": float(planned_boiler_today[h]) if (h < len(planned_boiler_today) and planned_boiler_today[h] is not None) else 0.0,
                 "override": override,
             })
         # Tomorrow
@@ -1771,6 +1889,7 @@ class EmsDpSensor(SensorEntity):
                     "sell_price": sell_prices_tomorrow[h] if h < len(sell_prices_tomorrow) else 0.0,
                     "pv_kwh": pv_tomorrow[h] if h < len(pv_tomorrow) else 0.0,
                     "consumption_kwh": consumption_tomorrow[h] if h < len(consumption_tomorrow) else fallback_consumption,
+                    "planned_boiler_kwh": float(planned_boiler_tomorrow[h]) if (h < len(planned_boiler_tomorrow) and planned_boiler_tomorrow[h] is not None) else 0.0,
                     "override": override,
                 })
 
@@ -3392,6 +3511,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "gas_heating_delayed": gas_heating_delayed,
             "heating_start_hour": self._heating_start_hour,
             "heating_end_hour": self._heating_end_hour,
+            "vacation_mode": self._vacation_mode,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -3434,6 +3554,9 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "number.ems_boiler_heating_start_hour",
             "number.ems_boiler_heating_end_hour",
         ]
+        vacation_entity_id = options.get(CONF_VACATION_MODE_ENTITY, config.get(CONF_VACATION_MODE_ENTITY))
+        if vacation_entity_id:
+            listeners.append(vacation_entity_id)
         if self._gas_sensor:
             listeners.append(self._gas_sensor)
         if self._elec_sensor:
@@ -3517,6 +3640,67 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         else:
             t_curr = 20.0  # Safe default if no sensor is available/configured
 
+        vacation_entity_id = options.get(CONF_VACATION_MODE_ENTITY) or config.get(CONF_VACATION_MODE_ENTITY)
+        vacation_mode = False
+        if vacation_entity_id:
+            _vac_state = self.hass.states.get(vacation_entity_id)
+            if _vac_state is not None:
+                vacation_mode = (_vac_state.state == "on")
+        self._vacation_mode = vacation_mode
+
+        if vacation_mode:
+            # Populate vacation schedule with IDLE slots
+            schedule_list = []
+            for h in range(now.hour, 24):
+                schedule_list.append({
+                    "date": now.strftime("%Y-%m-%d"),
+                    "hour": h,
+                    "mode": "IDLE",
+                    "temp_start": round(t_curr, 2),
+                    "temp_end": round(t_curr, 2),
+                    "cost": 0.0,
+                    "energy": 0.0,
+                    "bypass": False,
+                })
+            # Tomorrow slots if available
+            dp_state = self.hass.states.get("sensor.dp")
+            dp_schedule = dp_state.attributes.get("schedule", []) if dp_state else []
+            tomorrow_str = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            for slot in dp_schedule:
+                if slot.get("date") == tomorrow_str:
+                    schedule_list.append({
+                        "date": tomorrow_str,
+                        "hour": slot.get("hour"),
+                        "mode": "IDLE",
+                        "temp_start": round(t_curr, 2),
+                        "temp_end": round(t_curr, 2),
+                        "cost": 0.0,
+                        "energy": 0.0,
+                        "bypass": False,
+                    })
+            
+            self._state = "VACATION"
+            self._schedule = schedule_list
+            self._stats = {"mode": "vacation"}
+            self._recommended_bypass = "OFF"
+            self._heating_start_hour = int(self.hass.states.get("number.ems_boiler_heating_start_hour").state if self.hass.states.get("number.ems_boiler_heating_start_hour") else 0)
+            self._heating_end_hour = int(self.hass.states.get("number.ems_boiler_heating_end_hour").state if self.hass.states.get("number.ems_boiler_heating_end_hour") else 23)
+            self._t_start = round(t_curr, 2)
+            self._t_gas = round(t_gas, 2) if 't_gas' in locals() else 0.0
+            self._t_elec = round(t_elec, 2) if 't_elec' in locals() else 0.0
+            self._t_min = float(options.get("thermostat_set_temp", config.get("thermostat_set_temp", 45.0)))
+            self._t_max_elec = float(options.get("elec_boiler_max_temp", config.get("elec_boiler_max_temp", 70.0)))
+            self._t_max_gas = float(options.get("gas_boiler_max_temp", config.get("gas_boiler_max_temp", 50.0)))
+            self._vol_elec = vol_elec
+            self._vol_gas = vol_gas
+            self._gas_cost_m3 = float(options.get("gas_cost_m3", config.get("gas_cost_m3", 0.0)))
+            self._last_calc_time = now
+            self._last_calc_temp = t_curr
+            self._calc_duration = 0.0
+            self.async_write_ha_state()
+            ems_log(self.hass, _LOGGER, logging.INFO, "EMS Boiler DP: Vacation mode is ENABLED. Boiler schedule set to IDLE.")
+            return
+
         # 2. Check debounce conditions
         if not force and self._last_calc_time is not None and self._last_calc_temp is not None:
             time_delta = (now - self._last_calc_time).total_seconds()
@@ -3533,6 +3717,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             return
 
         dp_schedule = dp_state.attributes.get("schedule", [])
+        ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS Boiler DP: retrieved dp_schedule length=%d", len(dp_schedule))
         if not dp_schedule:
             ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.dp has no schedule attribute.")
             self._state = "IDLE"
@@ -3551,9 +3736,29 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 "expected_soc": float(slot.get("expected_soc", 50.0)),
                 "pv_kwh": float(slot.get("pv_kwh", 0.0)),
                 "consumption_kwh": float(slot.get("consumption_kwh", 0.0)),
+                "planned_boiler_kwh": float(slot.get("planned_boiler_kwh", 0.0)),
                 "action": slot.get("action", "idle"),
                 "energy_kwh": float(slot.get("energy_kwh", 0.0)),
             })
+        ems_log(
+            self.hass,
+            _LOGGER,
+            logging.DEBUG,
+            "EMS Boiler DP: first 3 slots for run_boiler_dp: %s",
+            ", ".join([f"H{s['hour']} Cons={s['consumption_kwh']} Boiler={s['planned_boiler_kwh']}" for s in slots[:3]])
+        )
+
+        try:
+            import json as _json_mod
+            with open("/config/ems_debug_slots.json", "w", encoding="utf-8") as f:
+                _json_mod.dump({
+                    "timestamp": now.isoformat(),
+                    "boiler_dp_state": self._state,
+                    "boiler_dp_schedule": self._schedule,
+                    "slots_passed": slots
+                }, f, indent=2)
+        except Exception as e:
+            _LOGGER.warning("EMS Boiler DP: failed to write debug dump: %s", e)
 
         # 4. Retrieve calibration coefficients from sensor.boiler_calibration
         cal_state = self.hass.states.get("sensor.boiler_calibration")
@@ -3617,6 +3822,14 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._state = current_action
             self._schedule = schedule_list
             self._stats = stats_dict
+            ems_log(
+                self.hass,
+                _LOGGER,
+                logging.DEBUG,
+                "EMS Boiler DP: run_boiler_dp returned action=%s schedule_len=%d",
+                current_action,
+                len(schedule_list)
+            )
             if schedule_list:
                 first_bypass = schedule_list[0].get("bypass", False)
                 self._recommended_bypass = "ON" if first_bypass else "OFF"
