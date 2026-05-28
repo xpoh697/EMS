@@ -3743,7 +3743,12 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             
             self._state = "VACATION"
             self._schedule = schedule_list
-            self._stats = {"mode": "vacation"}
+            self._stats = {
+                "mode": "vacation",
+                "total_pv_budget_today": 0.0,
+                "boiler_used_today": 0.0,
+                "remaining_pv_today": 0.0,
+            }
             self._recommended_bypass = "OFF"
             self._heating_start_hour = int(self.hass.states.get("number.ems_boiler_heating_start_hour").state if self.hass.states.get("number.ems_boiler_heating_start_hour") else 0)
             self._heating_end_hour = int(self.hass.states.get("number.ems_boiler_heating_end_hour").state if self.hass.states.get("number.ems_boiler_heating_end_hour") else 23)
@@ -3862,6 +3867,38 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             heating_start_hour = int(round(getattr(storage, "boiler_heating_start_hour", 0.0)))
             heating_end_hour = int(round(getattr(storage, "boiler_heating_end_hour", 23.0)))
 
+            # Parse battery capacity
+            capacity = 5.12
+            bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+            if bat_capacity_entity_id:
+                cap_state = self.hass.states.get(bat_capacity_entity_id)
+                if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
+                    try:
+                        capacity = float(cap_state.state)
+                        unit = cap_state.attributes.get("unit_of_measurement")
+                        if unit == "Wh" or capacity > 100.0:
+                            capacity = capacity / 1000.0
+                    except (ValueError, TypeError):
+                        pass
+
+            # Calculate actual boiler consumption today
+            actual_boiler_today = 0.0
+            try:
+                from homeassistant.helpers import entity_registry as _er_mod
+                _load_registry = _er_mod.async_get(self.hass)
+                _load_entity_id = _load_registry.async_get_entity_id(
+                    "sensor", DOMAIN, f"{self._entry_id}_load_consumption"
+                ) or "sensor.load_consumption"
+                load_state = self.hass.states.get(_load_entity_id)
+                if load_state:
+                    boiler_today = load_state.attributes.get("boiler_today")
+                    if isinstance(boiler_today, list):
+                        actual_boiler_today = sum(
+                            float(x) for x in boiler_today if x is not None
+                        )
+            except Exception as ex:
+                _LOGGER.warning("EMS Boiler DP: failed to calculate actual boiler today: %s", ex)
+
             from .boiler_dp_engine import run_boiler_dp
             current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(
                 run_boiler_dp,
@@ -3879,6 +3916,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 0.001,  # temp_reward
                 heating_start_hour,
                 heating_end_hour,
+                capacity,
+                actual_boiler_today,
             )
 
             self._state = current_action

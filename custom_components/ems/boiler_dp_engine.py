@@ -89,6 +89,8 @@ def run_boiler_dp(
     temp_reward: float = 0.001,
     heating_start_hour: int = 0,
     heating_end_hour: int = 23,
+    bat_capacity: float = 5.12,
+    actual_boiler_today: float = 0.0,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run Dynamic Programming strategy optimizer for hot water boiler.
 
@@ -141,6 +143,17 @@ def run_boiler_dp(
     # 2. Curtailed PV Energy Budget Allocation (Arbitrage)
     today_date = slots[0].get("date") if slots else None
     
+    # 2.1 Calculate historical averages budget
+    boiler_average_budget_today = 0.0
+    boiler_average_budget_tomorrow = 0.0
+    for slot in slots:
+        planned_boiler = float(slot.get("planned_boiler_kwh", 0.0))
+        if slot.get("date") == today_date:
+            boiler_average_budget_today += planned_boiler
+        else:
+            boiler_average_budget_tomorrow += planned_boiler
+
+    # 2.2 Calculate wasted/curtailed PV
     curtailed_pv_today = 0.0
     curtailed_pv_tomorrow = 0.0
     for slot in slots:
@@ -149,7 +162,8 @@ def run_boiler_dp(
         curtail_active = mode_config.curtail_pv if mode_config else False
         if curtail_active:
             pv_kwh = float(slot.get("pv_kwh", 0.0))
-            consumption_kwh = float(slot.get("consumption_kwh", 0.0))
+            planned_boiler = float(slot.get("planned_boiler_kwh", 0.0))
+            consumption_kwh = max(0.0, float(slot.get("consumption_kwh", 0.0)) - planned_boiler)
             action = slot.get("action", "idle")
             battery_charge = float(slot.get("energy_kwh", 0.0)) if action in ("pv_charge", "grid_charge") else 0.0
             wasted = max(0.0, pv_kwh - consumption_kwh - battery_charge)
@@ -158,11 +172,28 @@ def run_boiler_dp(
             else:
                 curtailed_pv_tomorrow += wasted
 
+    # 2.3 Sum 1 and 2 to get total budget (with a 10% safety margin)
+    total_pv_budget_today = (boiler_average_budget_today + curtailed_pv_today) * 0.9
+    total_pv_budget_tomorrow = (boiler_average_budget_tomorrow + curtailed_pv_tomorrow) * 0.9
+
+    # 2.4 Subtract battery charging deficit if battery doesn't reach 100% SOC before evening
+    max_soc_today = max([float(slot.get("expected_soc", 50.0)) for slot in slots if slot.get("date") == today_date], default=100.0)
+    if max_soc_today < 98.0:
+        soc_deficit = 100.0 - max_soc_today
+        energy_deficit = bat_capacity * (soc_deficit / 100.0)
+        total_pv_budget_today = max(0.0, total_pv_budget_today - energy_deficit)
+
+    max_soc_tomorrow = max([float(slot.get("expected_soc", 50.0)) for slot in slots if slot.get("date") != today_date], default=100.0)
+    if max_soc_tomorrow < 98.0:
+        soc_deficit = 100.0 - max_soc_tomorrow
+        energy_deficit = bat_capacity * (soc_deficit / 100.0)
+        total_pv_budget_tomorrow = max(0.0, total_pv_budget_tomorrow - energy_deficit)
+
     allocated_free_slots = set()
     boiler_hourly_draw = cal_data.get("elec_with_pump", {}).get("heater_power_kw") or 2.5
 
     # Распределение лимита для сегодняшнего дня
-    if curtailed_pv_today >= 0.5:
+    if total_pv_budget_today >= 0.5:
         eligible_today = []
         for idx, slot in enumerate(slots):
             if slot.get("date") != today_date:
@@ -188,7 +219,7 @@ def run_boiler_dp(
                 item[0]
             )
         )
-        rem_today = curtailed_pv_today
+        rem_today = total_pv_budget_today
         for idx, slot in eligible_today:
             if rem_today <= 0.0:
                 break
@@ -196,7 +227,7 @@ def run_boiler_dp(
             rem_today -= boiler_hourly_draw
 
     # Распределение лимита для завтрашнего дня
-    if curtailed_pv_tomorrow >= 0.5:
+    if total_pv_budget_tomorrow >= 0.5:
         eligible_tomorrow = []
         for idx, slot in enumerate(slots):
             if slot.get("date") == today_date:
@@ -222,7 +253,7 @@ def run_boiler_dp(
                 item[0]
             )
         )
-        rem_tomorrow = curtailed_pv_tomorrow
+        rem_tomorrow = total_pv_budget_tomorrow
         for idx, slot in eligible_tomorrow:
             if rem_tomorrow <= 0.0:
                 break
@@ -231,13 +262,13 @@ def run_boiler_dp(
 
     # Рассчитываем раздельные динамические лимиты температуры
     dynamic_t_max_elec_today = t_max_elec
-    if curtailed_pv_today > 0.0 and eff_elec_pump > 0.0:
-        budget_rise = curtailed_pv_today * eff_elec_pump
+    if total_pv_budget_today > 0.0 and eff_elec_pump > 0.0:
+        budget_rise = total_pv_budget_today * eff_elec_pump
         dynamic_t_max_elec_today = min(t_max_elec, max(t_min, t_min + budget_rise))
 
     dynamic_t_max_elec_tomorrow = t_max_elec
-    if curtailed_pv_tomorrow > 0.0 and eff_elec_pump > 0.0:
-        budget_rise = curtailed_pv_tomorrow * eff_elec_pump
+    if total_pv_budget_tomorrow > 0.0 and eff_elec_pump > 0.0:
+        budget_rise = total_pv_budget_tomorrow * eff_elec_pump
         dynamic_t_max_elec_tomorrow = min(t_max_elec, max(t_min, t_min + budget_rise))
 
     # Run DP with relaxed constraint fallback
@@ -735,7 +766,9 @@ def run_boiler_dp(
         "curtailed_pv_budget": round(curtailed_pv_today + curtailed_pv_tomorrow, 2),
         "curtailed_pv_today": round(curtailed_pv_today, 2),
         "curtailed_pv_tomorrow": round(curtailed_pv_tomorrow, 2),
-        "remaining_pv_today": round(remaining_pv_today, 2),
+        "total_pv_budget_today": round(total_pv_budget_today, 2),
+        "boiler_used_today": round(actual_boiler_today, 2),
+        "remaining_pv_today": round(max(0.0, total_pv_budget_today - actual_boiler_today), 2),
     }
 
     current_action = best_path[0]["mode"] if best_path else "IDLE"

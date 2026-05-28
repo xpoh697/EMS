@@ -159,6 +159,10 @@ def run_unified_dp(
             consumption_kwh = slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0)
             pv_surplus = max(0.0, pv_kwh - consumption_kwh)
             pv_deficit = max(0.0, consumption_kwh - pv_kwh)
+            # When sell_price is below min_sell_price the mode mapper will choose STOP_SALE
+            # (no PV export). Use effective_sell_price=0 so the DP doesn't credit
+            # phantom export revenue and correctly prefers PV charging instead.
+            effective_sell_price = sell_price if sell_price >= config.min_sell_price else 0.0
 
             for state_idx, current_value in enumerate(dp_n[slot_idx - 1]):
                 if current_value == neg_inf:
@@ -178,7 +182,7 @@ def run_unified_dp(
                     state_updated = True
 
                 # === SOL ===
-                _update_n(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
+                _update_n(state_idx, effective_sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
 
                 # === DIS ===
                 if not config.disable_discharge and sell_price >= config.min_discharge_price and sell_price > 0:
@@ -205,7 +209,7 @@ def run_unified_dp(
                     for ci in range(1, int(max_pvc / energy_step) + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                        reward = sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
+                        reward = effective_sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
                         reward += 1e-6 * chg
                         _update_n(nsi, reward, ACT_PV_CHARGE, chg)
 
@@ -234,7 +238,7 @@ def run_unified_dp(
                     _update_n(state_idx, -buy_price * consumption_kwh, ACT_PAID_IMPORT, 0.0)
 
                 if not state_updated:
-                    _update_n(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
+                    _update_n(state_idx, effective_sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
 
         dp_normal = dp_n
         prev_state_normal = prev_s_n
@@ -307,6 +311,7 @@ def run_unified_dp(
         consumption_kwh = slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0)
         pv_surplus = max(0.0, pv_kwh - consumption_kwh)
         pv_deficit = max(0.0, consumption_kwh - pv_kwh)
+        effective_sell_price = sell_price if sell_price >= config.min_sell_price else 0.0
         override = slot.get("override")
         # Parse override: may be "action" or "action:target_soc"
         override_action = None
@@ -402,7 +407,7 @@ def run_unified_dp(
                     elif mode_config.discharge_to_house and pv_deficit >= energy_step and usable_energy >= energy_step:
                         is_sol_allowed = False
                 if is_sol_allowed:
-                    _update(state_idx, sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
+                    _update(state_idx, effective_sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
 
             # === DIS: discharge battery to grid ===
             if ((not override_action and (not config.disable_discharge and sell_price >= config.min_discharge_price and sell_price > 0)) or (mode_config and mode_config.discharge_to_grid)) and (target_nsi is None or target_nsi < state_idx):
@@ -451,7 +456,7 @@ def run_unified_dp(
                     for ci in range(1, int(max_pvc / energy_step) + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                        reward = sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
+                        reward = effective_sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
                         reward += 1e-6 * chg
                         _update(nsi, reward, ACT_PV_CHARGE, chg)
 

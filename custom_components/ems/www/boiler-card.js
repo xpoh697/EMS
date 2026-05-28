@@ -1001,14 +1001,32 @@ class BoilerCard extends HTMLElement {
     this._statusContent.appendChild(houseFlowRow);
     this._houseFlowVal = houseFlowRow.querySelector("#house-flow-val");
 
-    // PV Limit Today row
-    const pvLimitTodayRow = document.createElement("div");
-    pvLimitTodayRow.className = "status-info-row hidden";
-    pvLimitTodayRow.innerHTML = `
-      <span class="status-info-label">Свободный PV-лимит сегодня</span>
-      <span class="status-info-value" id="pv-limit-today-val">–</span>`;
-    this._statusContent.appendChild(pvLimitTodayRow);
-    this._pvLimitTodayVal = pvLimitTodayRow.querySelector("#pv-limit-today-val");
+    // PV Budget Today row
+    const pvBudgetTodayRow = document.createElement("div");
+    pvBudgetTodayRow.className = "status-info-row hidden";
+    pvBudgetTodayRow.innerHTML = `
+      <span class="status-info-label">PV-бюджет сегодня</span>
+      <span class="status-info-value" id="pv-budget-today-val">–</span>`;
+    this._statusContent.appendChild(pvBudgetTodayRow);
+    this._pvBudgetTodayVal = pvBudgetTodayRow.querySelector("#pv-budget-today-val");
+
+    // PV Used Today row
+    const pvUsedTodayRow = document.createElement("div");
+    pvUsedTodayRow.className = "status-info-row hidden";
+    pvUsedTodayRow.innerHTML = `
+      <span class="status-info-label">Использовано сегодня</span>
+      <span class="status-info-value" id="pv-used-today-val">–</span>`;
+    this._statusContent.appendChild(pvUsedTodayRow);
+    this._pvUsedTodayVal = pvUsedTodayRow.querySelector("#pv-used-today-val");
+
+    // PV Remaining Today row
+    const pvRemainingTodayRow = document.createElement("div");
+    pvRemainingTodayRow.className = "status-info-row hidden";
+    pvRemainingTodayRow.innerHTML = `
+      <span class="status-info-label">Осталось сегодня</span>
+      <span class="status-info-value" id="pv-remaining-today-val">–</span>`;
+    this._statusContent.appendChild(pvRemainingTodayRow);
+    this._pvRemainingTodayVal = pvRemainingTodayRow.querySelector("#pv-remaining-today-val");
 
     // PV Limit Tomorrow row
     const pvLimitTomorrowRow = document.createElement("div");
@@ -1539,21 +1557,38 @@ class BoilerCard extends HTMLElement {
     }
 
     // ── Update PV Limits ──────────────────────────────────────────────────
-    const curtailedToday = dpS?.attributes?.stats?.curtailed_pv_today;
+    const budgetToday = dpS?.attributes?.stats?.total_pv_budget_today;
+    const usedToday = dpS?.attributes?.stats?.boiler_used_today;
     const remainingToday = dpS?.attributes?.stats?.remaining_pv_today;
     const curtailedTomorrow = dpS?.attributes?.stats?.curtailed_pv_tomorrow;
 
-    if (this._pvLimitTodayVal) {
-      if (curtailedToday !== undefined && curtailedToday !== null && curtailedToday > 0.0) {
-        let text = `${curtailedToday.toFixed(1)} кВтч`;
-        if (remainingToday !== undefined && remainingToday !== null) {
-          text += ` (осталось: ${remainingToday.toFixed(1)} кВтч)`;
-        }
-        this._pvLimitTodayVal.textContent = text;
-        this._pvLimitTodayVal.parentElement.classList.remove("hidden");
+    if (this._pvBudgetTodayVal) {
+      if (budgetToday !== undefined && budgetToday !== null && budgetToday > 0.0) {
+        this._pvBudgetTodayVal.textContent = `${budgetToday.toFixed(1)} кВтч`;
+        this._pvBudgetTodayVal.parentElement.classList.remove("hidden");
       } else {
-        this._pvLimitTodayVal.textContent = "–";
-        this._pvLimitTodayVal.parentElement.classList.add("hidden");
+        this._pvBudgetTodayVal.textContent = "–";
+        this._pvBudgetTodayVal.parentElement.classList.add("hidden");
+      }
+    }
+
+    if (this._pvUsedTodayVal) {
+      if (budgetToday !== undefined && budgetToday !== null && budgetToday > 0.0 && usedToday !== undefined && usedToday !== null) {
+        this._pvUsedTodayVal.textContent = `${usedToday.toFixed(1)} кВтч`;
+        this._pvUsedTodayVal.parentElement.classList.remove("hidden");
+      } else {
+        this._pvUsedTodayVal.textContent = "–";
+        this._pvUsedTodayVal.parentElement.classList.add("hidden");
+      }
+    }
+
+    if (this._pvRemainingTodayVal) {
+      if (budgetToday !== undefined && budgetToday !== null && budgetToday > 0.0 && remainingToday !== undefined && remainingToday !== null) {
+        this._pvRemainingTodayVal.textContent = `${remainingToday.toFixed(1)} кВтч`;
+        this._pvRemainingTodayVal.parentElement.classList.remove("hidden");
+      } else {
+        this._pvRemainingTodayVal.textContent = "–";
+        this._pvRemainingTodayVal.parentElement.classList.add("hidden");
       }
     }
 
