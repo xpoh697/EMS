@@ -8862,3 +8862,62 @@ avg_load = self._avg_buffer(self._load_buffer)
 Исправлены критические ошибки реализации vacation mode:
 1. config_flow.py - восстановлен корректный синтаксис, добавлено отдельное поле vacation_mode_entity как ol.Optional + EntitySelector(domain=["input_boolean", "switch"])
 2. sensor.py - исправлена логика определения vacation mode в EmsDpSensor и EmsBoilerDpSensor: теперь читается реальное состояние entity через hass.states.get() с защитой от None
+
+## [2026-05-28 12:53] Задача: Вывести в атрибуты DP средний расчет бойлера и запланированную энергию на сегодня.
+
+### Archi
+Для решения проблемы с неверным расчетом бюджета бойлера добавим в атрибуты основного сенсора DP (sensor.dp):
+1. oiler_average_budget_today: сколько энергии заложено на бойлер в историческом/среднем профиле нагрузки на сегодня.
+2. oiler_average_budget_tomorrow: сколько заложено на бойлер на завтра.
+3. oiler_expected_consumption_today: сколько энергии (электричество + газ) по текущему расписанию планирует потратить бойлер сегодня.
+4. oiler_expected_consumption_tomorrow: сколько планирует завтра.
+
+В sensor.py во время расчета sync_update_strategy:
+- oiler_average_budget_today вычисляется как сумма oiler_today (после санитизации safe_float_list).
+- oiler_expected_consumption_today вычисляется как сумма всех energy из слотов расписания sensor.boiler_dp.
+
+### Skeptic
+Три проблемы в предложенном решении:
+1. **Неэффективный обход списков**: расписание oiler_schedule обходилось бы по кругу отдельно для подсчета электричества и для общего расхода. Нужно объединить в один цикл для оптимизации CPU.
+2. **Отсутствие валидации типов**: значения energy в слотах расписания могут быть некорректными (строки, None). Нужен безопасный кастинг через 	ry-except с дефолтным  .0.
+3. **Проблема синхронизации**: при изменении расписания бойлера основной сенсор sensor.dp не узнает об этом сразу, так как sensor.boiler_dp отсутствует в generic_listeners подписчиков EmsDpSensor.
+
+### Archi (итерация 2)
+Критика принята:
+- Добавим "sensor.boiler_dp" в список отслеживаемых сущностей generic_listeners внутри sync_added_to_hass. Это гарантирует мгновенное обновление атрибутов sensor.dp при обновлении планов бойлера.
+- Подсчет planned_boiler_today, planned_boiler_tomorrow, oiler_expected_consumption_today и oiler_expected_consumption_tomorrow объединяем в один проход по циклу с явной конвертацией типов и обработкой исключений.
+
+### Skeptic (итерация 2)
+Все замечания устранены. Логика безопасна и оптимальна по производительности. Консенсус достигнут.
+
+### Заключение
+Реализуем:
+1. В EmsDpSensor.__init__ добавим инициализацию атрибутов:
+   - self._boiler_average_budget_today = 0.0
+   - self._boiler_average_budget_tomorrow = 0.0
+   - self._boiler_expected_consumption_today = 0.0
+   - self._boiler_expected_consumption_tomorrow = 0.0
+2. В extra_state_attributes сенсора EmsDpSensor выведем эти атрибуты:
+   - "boiler_average_budget_today"
+   - "boiler_average_budget_tomorrow"
+   - "boiler_expected_consumption_today"
+   - "boiler_expected_consumption_tomorrow"
+3. В sync_added_to_hass добавим "sensor.boiler_dp" в generic_listeners.
+4. В sync_update_strategy выполним расчет за один цикл обхода.
+
+## [2026-05-28 12:56] Задача: Уточнение по бюджету бойлера из истории.
+
+### Archi
+Пользователь уточнил, что под «бюджетом из истории» понимается профиль/бюджет бойлера, подтянутый на сегодня. Чтобы исключить двусмысленность и дать максимальную видимость, выведем в атрибуты sensor.dp как суммарное значение энергии (в кВтч), так и полный почасовой массив (24 значения) для сегодня и завтра.
+
+Добавим атрибуты:
+- oiler_average_budget_today: суммарный исторический бюджет на сегодня (кВтч).
+- oiler_average_profile_today: почасовой исторический профиль бюджета бойлера на сегодня (массив из 24 чисел).
+- oiler_average_budget_tomorrow: суммарный исторический бюджет на завтра (кВтч).
+- oiler_average_profile_tomorrow: почасовой исторический профиль бюджета бойлера на завтра (массив из 24 чисел).
+
+### Skeptic
+Критического влияния на производительность вывод массивов не окажет, так как они уже посчитаны и находятся в памяти. Валидация через safe_float_list сохраняется. Согласен.
+
+### Заключение
+Выводим как суммарный бюджет, так и почасовые профили из истории.

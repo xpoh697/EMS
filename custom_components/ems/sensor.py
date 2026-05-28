@@ -1262,6 +1262,12 @@ class EmsDpSensor(SensorEntity):
         self._calc_duration: float | None = None
         self._reactive_debounce_time: datetime | None = None
         self._vacation_mode: bool = False
+        self._boiler_average_budget_today: float = 0.0
+        self._boiler_average_profile_today: list[float] = [0.0] * 24
+        self._boiler_average_budget_tomorrow: float = 0.0
+        self._boiler_average_profile_tomorrow: list[float] = [0.0] * 24
+        self._boiler_expected_consumption_today: float = 0.0
+        self._boiler_expected_consumption_tomorrow: float = 0.0
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -1297,6 +1303,12 @@ class EmsDpSensor(SensorEntity):
             "calculation_duration": self._calc_duration,
             "overrides": storage.get_overrides(),
             "vacation_mode": self._vacation_mode,
+            "boiler_average_budget_today": self._boiler_average_budget_today,
+            "boiler_average_profile_today": self._boiler_average_profile_today,
+            "boiler_average_budget_tomorrow": self._boiler_average_budget_tomorrow,
+            "boiler_average_profile_tomorrow": self._boiler_average_profile_tomorrow,
+            "boiler_expected_consumption_today": self._boiler_expected_consumption_today,
+            "boiler_expected_consumption_tomorrow": self._boiler_expected_consumption_tomorrow,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -1349,7 +1361,8 @@ class EmsDpSensor(SensorEntity):
             generic_listeners.append(total_load_consumption_id)
         generic_listeners.extend([
             "sensor.pv_forecast_today",
-            "sensor.pv_forecast_tomorrow"
+            "sensor.pv_forecast_tomorrow",
+            "sensor.boiler_dp"
         ])
 
         self.async_on_remove(
@@ -1630,6 +1643,9 @@ class EmsDpSensor(SensorEntity):
             boiler_today = [0.0] * 24
             boiler_tomorrow = [0.0] * 24
 
+            expected_consumption_today = 0.0
+            expected_consumption_tomorrow = 0.0
+
             # Шаг 2 Плана А: Сбор фактически запланированного потребления бойлера из sensor.boiler_dp
             planned_boiler_today = [0.0] * 24
             planned_boiler_tomorrow = [0.0] * 24
@@ -1664,15 +1680,24 @@ class EmsDpSensor(SensorEntity):
                             
                             if slot_date == today_str:
                                 planned_boiler_today[slot_hour] = planned_kwh
+                                expected_consumption_today += energy
                             elif slot_date == tomorrow_str:
                                 planned_boiler_tomorrow[slot_hour] = planned_kwh
+                                expected_consumption_tomorrow += energy
                 ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: planned_boiler_today sum=%.2fkWh, planned_boiler_tomorrow sum=%.2fkWh", sum(planned_boiler_today), sum(planned_boiler_tomorrow))
+
+            self._boiler_expected_consumption_today = expected_consumption_today
+            self._boiler_expected_consumption_tomorrow = expected_consumption_tomorrow
 
             from homeassistant.helpers import entity_registry as _er_mod
             _load_registry = _er_mod.async_get(self.hass)
             _load_entity_id = _load_registry.async_get_entity_id("sensor", DOMAIN, f"{self._entry_id}_load_consumption") or "sensor.load_consumption"
             load_state = self.hass.states.get(_load_entity_id)
             ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: load_consumption entity=%s found=%s", _load_entity_id, load_state is not None)
+            self._boiler_average_budget_today = 0.0
+            self._boiler_average_profile_today = [0.0] * 24
+            self._boiler_average_budget_tomorrow = 0.0
+            self._boiler_average_profile_tomorrow = [0.0] * 24
             if load_state:
                 raw_today = load_state.attributes.get("average_today", [fallback_consumption] * 24)
                 now = dt_util.now()
@@ -1687,6 +1712,13 @@ class EmsDpSensor(SensorEntity):
 
                 boiler_today = load_state.attributes.get("boiler_average_today", [0.0] * 24)
                 boiler_tomorrow = load_state.attributes.get(f"boiler_{tomorrow_key}", [0.0] * 24)
+
+                clean_boiler_today = safe_float_list(boiler_today, 0.0)
+                clean_boiler_tomorrow = safe_float_list(boiler_tomorrow, 0.0)
+                self._boiler_average_profile_today = clean_boiler_today
+                self._boiler_average_budget_today = sum(clean_boiler_today)
+                self._boiler_average_profile_tomorrow = clean_boiler_tomorrow
+                self._boiler_average_budget_tomorrow = sum(clean_boiler_tomorrow)
 
             vacation_entity_id = options.get(CONF_VACATION_MODE_ENTITY) or config.get(CONF_VACATION_MODE_ENTITY)
             vacation_mode = False
