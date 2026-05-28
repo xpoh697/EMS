@@ -262,8 +262,9 @@ def run_boiler_dp(
 
     # Рассчитываем раздельные динамические лимиты температуры
     dynamic_t_max_elec_today = t_max_elec
-    if total_pv_budget_today > 0.0 and eff_elec_pump > 0.0:
-        budget_rise = total_pv_budget_today * eff_elec_pump
+    total_budget_for_limit = total_pv_budget_today + actual_boiler_today
+    if total_budget_for_limit > 0.0 and eff_elec_pump > 0.0:
+        budget_rise = total_budget_for_limit * eff_elec_pump
         dynamic_t_max_elec_today = min(t_max_elec, max(t_min, t_min + budget_rise))
 
     dynamic_t_max_elec_tomorrow = t_max_elec
