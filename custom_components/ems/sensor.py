@@ -1268,6 +1268,8 @@ class EmsDpSensor(SensorEntity):
         self._boiler_average_profile_tomorrow: list[float] = [0.0] * 24
         self._boiler_expected_consumption_today: float = 0.0
         self._boiler_expected_consumption_tomorrow: float = 0.0
+        self._curtailed_pv_today: float = 0.0
+        self._curtailed_pv_tomorrow: float = 0.0
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -1309,6 +1311,8 @@ class EmsDpSensor(SensorEntity):
             "boiler_average_profile_tomorrow": self._boiler_average_profile_tomorrow,
             "boiler_expected_consumption_today": self._boiler_expected_consumption_today,
             "boiler_expected_consumption_tomorrow": self._boiler_expected_consumption_tomorrow,
+            "curtailed_pv_today": self._curtailed_pv_today,
+            "curtailed_pv_tomorrow": self._curtailed_pv_tomorrow,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -1822,6 +1826,8 @@ class EmsDpSensor(SensorEntity):
             self._schedule = result.get("schedule", [])
             self._stats = result.get("stats", {})
             self._error_msg = result.get("error")
+            self._curtailed_pv_today = result.get("curtailed_pv_today", 0.0)
+            self._curtailed_pv_tomorrow = result.get("curtailed_pv_tomorrow", 0.0)
 
             self._last_calc_time = dt_util.now()
             self._last_calc_soc = soc
@@ -1879,11 +1885,15 @@ class EmsDpSensor(SensorEntity):
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
         from .dp_engine import run_unified_dp, DPConfig
+        from .const import INVERTER_MODES
 
         if planned_boiler_today is None:
             planned_boiler_today = [0.0] * 24
         if planned_boiler_tomorrow is None:
             planned_boiler_tomorrow = [0.0] * 24
+
+        sum_curtailed_today = 0.0
+        sum_curtailed_tomorrow = 0.0
 
         now = dt_util.now()
         current_hour = now.hour
@@ -2070,6 +2080,22 @@ class EmsDpSensor(SensorEntity):
                 current_action = action
 
             expected_soc_val = stats.get("expected_trajectory", [])[idx] if idx < len(stats.get("expected_trajectory", [])) else 0.0
+            # Calculate curtailed solar energy
+            mode_config = INVERTER_MODES.get(physical_mode)
+            curtail_active = mode_config.curtail_pv if mode_config else False
+            wasted = 0.0
+            if curtail_active:
+                planned_boiler = float(slot.get("planned_boiler_kwh", 0.0))
+                consumption_net = max(0.0, float(slot.get("consumption_kwh", 0.0)) - planned_boiler)
+                battery_charge = float(energy) if action in ("pv_charge", "grid_charge") else 0.0
+                wasted = max(0.0, float(slot.get("pv_kwh", 0.0)) - consumption_net - battery_charge)
+                wasted = round(wasted, 4)
+
+            if slot["date"] == today_str:
+                sum_curtailed_today += wasted
+            elif slot["date"] == tomorrow_str:
+                sum_curtailed_tomorrow += wasted
+
             schedule.append({
                 "date": slot["date"],
                 "hour": slot["hour"],
@@ -2082,6 +2108,8 @@ class EmsDpSensor(SensorEntity):
                 "mapping_reason": mapping_reason,
                 "energy_kwh": round(energy, 2),
                 "expected_soc": expected_soc_val,
+                "planned_boiler_kwh": slot["planned_boiler_kwh"],
+                "curtailed_pv_kwh": wasted,
             })
 
         return {
@@ -2095,6 +2123,8 @@ class EmsDpSensor(SensorEntity):
             "schedule": schedule,
             "stats": stats,
             "error": None,
+            "curtailed_pv_today": round(sum_curtailed_today, 2),
+            "curtailed_pv_tomorrow": round(sum_curtailed_tomorrow, 2),
         }
 
 
