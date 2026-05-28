@@ -30,6 +30,7 @@ class EmsScheduleStorage:
         self.min_energy_to_discharge: float = 0.0
         self.boiler_heating_start_hour: float = 0.0
         self.boiler_heating_end_hour: float = 23.0
+        self.boiler_auto_temp_limit: float = 60.0
 
     async def async_load(self, entry: ConfigEntry | None = None) -> None:
         """Load data from JSON storage."""
@@ -73,6 +74,7 @@ class EmsScheduleStorage:
             self.min_energy_to_discharge = fallback_min_energy_to_discharge
             self.boiler_heating_start_hour = 0.0
             self.boiler_heating_end_hour = 23.0
+            self.boiler_auto_temp_limit = 60.0
         else:
             self._overrides = data.get("overrides", {})
             self.last_override_change = data.get("last_override_change")
@@ -85,6 +87,7 @@ class EmsScheduleStorage:
             self.min_energy_to_discharge = data.get("min_energy_to_discharge", fallback_min_energy_to_discharge)
             self.boiler_heating_start_hour = float(data.get("boiler_heating_start_hour", 0.0))
             self.boiler_heating_end_hour = float(data.get("boiler_heating_end_hour", 23.0))
+            self.boiler_auto_temp_limit = float(data.get("boiler_auto_temp_limit", 60.0))
         _LOGGER.debug(
             "EMS Schedule Storage loaded: %d dates with overrides for entry %s",
             len(self._overrides),
@@ -102,6 +105,7 @@ class EmsScheduleStorage:
             "min_energy_to_discharge": self.min_energy_to_discharge,
             "boiler_heating_start_hour": self.boiler_heating_start_hour,
             "boiler_heating_end_hour": self.boiler_heating_end_hour,
+            "boiler_auto_temp_limit": self.boiler_auto_temp_limit,
         })
 
     def get_overrides(self) -> dict[str, dict[str, str]]:

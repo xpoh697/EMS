@@ -1175,10 +1175,19 @@ class BoilerCard extends HTMLElement {
           </select>
         </div>
       </div>
+      <div class="ctrl-slider-row" style="margin-top: 15px;">
+        <div class="ctrl-slider-header">
+          <label>Лимит нагрева (Авто)</label>
+          <span class="slider-val" id="auto-temp-limit-val">60.0 °C</span>
+        </div>
+        <input type="range" id="auto-temp-limit" min="40" max="85" step="1" value="60">
+      </div>
     `;
 
     this._autoStartSelect = this._autoSettingsPanel.querySelector("#auto-start-hour");
     this._autoEndSelect = this._autoSettingsPanel.querySelector("#auto-end-hour");
+    this._autoTempLimitSlider = this._autoSettingsPanel.querySelector("#auto-temp-limit");
+    this._autoTempLimitVal = this._autoSettingsPanel.querySelector("#auto-temp-limit-val");
 
     this._autoStartSelect.addEventListener("change", () => {
       const val = parseFloat(this._autoStartSelect.value);
@@ -1194,6 +1203,18 @@ class BoilerCard extends HTMLElement {
         entity_id: this._entities.heating_end_hour || "number.ems_boiler_heating_end_hour",
         value: val
       });
+    });
+
+    this._autoTempLimitSlider.addEventListener("change", () => {
+      const val = parseFloat(this._autoTempLimitSlider.value);
+      this._hass.callService("number", "set_value", {
+        entity_id: this._entities.boiler_auto_temp_limit || "number.ems_boiler_auto_temp_limit",
+        value: val
+      });
+    });
+
+    this._autoTempLimitSlider.addEventListener("input", () => {
+      this._autoTempLimitVal.textContent = parseFloat(this._autoTempLimitSlider.value).toFixed(1) + " °C";
     });
 
     // Auto hint
@@ -1292,6 +1313,7 @@ class BoilerCard extends HTMLElement {
     const hwPumpS = e.hw_pump ? st[e.hw_pump] : null;
     const hwTempS = e.hw_return_temp ? st[e.hw_return_temp] : null;
     const dpS    = st["sensor.boiler_dp"];
+    const autoTempLimitS = e.boiler_auto_temp_limit ? st[e.boiler_auto_temp_limit] : st["number.ems_boiler_auto_temp_limit"];
 
     // Cheap dirty check — skip re-paint if nothing changed
     const key = [
@@ -1300,7 +1322,8 @@ class BoilerCard extends HTMLElement {
       pumpS?.state, valveS?.state, modeS?.state,
       hwPumpS?.state, hwTempS?.state,
       dpS?.state, dpS?.attributes?.schedule?.length,
-      dpS?.attributes?.gas_heating_delayed
+      dpS?.attributes?.gas_heating_delayed,
+      autoTempLimitS?.state
     ].join("|");
     if (key === this._prevKey) return;
     this._prevKey = key;
@@ -1432,6 +1455,13 @@ class BoilerCard extends HTMLElement {
       }
       if (endEnt && endEnt.state !== undefined && endEnt.state !== "unknown" && endEnt.state !== "unavailable") {
         this._autoEndSelect.value = Math.round(parseFloat(endEnt.state));
+      }
+      if (autoTempLimitS && autoTempLimitS.state !== undefined && autoTempLimitS.state !== "unknown" && autoTempLimitS.state !== "unavailable") {
+        const limitVal = parseFloat(autoTempLimitS.state);
+        if (!isNaN(limitVal)) {
+          this._autoTempLimitSlider.value = limitVal;
+          this._autoTempLimitVal.textContent = limitVal.toFixed(1) + " °C";
+        }
       }
     }
 

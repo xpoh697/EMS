@@ -152,6 +152,7 @@ async def ws_get_boiler_config(hass: HomeAssistant, connection: websocket_api.Ac
         "consumption_entity": consumption_entity or "sensor.load_consumption_2",
         "heating_start_hour": "number.ems_boiler_heating_start_hour",
         "heating_end_hour": "number.ems_boiler_heating_end_hour",
+        "boiler_auto_temp_limit": "number.ems_boiler_auto_temp_limit",
     })
 
 

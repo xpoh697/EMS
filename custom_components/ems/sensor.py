@@ -3509,6 +3509,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         self._stats: dict = {}
         self._heating_start_hour: int = 0
         self._heating_end_hour: int = 23
+        self._boiler_auto_temp_limit: float = 60.0
         self._t_start: float | None = None
         self._t_min: float | None = None
         self._t_max_elec: float | None = None
@@ -3574,6 +3575,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "heating_start_hour": self._heating_start_hour,
             "heating_end_hour": self._heating_end_hour,
             "vacation_mode": self._vacation_mode,
+            "boiler_auto_temp_limit": self._boiler_auto_temp_limit,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -3590,6 +3592,10 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._t_start = attrs.get("t_start")
             self._heating_start_hour = attrs.get("heating_start_hour", 0)
             self._heating_end_hour = attrs.get("heating_end_hour", 23)
+            try:
+                self._boiler_auto_temp_limit = float(attrs.get("boiler_auto_temp_limit", 60.0))
+            except (ValueError, TypeError):
+                self._boiler_auto_temp_limit = 60.0
             self._t_min = attrs.get("t_min")
             self._t_max_elec = attrs.get("t_max_elec")
             self._t_max_gas = attrs.get("t_max_gas")
@@ -3615,6 +3621,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "sensor.boiler_calibration",
             "number.ems_boiler_heating_start_hour",
             "number.ems_boiler_heating_end_hour",
+            "number.ems_boiler_auto_temp_limit",
         ]
         vacation_entity_id = options.get(CONF_VACATION_MODE_ENTITY, config.get(CONF_VACATION_MODE_ENTITY))
         if vacation_entity_id:
@@ -3846,8 +3853,15 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
 
         # 5. Extract limits and settings
         t_min = float(options.get(CONF_THERMOSTAT_SET_TEMP, config.get(CONF_THERMOSTAT_SET_TEMP, DEFAULT_THERMOSTAT_SET_TEMP)))
+        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
+        boiler_auto_temp_limit = float(getattr(storage, "boiler_auto_temp_limit", 60.0))
+
         t_max_elec = float(options.get(CONF_ELEC_BOILER_MAX_TEMP, config.get(CONF_ELEC_BOILER_MAX_TEMP, DEFAULT_ELEC_BOILER_MAX_TEMP)))
+        t_max_elec = max(t_min, min(t_max_elec, boiler_auto_temp_limit))
+
         t_max_gas = float(options.get(CONF_GAS_BOILER_MAX_TEMP, config.get(CONF_GAS_BOILER_MAX_TEMP, DEFAULT_GAS_BOILER_MAX_TEMP)))
+        t_max_gas = max(t_min, min(t_max_gas, boiler_auto_temp_limit))
+
         gas_cost_m3 = float(options.get("gas_cost_m3", config.get("gas_cost_m3", 0.0)))
 
         # 6. Execute run_boiler_dp in the executor thread pool
@@ -3938,6 +3952,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 self._recommended_bypass = "OFF"
             self._heating_start_hour = heating_start_hour
             self._heating_end_hour = heating_end_hour
+            self._boiler_auto_temp_limit = boiler_auto_temp_limit
         except Exception as err:
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Error running boiler DP optimizer: {err}", exc_info=True)
             self._state = "error"
