@@ -766,9 +766,9 @@ def run_boiler_dp(
         "curtailed_pv_budget": round(curtailed_pv_today + curtailed_pv_tomorrow, 2),
         "curtailed_pv_today": round(curtailed_pv_today, 2),
         "curtailed_pv_tomorrow": round(curtailed_pv_tomorrow, 2),
-        "total_pv_budget_today": round(total_pv_budget_today, 2),
+        "total_pv_budget_today": round(total_pv_budget_today + actual_boiler_today, 2),
         "boiler_used_today": round(actual_boiler_today, 2),
-        "remaining_pv_today": round(max(0.0, total_pv_budget_today - actual_boiler_today), 2),
+        "remaining_pv_today": round(total_pv_budget_today, 2),
     }
 
     current_action = best_path[0]["mode"] if best_path else "IDLE"
