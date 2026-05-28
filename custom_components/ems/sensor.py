@@ -3314,15 +3314,60 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
             self._elec_with_pump.update(data)
         elif phase == "overnight_loss":
             # Вложенное слияние: обновляем только переданные брэкеты
+            import copy
+            date_str = data.get("last_calibrated") or dt_util.now().date().isoformat()
+            
+            # Форматируем и сливаем брэкеты газа
             if "gas" in data and isinstance(data["gas"], dict):
                 self._standby_losses.setdefault("gas", {})
-                self._standby_losses["gas"].update(data["gas"])
+                for k, v in data["gas"].items():
+                    if isinstance(v, dict):
+                        try:
+                            val = float(v.get("value", 0.0))
+                        except (ValueError, TypeError):
+                            val = float(self._standby_losses["gas"].get(k, {}).get("value", 0.0))
+                        self._standby_losses["gas"][k] = {
+                            "value": val,
+                            "updated_at": v.get("updated_at") or date_str
+                        }
+                    else:
+                        try:
+                            val = float(v)
+                        except (ValueError, TypeError):
+                            val = float(self._standby_losses["gas"].get(k, {}).get("value", 0.0))
+                        self._standby_losses["gas"][k] = {
+                            "value": val,
+                            "updated_at": date_str
+                        }
+                        
+            # Форматируем и сливаем брэкеты электричества
             if "elec" in data and isinstance(data["elec"], dict):
                 self._standby_losses.setdefault("elec", {})
-                self._standby_losses["elec"].update(data["elec"])
+                for k, v in data["elec"].items():
+                    if isinstance(v, dict):
+                        try:
+                            val = float(v.get("value", 0.0))
+                        except (ValueError, TypeError):
+                            val = float(self._standby_losses["elec"].get(k, {}).get("value", 0.0))
+                        self._standby_losses["elec"][k] = {
+                            "value": val,
+                            "updated_at": v.get("updated_at") or date_str
+                        }
+                    else:
+                        try:
+                            val = float(v)
+                        except (ValueError, TypeError):
+                            val = float(self._standby_losses["elec"].get(k, {}).get("value", 0.0))
+                        self._standby_losses["elec"][k] = {
+                            "value": val,
+                            "updated_at": date_str
+                        }
+                        
             if "last_calibrated" in data:
                 self._standby_losses["last_calibrated"] = data["last_calibrated"]
+                
             store_phase = "standby_losses"
+            data = copy.deepcopy(self._standby_losses)
 
         # Update in store and persist to disk immediately
         store = self.hass.data[DOMAIN][self._entry_id].get("calibration_store")
