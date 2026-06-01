@@ -1709,6 +1709,18 @@ class BoilerController:
                 else:
                     target_bypass = current_valve.state.upper() if current_valve else None
 
+                # Safety override: if electric boiler is cold (< t_min - 10.0) in Auto mode, close bypass
+                try:
+                    t_elec = self._get_elec_temp()
+                    storage = self.storage
+                    t_min = float(self.config.get("gas_boiler_min_temp", 40.0))
+                    if storage:
+                        t_min = float(getattr(storage, "boiler_auto_temp_limit", t_min))
+                    if self.current_mode.lower() == "auto" and t_elec is not None and float(t_elec) < (t_min - 10.0):
+                        target_bypass = "OFF"
+                except (ValueError, TypeError):
+                    pass
+
                 if target_bypass in ("ON", "OFF"):
                     target_service = SERVICE_TURN_ON if target_bypass == "ON" else SERVICE_TURN_OFF
                     target_state = STATE_ON if target_bypass == "ON" else STATE_OFF
