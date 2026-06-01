@@ -222,7 +222,9 @@ def run_unified_dp(
                     for ci in range(1, int(max_gc / energy_step) + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                        _update_n(nsi, sell_price * pv_surplus - buy_price * (chg + pv_deficit) - cycle_cost * chg, ACT_GRID_CHARGE, chg)
+                        net_chg = (chg - pv_surplus) if chg > pv_surplus else 0.0
+                        reward = - buy_price * (net_chg + pv_deficit) - cycle_cost * chg
+                        _update_n(nsi, reward, ACT_GRID_CHARGE, chg)
 
                 # === SELF_CONSUME ===
                 if pv_deficit >= energy_step and usable_energy >= energy_step:
@@ -473,12 +475,16 @@ def run_unified_dp(
                     if desired_chg_steps >= 1:
                         chg = desired_chg_steps * energy_step
                         nsi = min(max_energy_idx, max(0, state_idx + desired_chg_steps))
-                        _update(nsi, sell_price * pv_surplus - buy_price * (chg + pv_deficit) - cycle_cost * chg, ACT_GRID_CHARGE, chg)
+                        net_chg = (chg - pv_surplus) if chg > pv_surplus else 0.0
+                        reward = - buy_price * (net_chg + pv_deficit) - cycle_cost * chg
+                        _update(nsi, reward, ACT_GRID_CHARGE, chg)
                 else:
                     for ci in range(1, int(max_gc / energy_step) + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                        _update(nsi, sell_price * pv_surplus - buy_price * (chg + pv_deficit) - cycle_cost * chg, ACT_GRID_CHARGE, chg)
+                        net_chg = (chg - pv_surplus) if chg > pv_surplus else 0.0
+                        reward = - buy_price * (net_chg + pv_deficit) - cycle_cost * chg
+                        _update(nsi, reward, ACT_GRID_CHARGE, chg)
 
             # === SELF_CONSUME: battery covers consumption deficit ===
             if (not override_action or (mode_config and mode_config.discharge_to_house)) and pv_deficit >= energy_step and usable_energy >= energy_step and (target_nsi is None or target_nsi < state_idx):
