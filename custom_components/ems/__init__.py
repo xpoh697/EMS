@@ -36,6 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .boiler_controller import BoilerController
     boiler_config = entry.options if entry.options else entry.data
     boiler_controller = BoilerController(hass, boiler_config)
+    boiler_controller.entry_id = entry.entry_id
     await boiler_controller.async_setup()
 
     # Store settings and storage in memory.

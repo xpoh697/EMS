@@ -20,6 +20,15 @@ class BoilerController:
     def __init__(self, hass: HomeAssistant, config: dict):
         self.hass = hass
         self.config = config
+        self.entry_id = None
+
+    @property
+    def storage(self):
+        if not hasattr(self, "entry_id") or not self.entry_id:
+            return None
+        from .const import DOMAIN
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id)
+        return entry_data.get("storage") if entry_data else None
         
         self.elec_heater = config.get("elec_boiler_heater")
         self.pump = config.get("circulation_pump")
@@ -144,6 +153,9 @@ class BoilerController:
         # 1. Электробойлер
         t_elec = self._get_elec_temp()
         t_max_elec = float(self.config.get("elec_boiler_max_temp", 70.0))
+        storage = self.storage
+        if storage and self.current_mode.lower() == "auto":
+            t_max_elec = min(t_max_elec, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
         hysteresis = 5.0
         
         if t_elec is None:
@@ -169,6 +181,8 @@ class BoilerController:
         # 2. Газовый котел
         t_gas = self._get_gas_temp()
         t_max_gas = float(self.config.get("gas_boiler_max_temp", 50.0))
+        if storage and self.current_mode.lower() == "auto":
+            t_max_gas = min(t_max_gas, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
         
         if t_gas is None:
             dp_state = self.hass.states.get("sensor.boiler_dp")
@@ -1754,6 +1768,9 @@ class BoilerController:
                     )
                 if target_hvac == "heat":
                     target_temp = float(self.config.get("gas_boiler_max_temp", 50.0))
+                    storage = self.storage
+                    if storage and self.current_mode.lower() == "auto":
+                        target_temp = min(target_temp, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
                     current_target_temp = current_gas.attributes.get("temperature") if current_gas else None
                     if current_target_temp != target_temp:
                         await self.hass.services.async_call(

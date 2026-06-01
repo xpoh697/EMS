@@ -128,12 +128,15 @@ def run_boiler_dp(
     start_h = max(0, min(23, int(round(heating_start_hour))))
     end_h = max(0, min(23, int(round(heating_end_hour))))
 
+    # Define grid max temp to accommodate starting temperatures if they exceed t_max (with safety upper bound 95.0°C)
+    t_grid_max = min(95.0, max(t_max, t_gas_start, t_elec_start))
+
     # Total grid size with lower bound at 20.0°C (water supply temp) to allow unused boiler to cool freely
     GRID_MIN_TEMP = min(20.0, t_min)
-    num_states = int(round((t_max - GRID_MIN_TEMP) * 2)) + 1
+    num_states = int(round((t_grid_max - GRID_MIN_TEMP) * 2)) + 1
     
     # Clamp starting gas temp to grid range
-    t_gas_start_clamped = max(GRID_MIN_TEMP, min(t_gas_start, t_max))
+    t_gas_start_clamped = max(GRID_MIN_TEMP, min(t_gas_start, t_grid_max))
     start_idx = int(round((t_gas_start_clamped - GRID_MIN_TEMP) * 2))
 
     N = len(slots)
