@@ -750,7 +750,11 @@ class EmsSchedulerCard extends HTMLElement {
               </div>
               <div class="legend-item">
                 <div class="legend-color" style="background: #ffd54f;"></div>
-                <span>Corrected Forecast</span>
+                <span>Today Forecast</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: repeating-linear-gradient(90deg, #4dd0e1 0px, #4dd0e1 5px, transparent 5px, transparent 8px);"></div>
+                <span>Tomorrow Forecast</span>
               </div>
             </div>
           </div>
@@ -870,7 +874,7 @@ class EmsSchedulerCard extends HTMLElement {
             </div>
           </div>
         </div>
-        <div id="v-tag" class="version-tag">v0.3.0</div>
+        <div id="v-tag" class="version-tag">v0.3.28</div>
       </ha-card>
     `;
 
@@ -1605,6 +1609,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     let actual = Array(24).fill(0);
     let forecast = Array(24).fill(0);
+    let forecastTomorrow = Array(24).fill(0);
 
     if (solarState && solarState.attributes) {
       const attrs = solarState.attributes;
@@ -1627,21 +1632,38 @@ class EmsSchedulerCard extends HTMLElement {
       }
     }
 
+    // Tomorrow forecast from sensor.pv_forecast_tomorrow
+    const tomorrowState = this._hass.states['sensor.pv_forecast_tomorrow'];
+    if (tomorrowState && tomorrowState.attributes) {
+      const toArray = (val) => {
+        if (!val) return null;
+        if (Array.isArray(val)) return val;
+        if (typeof val === 'object') return Object.values(val);
+        return null;
+      };
+      const tomorrowRaw = toArray(tomorrowState.attributes.hourly_forecast);
+      if (tomorrowRaw) {
+        forecastTomorrow = tomorrowRaw.map(v => parseFloat(v) || 0);
+      }
+    }
+
     // Normalize arrays to exactly 24 entries
     while (actual.length < 24) actual.push(0);
     actual = actual.slice(0, 24);
     while (forecast.length < 24) forecast.push(0);
     forecast = forecast.slice(0, 24);
+    while (forecastTomorrow.length < 24) forecastTomorrow.push(0);
+    forecastTomorrow = forecastTomorrow.slice(0, 24);
 
     const container = this.shadowRoot.getElementById('solar-chart-svg-container');
     if (!container) return;
 
     // Cache key guard
-    const solarKey = [actual.join(','), forecast.join(',')].join('|');
+    const solarKey = [actual.join(','), forecast.join(','), forecastTomorrow.join(',')].join('|');
     if (container._lastSolarKey === solarKey) return;
     container._lastSolarKey = solarKey;
 
-    const maxVal = Math.max(1.0, ...actual, ...forecast);
+    const maxVal = Math.max(1.0, ...actual, ...forecast, ...forecastTomorrow);
 
     // Chart dimensions
     const W = 540, H = 260;
@@ -1681,7 +1703,7 @@ class EmsSchedulerCard extends HTMLElement {
       }
     }
 
-    // Corrected Forecast Line
+    // Corrected Forecast Line (today)
     let points = [];
     for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
@@ -1690,12 +1712,31 @@ class EmsSchedulerCard extends HTMLElement {
     }
     const linePath = `M ${points.join(' L ')}`;
 
-    // Dot markers on forecast line
+    // Dot markers on today forecast line
     let dotsHtml = '';
     for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
       const y = padT + chartH - (forecast[i] / maxVal) * chartH;
       dotsHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="#ffd54f" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
+    }
+
+    // Tomorrow Forecast Line (dashed cyan)
+    let pointsTmr = [];
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      const y = padT + chartH - (forecastTomorrow[i] / maxVal) * chartH;
+      pointsTmr.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    const linePathTmr = `M ${pointsTmr.join(' L ')}`;
+
+    // Dot markers on tomorrow forecast line
+    let dotsTmrHtml = '';
+    for (let i = 0; i < 24; i++) {
+      if (forecastTomorrow[i] > 0) {
+        const x = padL + i * barSpacing + barSpacing / 2;
+        const y = padT + chartH - (forecastTomorrow[i] / maxVal) * chartH;
+        dotsTmrHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2" fill="#4dd0e1" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
+      }
     }
 
     // Invisible hover zones
@@ -1704,9 +1745,10 @@ class EmsSchedulerCard extends HTMLElement {
       const x = padL + i * barSpacing;
       const actVal = actual[i].toFixed(2);
       const foreVal = forecast[i].toFixed(2);
+      const tmrVal = forecastTomorrow[i].toFixed(2);
       const hourStr = String(i).padStart(2, '0') + ':00';
       const centerX = padL + i * barSpacing + barSpacing / 2;
-      hoverHtml += `<rect class="hov-solar" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" data-hour="${hourStr}" data-act="${actVal}" data-fore="${foreVal}" data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>`;
+      hoverHtml += `<rect class="hov-solar" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" data-hour="${hourStr}" data-act="${actVal}" data-fore="${foreVal}" data-tmr="${tmrVal}" data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>`;
     }
 
     container.innerHTML = `
@@ -1720,6 +1762,10 @@ class EmsSchedulerCard extends HTMLElement {
         <filter id="solar-line-glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
         <path d="${linePath}" fill="none" stroke="#ffd54f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" filter="url(#solar-line-glow)"/>
         ${dotsHtml}
+        <!-- Tomorrow Forecast Line -->
+        <filter id="tmr-line-glow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        <path d="${linePathTmr}" fill="none" stroke="#4dd0e1" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 3" filter="url(#tmr-line-glow)" opacity="0.85"/>
+        ${dotsTmrHtml}
         ${hoverHtml}
       </svg>
     `;
@@ -1733,6 +1779,7 @@ class EmsSchedulerCard extends HTMLElement {
         const hour = zone.getAttribute('data-hour');
         const act = zone.getAttribute('data-act');
         const fore = zone.getAttribute('data-fore');
+        const tmr = zone.getAttribute('data-tmr');
         tooltip.innerHTML = `
           <div class="tooltip-hour" style="color:#ff9800">${hour}</div>
           <div class="tooltip-row">
@@ -1740,8 +1787,12 @@ class EmsSchedulerCard extends HTMLElement {
             <span class="tooltip-val" style="color:#ff9800">${act} kWh</span>
           </div>
           <div class="tooltip-row">
-            <span class="tooltip-label">Corrected:</span>
+            <span class="tooltip-label">Today fcst:</span>
             <span class="tooltip-val" style="color:#ffd54f">${fore} kWh</span>
+          </div>
+          <div class="tooltip-row">
+            <span class="tooltip-label">Tomorrow:</span>
+            <span class="tooltip-val" style="color:#4dd0e1">${tmr} kWh</span>
           </div>
         `;
         const chartContainer = zone.closest('.chart-container');

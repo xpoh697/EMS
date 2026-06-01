@@ -559,6 +559,65 @@ def run_unified_dp(
         if state_idx < 0:
             break
 
+    # --- DEBUG: log full DP trajectory after backtracking ---
+    _ACT_NAMES = {
+        ACT_SOL: "SOL",
+        ACT_DIS: "DIS",
+        ACT_PV_CHARGE: "PV_CHG",
+        ACT_GRID_CHARGE: "GRID_CHG",
+        ACT_SELF_CONSUME: "SELF_CON",
+        ACT_PAID_IMPORT: "PAID_IMP",
+    }
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        _traj_usable = current_usable
+        _traj_lines: list[str] = []
+        for _t_slot, _t_act, _t_amt in zip(scaled_slots, types_by_slot, amounts_by_slot, strict=False):
+            _t_soc = max(0.0, min(100.0, config.battery_min_soc + (_traj_usable / config.battery_capacity * 100.0)))
+            _traj_lines.append(
+                f"  {_t_slot.get('date')} {_t_slot.get('hour'):02d}h  "
+                f"act={_ACT_NAMES.get(_t_act, str(_t_act)):<8}  "
+                f"amt={_t_amt:+.2f}kWh  "
+                f"SOC={_t_soc:.1f}%  "
+                f"buy={_t_slot.get('buy_price', 0.0):.3f}  "
+                f"sell={_t_slot.get('sell_price', 0.0):.3f}  "
+                f"pv={_t_slot.get('pv_kwh', 0.0):.2f}kWh  "
+                f"cons={_t_slot.get('consumption_kwh', 0.0):.2f}kWh"
+            )
+            # Advance simulated state for SOC display
+            if _t_act == ACT_GRID_CHARGE:
+                _traj_usable = min(usable_capacity, _traj_usable + _t_amt)
+            elif _t_act == ACT_PV_CHARGE:
+                _traj_usable = min(usable_capacity, _traj_usable + _t_amt)
+            elif _t_act == ACT_DIS:
+                _traj_usable = max(0.0, _traj_usable - _t_amt)
+            elif _t_act == ACT_SELF_CONSUME:
+                _traj_usable = max(0.0, _traj_usable - _t_amt)
+
+        _gc_slots = [
+            (scaled_slots[i].get("date"), scaled_slots[i].get("hour"),
+             scaled_slots[i].get("buy_price", 0.0),
+             scaled_slots[i].get("pv_kwh", 0.0),
+             scaled_slots[i].get("consumption_kwh", 0.0),
+             amounts_by_slot[i])
+            for i in range(n_slots) if types_by_slot[i] == ACT_GRID_CHARGE
+        ]
+        _gc_summary = "  " + "\n  ".join(
+            f"{d} {h:02d}h  buy={bp:.3f}  pv={pv:.2f}  cons={cons:.2f}  "
+            f"net_from_grid≈{max(0.0, amt - max(0.0, pv - cons)):.2f}kWh  "
+            f"total_chg={amt:.2f}kWh"
+            for d, h, bp, pv, cons, amt in _gc_slots
+        ) if _gc_slots else "  (none)"
+
+        _LOGGER.debug(
+            "EMS DP trajectory (best_value=%.4f, end_SOC=%.1f%%):\n%s\n"
+            "GRID_CHARGE slots:\n%s",
+            best_total_value,
+            max(0.0, min(100.0, config.battery_min_soc + (best_final_idx * energy_step / config.battery_capacity * 100.0))),
+            "\n".join(_traj_lines),
+            _gc_summary,
+        )
+    # --- END DEBUG ---
+
     # Build result lists
     charge_hours: list[dict[str, Any]] = []
     discharge_hours: list[dict[str, Any]] = []
@@ -592,6 +651,31 @@ def run_unified_dp(
                 else:
                     act = ACT_SOL
                     amount = 0.0
+
+        # Apply post-processing filter for negligible grid charges.
+        # When net energy drawn from the grid is < 0.1 kWh (one DP energy step),
+        # the slot is effectively a PV-only charge — downgrade GRID_CHARGE to
+        # PV_CHARGE (or SOL if there is no PV surplus at all).
+        if act == ACT_GRID_CHARGE and amount > 0:
+            pv_surplus = max(0.0, slot["pv_kwh"] - slot.get("consumption_kwh", 0.0))
+            net_grid = amount - pv_surplus
+            if net_grid < 0.1:
+                if pv_surplus > 0.0:
+                    amount = round(pv_surplus, 2)
+                    act = ACT_PV_CHARGE
+                    _LOGGER.debug(
+                        "EMS DP: GRID_CHG→PV_CHG at %s %02dh "
+                        "(net_grid=%.3f kWh < 0.1 threshold, pv_surplus=%.3f kWh)",
+                        slot.get("date"), slot.get("hour"), net_grid, pv_surplus,
+                    )
+                else:
+                    act = ACT_SOL
+                    amount = 0.0
+                    _LOGGER.debug(
+                        "EMS DP: GRID_CHG→SOL at %s %02dh "
+                        "(net_grid=%.3f kWh < 0.1 threshold, no pv_surplus)",
+                        slot.get("date"), slot.get("hour"), net_grid,
+                    )
 
         if act == ACT_DIS and amount > 0:
             end_usable = usable_energy - amount

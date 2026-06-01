@@ -2565,6 +2565,7 @@ class EmsSchedulerSensor(SensorEntity):
             "avg_pv_w": round(avg_pv, 1) if avg_pv is not None else None,
             "avg_load_w": round(avg_load, 1) if avg_load is not None else None,
             "pv_load_switch_active": self._dynamic_sale_pv_active,
+            "version": VERSION,
         }
 
     async def async_added_to_hass(self) -> None:

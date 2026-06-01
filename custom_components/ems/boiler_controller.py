@@ -534,15 +534,38 @@ class BoilerController:
             state = self.hass.states.get(self.elec_heater)
             if state and state.state == STATE_ON:
                 return True
+            # Дополнительная проверка мощности ТЭНа, если переключатель выключен, но мощность идет
+            if self.elec_power:
+                pow_state = self.hass.states.get(self.elec_power)
+                if pow_state and pow_state.state not in (None, "unknown", "unavailable"):
+                    try:
+                        if float(pow_state.state) > 50.0:
+                            return True
+                    except (ValueError, TypeError):
+                        pass
         if self.gas_climate:
             state = self.hass.states.get(self.gas_climate)
-            if state and state.state in ("heat", "on"):
-                return True
+            if state:
+                hvac_action = state.attributes.get("hvac_action")
+                if hvac_action == "heating":
+                    return True
+                elif hvac_action is None and state.state in ("heat", "on"):
+                    # Безопасный фолбэк при отсутствии hvac_action
+                    t_curr = state.attributes.get("current_temperature")
+                    t_target = state.attributes.get("temperature")
+                    if t_curr is None or t_target is None:
+                        return True
+                    try:
+                        if float(t_curr) < float(t_target):
+                            return True
+                    except (ValueError, TypeError):
+                        return True
         if self.pump:
             state = self.hass.states.get(self.pump)
             if state and state.state == STATE_ON:
                 return True
         return False
+
 
     def _is_auto_standby_enabled(self) -> bool:
         cal_type = self.config.get(CONF_CALIBRATION_TYPE, "manual")
