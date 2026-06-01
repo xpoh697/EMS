@@ -7,18 +7,18 @@ if os.path.exists(restore_path):
         data = json.load(f)
     
     states = data.get("data", [])
+    print("Total states in restore_state:", len(states))
     for state_data in states:
-        entity_id = state_data.get("state", {}).get("entity_id")
-        if entity_id in ("sensor.dp", "sensor.pv_forecast_today", "sensor.load_consumption_2"):
+        state_info = state_data.get("state", {})
+        entity_id = state_info.get("entity_id")
+        if entity_id == "sensor.scheduler":
             print(f"Entity: {entity_id}")
-            print(f"  State: {state_data.get('state', {}).get('state')}")
-            attrs = state_data.get("state", {}).get("attributes", {})
+            print(f"  State: {state_info.get('state')}")
+            attrs = state_info.get("attributes", {})
             for k, v in attrs.items():
-                if k in ("hourly_forecast", "today", "average_today") or "profile" in k:
-                    print(f"    {k}: {v}")
-                elif k == "schedule":
+                if k == "schedule":
                     print(f"    schedule length: {len(v)}")
-                    for item in v[:12]:
+                    for item in v:
                         print(f"      Hour {item.get('hour')}: Buy={item.get('buy_price')} Sell={item.get('sell_price')} PV={item.get('pv_kwh')} Cons={item.get('consumption_kwh')} Action={item.get('action')} PhysMode={item.get('physical_mode')} SOC={item.get('expected_soc')}%")
             print("-" * 50)
 else:

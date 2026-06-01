@@ -1707,16 +1707,18 @@ class BoilerController:
                 elif mode in ("GAS_PUMP", "ELEC_PUMP", "PUMP_ONLY"):
                     target_bypass = "ON"
                 else:
-                    # Для режимов IDLE и ELEC целевое состояние байпаса определяется температурой электробойлера с гистерезисом в 1.0°C
+                    # Для режимов IDLE и ELEC целевое состояние байпаса определяется
+                    # температурой электробойлера относительно thermostat_set_temp с гистерезисом 1.0°C
                     try:
                         t_elec = self._get_elec_temp()
-                        storage = self.storage
-                        t_min = float(self.config.get("gas_boiler_min_temp", 40.0))
-                        if storage:
-                            t_min = float(getattr(storage, "boiler_auto_temp_limit", t_min))
+                        t_min = float(self.config.get("thermostat_set_temp", 40.0))
                         
                         if self.current_mode.lower() == "auto" and t_elec is not None:
                             t_elec_val = float(t_elec)
+                            _LOGGER.debug(
+                                "EMS Bypass decision: t_elec=%.1f, t_min=%.1f (thermostat_set_temp), mode=%s",
+                                t_elec_val, t_min, mode
+                            )
                             if t_elec_val >= t_min:
                                 target_bypass = "ON"
                             elif t_elec_val < (t_min - 1.0):

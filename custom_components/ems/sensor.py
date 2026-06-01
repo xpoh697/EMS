@@ -1428,6 +1428,38 @@ class EmsDpSensor(SensorEntity):
                         )
                         return
 
+            # Break feedback loop: if the event comes from sensor.boiler_dp, only
+            # trigger if the schedule content (planning fields) has actually changed.
+            # sensor.boiler_dp always re-writes last_calculation/calculation_duration,
+            # so attribute-level changes alone must NOT re-trigger sensor.dp.
+            if entity_id == "sensor.boiler_dp":
+                def _boiler_sched_key(slot):
+                    if not isinstance(slot, dict):
+                        return ()
+                    return (
+                        slot.get("date"),
+                        slot.get("hour"),
+                        slot.get("mode"),
+                        slot.get("energy"),
+                    )
+
+                old_sched = (
+                    old_state.attributes.get("schedule")
+                    if old_state is not None
+                    else None
+                )
+                new_sched = new_state.attributes.get("schedule")
+
+                if old_sched is not None and isinstance(old_sched, list) and isinstance(new_sched, list):
+                    if [_boiler_sched_key(s) for s in old_sched] == [_boiler_sched_key(s) for s in new_sched]:
+                        ems_log(
+                            self.hass,
+                            _LOGGER,
+                            logging.DEBUG,
+                            "EMS DP: boiler_dp schedule unchanged — skipping re-calculation"
+                        )
+                        return
+
             was_invalid = not old_state or old_state.state in (None, "unknown", "unavailable")
             is_valid = new_state.state not in (None, "unknown", "unavailable")
             
@@ -3699,6 +3731,52 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
     async def _async_state_changed_listener(self, event) -> None:
         """Handle monitored entity state changes with debouncing."""
         entity_id = event.data.get("entity_id")
+        new_state = event.data.get("new_state")
+        old_state = event.data.get("old_state")
+
+        # Break feedback loop: if the event comes from sensor.dp, only trigger
+        # if the schedule content (planning fields) has actually changed.
+        # sensor.dp always re-writes last_calculation/calculation_duration on
+        # every run, so attribute-only changes must NOT re-trigger sensor.boiler_dp.
+        if entity_id == "sensor.dp":
+            def _dp_sched_key(slot):
+                if not isinstance(slot, dict):
+                    return ()
+                return (
+                    slot.get("date"),
+                    slot.get("hour"),
+                    slot.get("buy_price"),
+                    slot.get("sell_price"),
+                    slot.get("physical_mode"),
+                    slot.get("expected_soc"),
+                    slot.get("pv_kwh"),
+                    slot.get("consumption_kwh"),
+                    slot.get("planned_boiler_kwh"),
+                    slot.get("action"),
+                    slot.get("energy_kwh"),
+                )
+
+            old_sched = (
+                old_state.attributes.get("schedule")
+                if old_state is not None
+                else None
+            )
+            new_sched = (
+                new_state.attributes.get("schedule")
+                if new_state is not None
+                else None
+            )
+
+            if old_sched is not None and isinstance(old_sched, list) and isinstance(new_sched, list):
+                if [_dp_sched_key(s) for s in old_sched] == [_dp_sched_key(s) for s in new_sched]:
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.DEBUG,
+                        "EMS Boiler DP: sensor.dp schedule unchanged — skipping re-calculation"
+                    )
+                    return
+
         force = False
         if entity_id not in (self._gas_sensor, self._elec_sensor):
             force = True

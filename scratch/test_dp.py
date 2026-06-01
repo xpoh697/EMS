@@ -1,89 +1,122 @@
 import sys
 import os
-import json
-import types
+from types import ModuleType
 
-# Create empty ems module to avoid loading custom_components/ems/__init__.py
-ems_mod = types.ModuleType('ems')
-ems_mod.__path__ = [os.path.abspath("custom_components/ems")]
-sys.modules['ems'] = ems_mod
+# Setup sys.modules mocks
+ha_mock = ModuleType('homeassistant')
+sys.modules['homeassistant'] = ha_mock
+util_mock = ModuleType('homeassistant.util')
+sys.modules['homeassistant.util'] = util_mock
 
-# Now import run_boiler_dp
-from ems.boiler_dp_engine import run_boiler_dp
+class MockDt:
+    @staticmethod
+    def now():
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc)
 
-buy_prices = [1.02344, 0.96194, 0.939677, 0.924154, 0.911252, 0.906073, 0.86723, 0.810576, 0.62369, 0.29774, 0.260852, 0.259093, 0.251676, 0.23624, 0.251676, 0.260828, 0.337186, 0.802926, 0.937623, 1.06649, 1.188285, 1.150007, 1.067597, 0.99761]
-sell_prices = [0.7626, 0.7011, 0.678837, 0.663314, 0.650412, 0.645233, 0.60639, 0.549736, 0.36285, 0.0369, 1.2e-05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.076346, 0.542086, 0.676783, 0.80565, 0.927445, 0.889167, 0.806757, 0.73677]
+util_mock.dt = MockDt
 
-physical_modes = ["idle"] * 24
-for h in range(8, 17):
-    physical_modes[h] = "sale_pv"
+# Mock INVERTER_MODES and map_dp_to_physical
+class InverterModeClass:
+    def __init__(self, name, pv_to_house, charge_from_pv, charge_from_grid, discharge_to_house, discharge_to_grid, export_pv_to_grid, is_grid_bypass, curtail_pv, allow_boiler, calibration_limit_soc):
+        self.name = name
+        self.pv_to_house = pv_to_house
+        self.charge_from_pv = charge_from_pv
+        self.charge_from_grid = charge_from_grid
+        self.discharge_to_house = discharge_to_house
+        self.discharge_to_grid = discharge_to_grid
+        self.export_pv_to_grid = export_pv_to_grid
+        self.is_grid_bypass = is_grid_bypass
+        self.curtail_pv = curtail_pv
+        self.allow_boiler = allow_boiler
+        self.calibration_limit_soc = calibration_limit_soc
 
-slots = []
-for h in range(24):
-    slots.append({
-        "date": "2026-05-23",
-        "hour": h,
-        "buy_price": buy_prices[h],
-        "sell_price": sell_prices[h],
-        "physical_mode": physical_modes[h],
-        "expected_soc": 50.0
-    })
-
-t_start = 39.0
-t_min = 40.0
-t_max_elec = 70.0
-t_max_gas = 65.0
-vol_elec = 75.0
-vol_gas = 45.0
-gas_cost_m3 = 4.5
-
-cal_data = {
-  "gas_only": {
-    "efficiency_c_per_m3": 338.1579,
-    "last_calibrated": "2026-05-23"
-  },
-  "gas_with_pump": {
-    "efficiency_c_per_m3": 103.8223,
-    "last_calibrated": "2026-05-21"
-  },
-  "elec_only": {
-    "efficiency_c_per_kwh": 20.4082,
-    "last_calibrated": "2026-05-22"
-  },
-  "elec_with_pump": {
-    "efficiency_c_per_kwh": 3.3505,
-    "last_calibrated": "2026-05-22"
-  },
-  "standby_losses": {
-    "gas": {
-      "75_70": 4.36, "70_65": 3.63, "65_60": 2.9, "60_55": 2.17, "55_50": 1.8,
-      "50_45": 1.432, "45_40": 0.6985, "40_35": 0.51, "35_30": 0.38, "30_25": 0.25, "25_20": 0.12
-    },
-    "elec": {
-      "75_70": 0.5, "70_65": 0.475, "65_60": 0.45, "60_55": 0.425, "55_50": 0.4,
-      "50_45": 0.375, "45_40": 0.35, "40_35": 0.325, "35_30": 0.3, "30_25": 0.275, "25_20": 0.25
-    },
-    "last_calibrated": "2026-05-23"
-  }
+INVERTER_MODES = {
+    "buy": InverterModeClass("buy", True, True, True, False, False, False, True, False, True, 100.0),
+    "no_pv_sale_no_bat": InverterModeClass("no_pv_sale_no_bat", True, False, False, False, False, False, False, True, True, 0.0),
+    "sale_pv_no_bat": InverterModeClass("sale_pv_no_bat", True, False, False, False, False, True, False, False, False, 100.0),
+    "sale_pv_bat": InverterModeClass("sale_pv_bat", True, False, False, True, True, True, False, False, False, 100.0),
+    "sale_pv": InverterModeClass("sale_pv", True, True, False, True, False, True, False, False, True, 100.0),
+    "stop_sale": InverterModeClass("stop_sale", True, True, False, True, False, False, False, True, True, 90.0),
 }
 
-# Run DP from hour 13 to the end of the day
-test_slots = slots[13:]
+def map_dp_to_physical(action, sell_price, pv_kwh, min_sell_price, min_discharge_price, cheap_ahead):
+    return action, "mocked"
 
-status, schedule, stats = run_boiler_dp(
-    test_slots,
-    t_start,
-    t_min,
-    t_max_elec,
-    t_max_gas,
-    vol_elec,
-    vol_gas,
-    gas_cost_m3,
-    cal_data
-)
+# Load and execute dp_engine.py
+with open(os.path.join(os.path.dirname(__file__), '../custom_components/ems/dp_engine.py'), 'r', encoding='utf-8') as f:
+    code_content = f.read()
 
-print("Status:", status)
-print("Stats:", json.dumps(stats, indent=2))
-print("Schedule:")
-for s in schedule:
-    print(f"Hour {s['hour']}: mode={s['mode']} temp={s['temp_start']}->{s['temp_end']} cost={s['cost']} energy={s['energy']}")
+code_content = code_content.replace('from .const import INVERTER_MODES', '')
+code_content = code_content.replace('from .utils import map_dp_to_physical', '')
+
+context = {
+    'INVERTER_MODES': INVERTER_MODES,
+    'map_dp_to_physical': map_dp_to_physical,
+    'sys': sys,
+    'os': os,
+    'ModuleType': ModuleType,
+}
+
+exec(code_content, context)
+
+# Extract local constants and run_unified_dp
+run_unified_dp = context['run_unified_dp']
+DPConfig = context['DPConfig']
+cvcc_multipliers = [] # we will duplicate it here to test expected_nsi vs nsi
+ACT_GRID_CHARGE = context['ACT_GRID_CHARGE']
+ACT_PV_CHARGE = context['ACT_PV_CHARGE']
+ACT_SOL = context['ACT_SOL']
+
+# Test parameters
+capacity = 5.12
+min_bat_soc = 20.0
+usable_capacity = capacity * (1 - min_bat_soc / 100.0) # 4.096
+energy_step = 0.1
+max_energy_idx = int(round(usable_capacity / energy_step)) # 41
+cvcc_multipliers = [1.0] * (max_energy_idx + 1)
+# fill multipliers according to get_cvcc_charge_multiplier in dp_engine.py
+get_cvcc = context['get_cvcc_charge_multiplier']
+for state in range(max_energy_idx + 1):
+    clamped_soc = min_bat_soc + (state * energy_step / capacity) * 100.0
+    cvcc_multipliers[state] = get_cvcc(clamped_soc)
+
+# Let's test different combinations of battery power, target_soc, and starting state
+battery_max_charge_power = 6.6
+target_socs = [54.5, 59.3, 59.5, 80.0, 100.0]
+
+for target_soc in target_socs:
+    target_usable = capacity * (target_soc - min_bat_soc) / 100.0
+    target_nsi = max(0, min(max_energy_idx, int(round(target_usable / energy_step))))
+    
+    print(f"\n--- Testing target_soc={target_soc}% (target_nsi={target_nsi}) ---")
+    
+    for state_idx in range(max_energy_idx + 1):
+        if target_nsi <= state_idx:
+            # We want to discharge or stay idle, skip charge test
+            continue
+            
+        # Expected nsi calculation (our code)
+        max_charge_power = battery_max_charge_power * cvcc_multipliers[state_idx]
+        usable_energy = state_idx * energy_step
+        avail_cap = usable_capacity - usable_energy
+        max_gc = min(max_charge_power, avail_cap)
+        max_possible_chg_steps_expected = int(max_gc / energy_step)
+        expected_nsi = min(target_nsi, state_idx + max_possible_chg_steps_expected)
+        
+        # Grid Charge calculation inside dp_engine.py
+        usable_energy = state_idx * energy_step
+        avail_cap = usable_capacity - usable_energy
+        max_gc = min(max_charge_power, avail_cap)
+        max_possible_chg_steps_actual = int(max_gc / energy_step)
+        desired_chg_steps = min(target_nsi - state_idx, max_possible_chg_steps_actual)
+        
+        actual_nsi = min(max_energy_idx, max(0, state_idx + desired_chg_steps))
+        
+        if actual_nsi != expected_nsi:
+            print(f"  MISMATCH at state_idx={state_idx} (SOC={min_bat_soc + (state_idx*energy_step/capacity)*100.0:.1f}%)")
+            print(f"    expected_nsi={expected_nsi} (max_possible_chg_steps_expected={max_possible_chg_steps_expected})")
+            print(f"    actual_nsi={actual_nsi} (max_possible_chg_steps_actual={max_possible_chg_steps_actual}, desired_chg_steps={desired_chg_steps})")
+            print(f"    avail_cap={avail_cap:.4f}, max_gc={max_gc:.4f}")
+            
+print("\nDone testing mismatch.")

@@ -10,7 +10,7 @@ cursor = conn.cursor()
 
 entities = [
     "sensor.dp",
-    "sensor.scheduler",
+    "sensor.boiler_dp"
 ]
 
 for entity in entities:
@@ -32,11 +32,13 @@ for entity in entities:
         print(f"Entity: {entity}")
         print(f"  State: {state}")
         if isinstance(attrs, dict):
-            # Print schedule items
-            schedule = attrs.get('schedule', attrs.get('current_plan', []))
-            print(f"  Schedule items:")
-            for item in schedule[:24]:
-                print(f"    Date: {item.get('date')} Hour: {item.get('hour')} | Buy: {item.get('buy_price')} Sell: {item.get('sell_price')} | Action: {item.get('action')} | PhysMode: {item.get('physical_mode')} | SOC: {item.get('soc', item.get('expected_soc'))}%")
+            for k, v in attrs.items():
+                if k not in ('schedule', 'stats'):
+                    print(f"    {k}: {v}")
+                elif k == 'schedule':
+                    print(f"    schedule length: {len(v)}")
+                    if len(v) > 0:
+                        print(f"      first 3 slots: {v[:3]}")
         else:
             print(f"  Attributes: {attrs}")
     else:
