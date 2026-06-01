@@ -354,6 +354,8 @@ def run_boiler_dp(
                 for mode in ["IDLE", "PUMP_ONLY", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]:
                     if mode != "IDLE" and not allowed_heating:
                         continue
+                    if mode in ("GAS", "GAS_PUMP") and T_elec_prev >= t_min:
+                        continue
                     if mode in ("GAS", "GAS_PUMP") and vol_gas <= 0.0:
                         continue
                     if mode in ("ELEC", "ELEC_PUMP") and (vol_elec <= 0.0 or not allow_elec):
@@ -361,7 +363,7 @@ def run_boiler_dp(
 
                     # Mode-specific transitions
                     if mode == "IDLE":
-                        T_bypass_end_val = False if T_elec_prev < (t_min - 10.0) else T_bypass_prev
+                        T_bypass_end_val = False if T_elec_prev < t_min else T_bypass_prev
                         T_gas_end_val = T_gas_cooled
                         T_elec_end_val = T_elec_cooled
                         
@@ -396,7 +398,7 @@ def run_boiler_dp(
                                         bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "PUMP_ONLY":
-                        if T_elec_prev < (t_min - 10.0):
+                        if T_elec_prev < t_min:
                             continue
                         if abs(T_gas_cooled - T_elec_cooled) < 5.0:
                             continue
@@ -470,7 +472,7 @@ def run_boiler_dp(
                                 bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "GAS_PUMP":
-                        if T_elec_prev < (t_min - 10.0):
+                        if T_elec_prev < t_min:
                             continue
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
                         T_bypass_end_val = True
@@ -524,7 +526,7 @@ def run_boiler_dp(
                         T_gas_end_val = T_gas_cooled
                         
                         for T_bypass_end_val in (True, False):
-                            if T_bypass_end_val and T_elec_prev < (t_min - 10.0):
+                            if T_bypass_end_val and T_elec_prev < t_min:
                                 continue
                             if not T_bypass_end_val:
                                 T_active = T_gas_end_val
@@ -562,7 +564,7 @@ def run_boiler_dp(
                                             bypass_state[h][curr_idx] = T_bypass_end_val
 
                     elif mode == "ELEC_PUMP":
-                        if T_elec_prev < (t_min - 10.0):
+                        if T_elec_prev < t_min:
                             continue
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
                         T_bypass_end_val = True
