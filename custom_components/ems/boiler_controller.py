@@ -21,14 +21,6 @@ class BoilerController:
         self.hass = hass
         self.config = config
         self.entry_id = None
-
-    @property
-    def storage(self):
-        if not hasattr(self, "entry_id") or not self.entry_id:
-            return None
-        from .const import DOMAIN
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id)
-        return entry_data.get("storage") if entry_data else None
         
         self.elec_heater = config.get("elec_boiler_heater")
         self.pump = config.get("circulation_pump")
@@ -67,6 +59,14 @@ class BoilerController:
         self._solar_deficit_cutoff = False
         self._avg_pv = None
         self._avg_load = None
+
+    @property
+    def storage(self):
+        if not hasattr(self, "entry_id") or not self.entry_id:
+            return None
+        from .const import DOMAIN
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id)
+        return entry_data.get("storage") if entry_data else None
         
     async def async_setup(self):
         """Регистрация безопасных слушателей событий и таймеров калибровки."""
