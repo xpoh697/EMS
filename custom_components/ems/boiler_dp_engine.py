@@ -363,7 +363,7 @@ def run_boiler_dp(
 
                     # Mode-specific transitions
                     if mode == "IDLE":
-                        T_bypass_end_val = False if T_elec_prev < t_min else T_bypass_prev
+                        T_bypass_end_val = (T_elec_prev >= t_min)
                         T_gas_end_val = T_gas_cooled
                         T_elec_end_val = T_elec_cooled
                         
@@ -525,9 +525,7 @@ def run_boiler_dp(
                         T_elec_end_val = min(current_t_max_elec, T_elec_cooled + max_rise_elec)
                         T_gas_end_val = T_gas_cooled
                         
-                        for T_bypass_end_val in (True, False):
-                            if T_bypass_end_val and T_elec_prev < t_min:
-                                continue
+                        for T_bypass_end_val in [T_elec_end_val >= t_min]:
                             if not T_bypass_end_val:
                                 T_active = T_gas_end_val
                             else:

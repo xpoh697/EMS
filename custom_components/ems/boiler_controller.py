@@ -1704,22 +1704,30 @@ class BoilerController:
                 # - Остальное (IDLE и др.) -> Сохраняется неизменным
                 if mode == "GAS":
                     target_bypass = "OFF"
-                elif "ELEC" in mode or "PUMP" in mode:
+                elif mode in ("GAS_PUMP", "ELEC_PUMP", "PUMP_ONLY"):
                     target_bypass = "ON"
                 else:
-                    target_bypass = current_valve.state.upper() if current_valve else None
-
-                # Safety override: if electric boiler is cold (< t_min) in Auto mode, close bypass
-                try:
-                    t_elec = self._get_elec_temp()
-                    storage = self.storage
-                    t_min = float(self.config.get("gas_boiler_min_temp", 40.0))
-                    if storage:
-                        t_min = float(getattr(storage, "boiler_auto_temp_limit", t_min))
-                    if self.current_mode.lower() == "auto" and t_elec is not None and float(t_elec) < t_min:
+                    # Для режимов IDLE и ELEC целевое состояние байпаса определяется температурой электробойлера с гистерезисом в 1.0°C
+                    try:
+                        t_elec = self._get_elec_temp()
+                        storage = self.storage
+                        t_min = float(self.config.get("gas_boiler_min_temp", 40.0))
+                        if storage:
+                            t_min = float(getattr(storage, "boiler_auto_temp_limit", t_min))
+                        
+                        if self.current_mode.lower() == "auto" and t_elec is not None:
+                            t_elec_val = float(t_elec)
+                            if t_elec_val >= t_min:
+                                target_bypass = "ON"
+                            elif t_elec_val < (t_min - 1.0):
+                                target_bypass = "OFF"
+                            else:
+                                # В пределах зоны гистерезиса сохраняем текущее состояние
+                                target_bypass = current_valve.state.upper() if current_valve else "OFF"
+                        else:
+                            target_bypass = current_valve.state.upper() if current_valve else None
+                    except (ValueError, TypeError):
                         target_bypass = "OFF"
-                except (ValueError, TypeError):
-                    pass
 
                 if target_bypass in ("ON", "OFF"):
                     target_service = SERVICE_TURN_ON if target_bypass == "ON" else SERVICE_TURN_OFF
