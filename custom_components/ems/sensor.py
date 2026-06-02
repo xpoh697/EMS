@@ -1048,9 +1048,12 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             # Sum baseline from hour 0 to current_hour - 1
             baseline_elapsed = sum(self._baselines[0:current_hour])
 
-            # Calculate Layer 2 corrective factor (safeguard against division by zero)
-            if baseline_elapsed > 0.0:
-                self._factor = max(0.3, min(actual_today / baseline_elapsed, 1.5))
+            # Calculate actual generation of elapsed hours (excluding the current hour)
+            actual_elapsed = max(0.0, actual_today - self._actual_today_hourly[current_hour])
+
+            # Calculate Layer 2 corrective factor (safeguard against division by zero and morning noise)
+            if baseline_elapsed > 0.5:
+                self._factor = max(0.3, min(actual_elapsed / baseline_elapsed, 1.5))
             else:
                 self._factor = 1.0
 
@@ -1065,11 +1068,14 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
         self._forecasts = new_forecasts
         self._state = round(sum(self._forecasts), 4)
 
+        # Get actual_elapsed for logging
+        actual_elapsed = max(0.0, actual_today - self._actual_today_hourly[current_hour]) if not self._curtail_occurred_today else 0.0
+
         ems_log(
             self.hass,
             _LOGGER,
             logging.INFO,
-            f"Updated Today's PV Forecast: {self._state} kWh (Factor: {self._factor:.3f}, Curtail: {self._curtail_occurred_today}, Actual Today: {actual_today} kWh)"
+            f"Updated Today's PV Forecast: {self._state} kWh (Factor: {self._factor:.3f}, Curtail: {self._curtail_occurred_today}, Actual Today: {actual_today} kWh, Elapsed Actual: {actual_elapsed:.3f} kWh)"
         )
 
     async def _async_update_listener(self, event) -> None:

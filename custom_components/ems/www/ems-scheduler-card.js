@@ -874,7 +874,7 @@ class EmsSchedulerCard extends HTMLElement {
             </div>
           </div>
         </div>
-        <div id="v-tag" class="version-tag">v0.3.28</div>
+        <div id="v-tag" class="version-tag">v0.3.29</div>
       </ha-card>
     `;
 

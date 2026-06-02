@@ -628,7 +628,8 @@ class BoilerController:
             if b_bottom >= 20.0:
                 key = self._get_bracket_key(b_top, b_bottom)
                 standby = self.calibration_sensor.get_standby_losses()
-                old_rate = standby.get(boiler, {}).get(key, 0.0)
+                old_rate_raw = standby.get(boiler, {}).get(key, 0.0)
+                old_rate = old_rate_raw.get("value", 0.0) if isinstance(old_rate_raw, dict) else float(old_rate_raw or 0.0)
                 new_rate = self._apply_ema(old_rate, rate, alpha=0.1)
                 
                 self.calibration_sensor.update_calibration_coefficient(
@@ -712,7 +713,8 @@ class BoilerController:
                     rate = round(temp_drop / elapsed_h, 4)
                     key = self._get_bracket_key(bracket_top, bracket_bottom)
                     standby = self.calibration_sensor.get_standby_losses()
-                    old_rate = standby.get(boiler, {}).get(key, 0.0)
+                    old_rate_raw = standby.get(boiler, {}).get(key, 0.0)
+                    old_rate = old_rate_raw.get("value", 0.0) if isinstance(old_rate_raw, dict) else float(old_rate_raw or 0.0)
                     new_rate = self._apply_ema(old_rate, rate, alpha=0.1)
                     
                     self.calibration_sensor.update_calibration_coefficient(
@@ -861,7 +863,8 @@ class BoilerController:
                 if elapsed_h >= 0.1 and not state["discarded"]:  # >= 6 минут в брэкете
                     rate = round(5.0 / elapsed_h, 4)  # °C/h
                     key  = self._get_bracket_key(bracket_top, bracket_bottom)
-                    old_rate = standby.get(boiler, {}).get(key, 0.0)
+                    old_rate_raw = standby.get(boiler, {}).get(key, 0.0)
+                    old_rate = old_rate_raw.get("value", 0.0) if isinstance(old_rate_raw, dict) else float(old_rate_raw or 0.0)
                     new_rate = self._apply_ema(old_rate, rate)
                     self._overnight_pending[boiler][key] = new_rate
                     _LOGGER.info(
@@ -919,7 +922,8 @@ class BoilerController:
                         if actual_drop > 0.2:
                             rate = round(actual_drop / elapsed_h, 4)
                             key  = self._get_bracket_key(bracket_top, bracket_bottom)
-                            old_rate = standby.get(boiler, {}).get(key, 0.0)
+                            old_rate_raw = standby.get(boiler, {}).get(key, 0.0)
+                            old_rate = old_rate_raw.get("value", 0.0) if isinstance(old_rate_raw, dict) else float(old_rate_raw or 0.0)
                             new_rate = self._apply_ema(old_rate, rate)
                             self._overnight_pending[boiler][key] = new_rate
                             _LOGGER.info(
