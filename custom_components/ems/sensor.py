@@ -1864,26 +1864,26 @@ class EmsDpSensor(SensorEntity):
                 )
             else:
                 if len(raw_today) == 24 and len(boiler_today) == 24:
-                    consumption_today = raw_today
+                    consumption_today = [max(0.0, float(c) - float(b)) for c, b in zip(raw_today, boiler_today)]
                     ems_log(
                         self.hass,
                         _LOGGER,
                         logging.DEBUG,
-                        "EMS DP: Using total average load profile today (sum: %.2fkWh, boiler average portion: %.2fkWh)",
-                        sum(raw_today),
+                        "EMS DP: Using net average load profile today (sum: %.2fkWh, boiler average portion: %.2fkWh)",
+                        sum(consumption_today),
                         sum(boiler_today)
                     )
                 else:
                     consumption_today = raw_today
 
                 if len(raw_tomorrow) == 24 and len(boiler_tomorrow) == 24:
-                    consumption_tomorrow = raw_tomorrow
+                    consumption_tomorrow = [max(0.0, float(c) - float(b)) for c, b in zip(raw_tomorrow, boiler_tomorrow)]
                     ems_log(
                         self.hass,
                         _LOGGER,
                         logging.DEBUG,
-                        "EMS DP: Using total average load profile tomorrow (sum: %.2fkWh, boiler average portion: %.2fkWh)",
-                        sum(raw_tomorrow),
+                        "EMS DP: Using net average load profile tomorrow (sum: %.2fkWh, boiler average portion: %.2fkWh)",
+                        sum(consumption_tomorrow),
                         sum(boiler_tomorrow)
                     )
                 else:
@@ -1923,8 +1923,8 @@ class EmsDpSensor(SensorEntity):
                 consumption_tomorrow,
                 fallback_consumption,
                 overrides,
-                boiler_today,
-                boiler_tomorrow,
+                planned_boiler_today,
+                planned_boiler_tomorrow,
             )
 
             self._state = result.get("current_action", "idle")
@@ -3829,6 +3829,16 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         # sensor.dp always re-writes last_calculation/calculation_duration on
         # every run, so attribute-only changes must NOT re-trigger sensor.boiler_dp.
         if entity_id == "sensor.dp":
+            if self.hass.data.setdefault(DOMAIN, {}).get("boiler_recalculating"):
+                self.hass.data[DOMAIN]["boiler_recalculating"] = False
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.DEBUG,
+                    "EMS Boiler DP: feedback loop from sensor.dp skipped"
+                )
+                return
+
             def _dp_sched_key(slot):
                 if not isinstance(slot, dict):
                     return ()
@@ -3874,6 +3884,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
 
     async def async_update_boiler_dp(self, force: bool = False) -> None:
         """Calculate the Boiler DP schedule inside executor."""
+        self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = True
         now = dt_util.now()
         config = self._entry.data
         options = self._entry.options

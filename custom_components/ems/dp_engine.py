@@ -115,6 +115,8 @@ def run_unified_dp(
             first_slot["consumption_kwh"] = first_slot["consumption_kwh"] * remaining_hour_fraction
         if "ev_kwh" in first_slot:
             first_slot["ev_kwh"] = first_slot["ev_kwh"] * remaining_hour_fraction
+        if "planned_boiler_kwh" in first_slot:
+            first_slot["planned_boiler_kwh"] = first_slot["planned_boiler_kwh"] * remaining_hour_fraction
 
     energy_step = 0.1
     max_energy_idx = max(0, int(round(usable_capacity / energy_step)))
@@ -156,7 +158,7 @@ def run_unified_dp(
             sell_price = slot.get("sell_price", 0.0)
             buy_price = slot.get("buy_price", 0.0)
             pv_kwh = slot.get("pv_kwh", 0.0)
-            consumption_kwh = slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0)
+            consumption_kwh = slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0) + slot.get("planned_boiler_kwh", 0.0)
             pv_surplus = max(0.0, pv_kwh - consumption_kwh)
             pv_deficit = max(0.0, consumption_kwh - pv_kwh)
             # When sell_price is below min_sell_price the mode mapper will choose STOP_SALE
@@ -316,7 +318,7 @@ def run_unified_dp(
         sell_price = slot.get("sell_price", 0.0)
         buy_price = slot.get("buy_price", 0.0)
         pv_kwh = slot.get("pv_kwh", 0.0)
-        consumption_kwh = slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0)
+        consumption_kwh = slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0) + slot.get("planned_boiler_kwh", 0.0)
         pv_surplus = max(0.0, pv_kwh - consumption_kwh)
         pv_deficit = max(0.0, consumption_kwh - pv_kwh)
         effective_sell_price = sell_price if sell_price >= config.min_sell_price else 0.0
@@ -650,7 +652,7 @@ def run_unified_dp(
 
         # Apply post-processing filter for small grid discharges (exporters)
         if act == ACT_DIS and amount > 0:
-            total_consumption = slot["consumption_kwh"] + slot.get("ev_kwh", 0.0)
+            total_consumption = slot["consumption_kwh"] + slot.get("ev_kwh", 0.0) + slot.get("planned_boiler_kwh", 0.0)
             home_deficit = max(0.0, total_consumption - slot["pv_kwh"])
             battery_to_home = min(amount, home_deficit)
             battery_to_grid = max(0.0, amount - battery_to_home)
@@ -669,7 +671,7 @@ def run_unified_dp(
         # the slot is effectively a PV-only charge — downgrade GRID_CHARGE to
         # PV_CHARGE (or SOL if there is no PV surplus at all).
         if act == ACT_GRID_CHARGE and amount > 0:
-            pv_surplus = max(0.0, slot["pv_kwh"] - slot.get("consumption_kwh", 0.0))
+            pv_surplus = max(0.0, slot["pv_kwh"] - (slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0) + slot.get("planned_boiler_kwh", 0.0)))
             net_grid = amount - pv_surplus
             if net_grid < 0.1:
                 if pv_surplus > 0.0:
@@ -692,7 +694,7 @@ def run_unified_dp(
         if act == ACT_DIS and amount > 0:
             end_usable = usable_energy - amount
             total_battery_discharge += amount
-            total_consumption = slot["consumption_kwh"] + slot.get("ev_kwh", 0.0)
+            total_consumption = slot["consumption_kwh"] + slot.get("ev_kwh", 0.0) + slot.get("planned_boiler_kwh", 0.0)
             home_deficit = max(0.0, total_consumption - slot["pv_kwh"])
             battery_to_home = min(amount, home_deficit)
             battery_to_grid = max(0.0, amount - battery_to_home)
@@ -769,7 +771,7 @@ def run_unified_dp(
             usable_energy = end_usable
 
         elif act == ACT_PAID_IMPORT:
-            total_consumption = slot["consumption_kwh"] + slot.get("ev_kwh", 0.0)
+            total_consumption = slot["consumption_kwh"] + slot.get("ev_kwh", 0.0) + slot.get("planned_boiler_kwh", 0.0)
             total_paid_import += total_consumption
             paid_import_hours.append({
                 "date": slot["date"],
