@@ -180,16 +180,63 @@ def run_boiler_dp(
     total_pv_budget_tomorrow = (boiler_average_budget_tomorrow + curtailed_pv_tomorrow) * 0.9
 
     # 2.4 Subtract battery charging deficit if battery doesn't reach 100% SOC before evening
-    max_soc_today = max([float(slot.get("expected_soc", 50.0)) for slot in slots if slot.get("date") == today_date], default=100.0)
+    # Adjust expected_soc by adding back the planned boiler energy to estimate baseline SOC trajectory
+    safe_capacity = bat_capacity if bat_capacity > 0.0 else 5.12
+    
+    # Process today slots
+    cum_boiler_today = 0.0
+    adjusted_socs_today = []
+    max_soc_today_raw = 100.0
+    raw_socs_today = [float(slot.get("expected_soc", 50.0)) for slot in slots if slot.get("date") == today_date]
+    if raw_socs_today:
+        max_soc_today_raw = max(raw_socs_today)
+        for slot in slots:
+            if slot.get("date") == today_date:
+                actual_planned = float(slot.get("actual_planned_boiler_kwh", 0.0))
+                cum_boiler_today += actual_planned
+                soc = float(slot.get("expected_soc", 50.0))
+                adj_soc = soc + (cum_boiler_today / safe_capacity) * 100.0
+                adjusted_socs_today.append(min(100.0, adj_soc))
+    max_soc_today = max(adjusted_socs_today, default=max_soc_today_raw)
+    
+    _LOGGER.debug(
+        "EMS Boiler DP: Today SOC raw=%.1f%%, adjusted=%.1f%% (accumulated boiler=%.2fkWh)",
+        max_soc_today_raw,
+        max_soc_today,
+        cum_boiler_today
+    )
+
     if max_soc_today < 98.0:
         soc_deficit = 100.0 - max_soc_today
-        energy_deficit = bat_capacity * (soc_deficit / 100.0)
+        energy_deficit = safe_capacity * (soc_deficit / 100.0)
         total_pv_budget_today = max(0.0, total_pv_budget_today - energy_deficit)
 
-    max_soc_tomorrow = max([float(slot.get("expected_soc", 50.0)) for slot in slots if slot.get("date") != today_date], default=100.0)
+    # Process tomorrow slots
+    cum_boiler_tomorrow = 0.0
+    adjusted_socs_tomorrow = []
+    max_soc_tomorrow_raw = 100.0
+    raw_socs_tomorrow = [float(slot.get("expected_soc", 50.0)) for slot in slots if slot.get("date") != today_date]
+    if raw_socs_tomorrow:
+        max_soc_tomorrow_raw = max(raw_socs_tomorrow)
+        for slot in slots:
+            if slot.get("date") != today_date:
+                actual_planned = float(slot.get("actual_planned_boiler_kwh", 0.0))
+                cum_boiler_tomorrow += actual_planned
+                soc = float(slot.get("expected_soc", 50.0))
+                adj_soc = soc + (cum_boiler_tomorrow / safe_capacity) * 100.0
+                adjusted_socs_tomorrow.append(min(100.0, adj_soc))
+    max_soc_tomorrow = max(adjusted_socs_tomorrow, default=max_soc_tomorrow_raw)
+
+    _LOGGER.debug(
+        "EMS Boiler DP: Tomorrow SOC raw=%.1f%%, adjusted=%.1f%% (accumulated boiler=%.2fkWh)",
+        max_soc_tomorrow_raw,
+        max_soc_tomorrow,
+        cum_boiler_tomorrow
+    )
+
     if max_soc_tomorrow < 98.0:
         soc_deficit = 100.0 - max_soc_tomorrow
-        energy_deficit = bat_capacity * (soc_deficit / 100.0)
+        energy_deficit = safe_capacity * (soc_deficit / 100.0)
         total_pv_budget_tomorrow = max(0.0, total_pv_budget_tomorrow - energy_deficit)
 
     allocated_free_slots = set()

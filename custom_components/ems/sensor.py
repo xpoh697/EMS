@@ -4081,6 +4081,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 "pv_kwh": float(slot.get("pv_kwh", 0.0)),
                 "consumption_kwh": float(slot.get("consumption_kwh", 0.0)),
                 "planned_boiler_kwh": float(hist_boiler),
+                "actual_planned_boiler_kwh": float(slot.get("planned_boiler_kwh", 0.0)),
                 "action": slot.get("action", "idle"),
                 "energy_kwh": float(slot.get("energy_kwh", 0.0)),
             })
