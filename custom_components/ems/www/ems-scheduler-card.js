@@ -449,6 +449,7 @@ class EmsSchedulerCard extends HTMLElement {
         .color-sell { color: #66bb6a; font-weight: 700; }
         .color-gen { color: #ffe082; font-weight: 700; }
         .color-load { color: #ff6b6b; font-weight: 700; }
+        .color-boiler { color: #90caf9; font-weight: 700; }
         .divider { color: rgba(255, 255, 255, 0.25); font-weight: 300; }
         .unit-text { color: rgba(255, 255, 255, 0.45); font-size: 0.85rem; font-weight: 400; }
         
@@ -826,12 +827,14 @@ class EmsSchedulerCard extends HTMLElement {
                 <div class="info-row">
                   <span class="info-label">
                     <ha-icon icon="mdi:lightning-bolt" class="info-icon solar-color"></ha-icon>
-                    <span>Gen / Load</span>
+                    <span>Gen / Load / Boiler</span>
                   </span>
                   <b class="info-value">
                     <span id="info-gen" class="color-gen">-</span>
                     <span class="divider"> / </span>
                     <span id="info-load" class="color-load">-</span>
+                    <span class="divider"> / </span>
+                    <span id="info-boiler" class="color-boiler">-</span>
                     <span class="unit-text"> kWh</span>
                   </b>
                 </div>
@@ -882,7 +885,7 @@ class EmsSchedulerCard extends HTMLElement {
             </div>
           </div>
         </div>
-        <div id="v-tag" class="version-tag">v0.3.32</div>
+        <div id="v-tag" class="version-tag">v0.3.35</div>
       </ha-card>
     `;
 
@@ -1117,6 +1120,7 @@ class EmsSchedulerCard extends HTMLElement {
         sell_price: slot.sell_price,
         gen: slot.pv_kwh,
         load: slot.consumption_kwh,
+        boiler: slot.planned_boiler_kwh || 0.0,
         soc: slot.soc,
         power: (slot.power_w / 1000).toFixed(2),
         amps: slot.current_a,
@@ -2109,8 +2113,10 @@ class EmsSchedulerCard extends HTMLElement {
 
     const genEl = this.shadowRoot.getElementById('info-gen');
     const loadEl = this.shadowRoot.getElementById('info-load');
+    const boilerEl = this.shadowRoot.getElementById('info-boiler');
     if (genEl) genEl.innerText = slot.pv_kwh !== undefined ? slot.pv_kwh.toFixed(2) : '0.00';
     if (loadEl) loadEl.innerText = slot.consumption_kwh !== undefined ? slot.consumption_kwh.toFixed(2) : '0.00';
+    if (boilerEl) boilerEl.innerText = slot.planned_boiler_kwh !== undefined ? parseFloat(slot.planned_boiler_kwh).toFixed(2) : '0.00';
 
     // Show/hide power row based on mode
     const powerRow = this.shadowRoot.getElementById('info-power-row');
