@@ -791,6 +791,14 @@ class EmsSchedulerCard extends HTMLElement {
               <span style="font-size: 0.72rem; color: rgba(255, 255, 255, 0.4); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">Calculation Duration</span>
               <span id="dp-calc-duration" style="font-size: 0.85rem; font-weight: 800; color: #ffd54f; font-family: 'Roboto Mono', monospace;">--</span>
             </div>
+            <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;">
+              <span style="font-size: 0.72rem; color: rgba(255, 255, 255, 0.4); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">Today's PV Factor</span>
+              <span id="solar-curr-factor" style="font-size: 0.85rem; font-weight: 800; color: #ff9800; font-family: 'Roboto Mono', monospace;">--</span>
+            </div>
+            <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;">
+              <span style="font-size: 0.72rem; color: rgba(255, 255, 255, 0.4); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">7-Day Avg PV Factor</span>
+              <span id="solar-avg-factor" style="font-size: 0.85rem; font-weight: 800; color: #4dd0e1; font-family: 'Roboto Mono', monospace;">--</span>
+            </div>
           </div>
         </div>
 
@@ -874,7 +882,7 @@ class EmsSchedulerCard extends HTMLElement {
             </div>
           </div>
         </div>
-        <div id="v-tag" class="version-tag">v0.3.29</div>
+        <div id="v-tag" class="version-tag">v0.3.32</div>
       </ha-card>
     `;
 
@@ -1034,6 +1042,34 @@ class EmsSchedulerCard extends HTMLElement {
       } else {
         calcTimeEl.innerText = '--';
         calcDurEl.innerText = '--';
+      }
+    }
+
+    // Update Solar Correction Factor details in Statistics tab
+    const pvTodayState = this._hass.states['sensor.pv_forecast_today'];
+    const currFactorEl = this.shadowRoot.getElementById('solar-curr-factor');
+    const avgFactorEl = this.shadowRoot.getElementById('solar-avg-factor');
+    if (currFactorEl && avgFactorEl) {
+      if (pvTodayState && pvTodayState.attributes) {
+        const currFactor = pvTodayState.attributes.factor_today;
+        const history = pvTodayState.attributes.factor_history || [];
+
+        if (currFactor !== undefined && currFactor !== null) {
+          currFactorEl.innerText = parseFloat(currFactor).toFixed(3);
+        } else {
+          currFactorEl.innerText = '--';
+        }
+
+        if (history.length > 0) {
+          const sum = history.reduce((a, b) => a + b, 0);
+          const avg = sum / history.length;
+          avgFactorEl.innerText = avg.toFixed(3);
+        } else {
+          avgFactorEl.innerText = '1.000';
+        }
+      } else {
+        currFactorEl.innerText = '--';
+        avgFactorEl.innerText = '--';
       }
     }
 

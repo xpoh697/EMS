@@ -99,6 +99,14 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
         return hourly_baselines, False
 
     attrs = state_obj.attributes
+    _LOGGER.info(
+        "EMS PV Debug for %s: state=%s, attrs_keys=%s, detailedForecast_len=%s, analysis=%s",
+        state_obj.entity_id,
+        state_obj.state,
+        list(attrs.keys()),
+        len(attrs.get("detailedForecast", [])) if isinstance(attrs.get("detailedForecast"), list) else "None",
+        attrs.get("analysis")
+    )
     forecast_list = None
     matched_attr = None
 
@@ -870,6 +878,7 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
         self._baselines: list[float] = [0.0] * 24
         self._forecasts: list[float] = [0.0] * 24
         self._factor: float = 1.0
+        self._factor_history: list[float] = []
         self._is_fallback: bool = False
         self._curtail_occurred_today: bool = False
         self._last_day: int = dt_util.now().day
@@ -899,6 +908,7 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             "hourly_forecast": self._forecasts,
             "baseline": self._baselines,
             "factor_today": self._factor,
+            "factor_history": self._factor_history,
             "source_sensor": self._source_forecast_id,
             "actual_sensor": self._actual_generation_id,
             "forecast_type": "fallback" if self._is_fallback else "forecast",
@@ -929,6 +939,15 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             else:
                 self._factor = 1.0
 
+            factor_history_attr = last_state.attributes.get("factor_history")
+            self._factor_history = []
+            if isinstance(factor_history_attr, list):
+                for x in factor_history_attr:
+                    try:
+                        self._factor_history.append(float(x))
+                    except (ValueError, TypeError):
+                        pass
+
             self._curtail_occurred_today = bool(last_state.attributes.get("curtail_occurred_today", False))
 
             actual_hourly_attr = last_state.attributes.get("actual_today_hourly")
@@ -941,6 +960,7 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
         else:
             self._state = 0.0
             self._factor = 1.0
+            self._factor_history = []
             self._curtail_occurred_today = False
             self._actual_today_hourly = [0.0] * 24
             self._last_actual_total = None
@@ -988,6 +1008,17 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             )
         )
 
+    def _handle_midnight_transition(self, now) -> None:
+        """Handle transitioning internal trackers at midnight."""
+        if now.day != self._last_day:
+            if self._factor is not None:
+                self._factor_history.append(self._factor)
+                self._factor_history = self._factor_history[-7:]
+            self._curtail_occurred_today = False
+            self._actual_today_hourly = [0.0] * 24
+            self._last_actual_total = None
+            self._last_day = now.day
+
     def _update_forecast(self) -> None:
         """Calculate probabilistic baseline and apply Layer 2 corrective factor with curtailment check."""
         state_obj = self.hass.states.get(self._source_forecast_id)
@@ -1001,11 +1032,7 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
         current_hour = now.hour
 
         # Midnight transition check
-        if now.day != self._last_day:
-            self._curtail_occurred_today = False
-            self._actual_today_hourly = [0.0] * 24
-            self._last_actual_total = None
-            self._last_day = now.day
+        self._handle_midnight_transition(now)
 
         # Get actual today generation
         actual_today = 0.0
@@ -1055,7 +1082,11 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             if baseline_elapsed > 0.5:
                 self._factor = max(0.3, min(actual_elapsed / baseline_elapsed, 1.5))
             else:
-                self._factor = 1.0
+                if self._factor_history:
+                    avg_factor = sum(self._factor_history) / len(self._factor_history)
+                    self._factor = max(0.3, min(avg_factor, 1.5))
+                else:
+                    self._factor = 1.0
 
         # Apply factor to remaining hours of today
         new_forecasts = []
@@ -1066,7 +1097,12 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
                 new_forecasts.append(self._baselines[h])
 
         self._forecasts = new_forecasts
-        self._state = round(sum(self._forecasts), 4)
+
+        # Calculate total state: actual elapsed + corrected remaining (if actual data is available)
+        if sum(self._actual_today_hourly) > 0.0:
+            self._state = round(sum(self._actual_today_hourly[0:current_hour]) + sum(self._forecasts[current_hour:]), 4)
+        else:
+            self._state = round(sum(self._forecasts), 4)
 
         # Get actual_elapsed for logging
         actual_elapsed = max(0.0, actual_today - self._actual_today_hourly[current_hour]) if not self._curtail_occurred_today else 0.0
@@ -1085,11 +1121,7 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
 
         # Double check midnight transition in case cron lagged
         now = dt_util.now()
-        if now.day != self._last_day:
-            self._curtail_occurred_today = False
-            self._actual_today_hourly = [0.0] * 24
-            self._last_actual_total = None
-            self._last_day = now.day
+        self._handle_midnight_transition(now)
 
         if entity_id == self._actual_generation_id and new_state is not None:
             if new_state.state not in (None, "unknown", "unavailable"):
@@ -1122,11 +1154,7 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
     async def _async_hourly_trigger(self, datetime_now) -> None:
         """Recalculate forecast on hourly transitions and handle midnight transitions."""
         now = dt_util.now()
-        if now.day != self._last_day:
-            self._curtail_occurred_today = False
-            self._actual_today_hourly = [0.0] * 24
-            self._last_actual_total = None
-            self._last_day = now.day
+        self._handle_midnight_transition(now)
         self._update_forecast()
         self.async_write_ha_state()
 
@@ -1156,6 +1184,8 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
         # Internal state
         self._state: float = 0.0
         self._baselines: list[float] = [0.0] * 24
+        self._forecasts: list[float] = [0.0] * 24
+        self._factor: float = 1.0
         self._is_fallback: bool = False
 
     @property
@@ -1178,8 +1208,9 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
         return {
-            "hourly_forecast": self._baselines,  # Same as baseline for tomorrow
+            "hourly_forecast": self._forecasts,
             "baseline": self._baselines,
+            "factor_today": self._factor,
             "source_sensor": self._source_forecast_id,
             "forecast_type": "fallback" if self._is_fallback else "forecast",
         }
@@ -1197,6 +1228,13 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
             )
         )
 
+        # Track today's forecast changes to dynamically update tomorrow's scaling factor
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, ["sensor.pv_forecast_today"], self._async_today_sensor_changed
+            )
+        )
+
         # Hourly trigger to keep updated if needed
         self.async_on_remove(
             async_track_time_change(
@@ -1205,24 +1243,59 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
         )
 
     def _update_forecast(self) -> None:
-        """Calculate probabilistic baseline for tomorrow."""
+        """Calculate probabilistic baseline for tomorrow and apply today's Layer 2 factor."""
         state_obj = self.hass.states.get(self._source_forecast_id)
         if not state_obj:
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Source PV forecast sensor {self._source_forecast_id} not found!")
             return
 
         self._baselines, self._is_fallback = parse_solcast_forecast(self.hass, state_obj)
-        self._state = round(sum(self._baselines), 4)
+
+        factor = 1.0
+        today_state = self.hass.states.get("sensor.pv_forecast_today")
+        if today_state:
+            factor_attr = today_state.attributes.get("factor_today")
+            if factor_attr is not None:
+                try:
+                    factor = max(0.3, min(float(factor_attr), 1.5))
+                except (ValueError, TypeError):
+                    pass
+
+        self._factor = factor
+        self._forecasts = [round(val * factor, 4) for val in self._baselines]
+        self._state = round(sum(self._forecasts), 4)
 
         ems_log(
             self.hass,
             _LOGGER,
             logging.INFO,
-            f"Updated Tomorrow's PV Forecast: {self._state} kWh"
+            f"Updated Tomorrow's PV Forecast: {self._state} kWh (Factor: {factor:.3f}, Base Total: {sum(self._baselines):.3f} kWh)"
         )
 
     async def _async_update_listener(self, event) -> None:
         """Handle state change event from source sensor."""
+        self._update_forecast()
+        self.async_write_ha_state()
+
+    async def _async_today_sensor_changed(self, event) -> None:
+        """Handle state change event from today's PV forecast sensor."""
+        new_state = event.data.get("new_state")
+        if new_state is None or new_state.state in (None, "unknown", "unavailable"):
+            return
+
+        factor_attr = new_state.attributes.get("factor_today")
+        if factor_attr is None:
+            return
+
+        try:
+            factor = max(0.3, min(float(factor_attr), 1.5))
+        except (ValueError, TypeError):
+            return
+
+        # Avoid updating if factor hasn't changed (saves DB writes and spams)
+        if abs(self._factor - factor) < 0.0001:
+            return
+
         self._update_forecast()
         self.async_write_ha_state()
 
@@ -1864,6 +1937,8 @@ class EmsDpSensor(SensorEntity):
             self._schedule = result.get("schedule", [])
             self._stats = result.get("stats", {})
             self._error_msg = result.get("error")
+            if self._error_msg:
+                ems_log(self.hass, _LOGGER, logging.ERROR, f"EMS DP calculation error: {self._error_msg}")
             self._curtailed_pv_today = result.get("curtailed_pv_today", 0.0)
             self._curtailed_pv_tomorrow = result.get("curtailed_pv_tomorrow", 0.0)
 
@@ -1978,7 +2053,15 @@ class EmsDpSensor(SensorEntity):
         current_usable = max(0.0, min(current_usable, usable_capacity))
 
         # Reserve calculation (night hours average demand)
-        night_hours = [23, 0, 1, 2, 3, 4, 5, 6, 7]
+        sunrise_hour = 7  # fallback default
+        target_pv = pv_tomorrow if any(pv_tomorrow) else pv_today
+        if len(target_pv) == 24:
+            for h in range(24):
+                if target_pv[h] > 0.05:
+                    sunrise_hour = h
+                    break
+        night_hours = [23] + list(range(0, sunrise_hour))
+
         profile = consumption_tomorrow if has_tomorrow_prices else consumption_today
         reserve = sum(profile[h] for h in night_hours if h < len(profile))
         min_end_usable = min(reserve, usable_capacity)

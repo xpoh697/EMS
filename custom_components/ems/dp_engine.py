@@ -197,6 +197,8 @@ def run_unified_dp(
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy - exp) / energy_step))))
                         to_grid = max(0.0, exp + pv_kwh - consumption_kwh)
                         grid_imp = max(0.0, consumption_kwh - exp - pv_kwh)
+                        if to_grid > 0.0 and to_grid < config.min_energy_to_discharge:
+                            continue
                         _update_n(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
 
                 # === PV_CHARGE ===
@@ -257,7 +259,9 @@ def run_unified_dp(
             if state_idx < min_end_idx:
                 continue
             usable_energy = state_idx * energy_step
-            total_value = value + usable_energy * terminal_value_per_kwh
+            reserve_energy = min(usable_energy, min_end_usable)
+            surplus_energy = max(0.0, usable_energy - min_end_usable)
+            total_value = value + reserve_energy * terminal_value_per_kwh + surplus_energy * config.min_sell_price
             if total_value > best_total_value_normal:
                 best_total_value_normal = total_value
                 best_final_idx_normal = state_idx
@@ -267,7 +271,9 @@ def run_unified_dp(
                 if value == neg_inf:
                     continue
                 usable_energy = state_idx * energy_step
-                total_value = value + usable_energy * terminal_value_per_kwh
+                reserve_energy = min(usable_energy, min_end_usable)
+                surplus_energy = max(0.0, usable_energy - min_end_usable)
+                total_value = value + reserve_energy * terminal_value_per_kwh + surplus_energy * config.min_sell_price
                 if total_value > best_total_value_normal:
                     best_total_value_normal = total_value
                     best_final_idx_normal = state_idx
@@ -365,6 +371,7 @@ def run_unified_dp(
                 continue
 
             usable_energy = state_idx * energy_step
+            avail_cap = usable_capacity - usable_energy
             state_updated = False
 
             # Calculate the exact expected target state for this starting state under override
@@ -435,10 +442,11 @@ def run_unified_dp(
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy - exp) / energy_step))))
                         to_grid = max(0.0, exp + pv_kwh - consumption_kwh)
                         grid_imp = max(0.0, consumption_kwh - exp - pv_kwh)
+                        if not override and to_grid > 0.0 and to_grid < config.min_energy_to_discharge:
+                            continue
                         _update(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
 
             # === PV_CHARGE: PV surplus -> battery, overflow -> grid ===
-            avail_cap = usable_capacity - usable_energy
             if (not override_action or (mode_config and mode_config.charge_from_pv)) and pv_surplus > 0 and avail_cap >= energy_step and (target_nsi is None or target_nsi > state_idx):
                 max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
@@ -525,7 +533,9 @@ def run_unified_dp(
         if state_idx < min_end_idx:
             continue
         usable_energy = state_idx * energy_step
-        total_value = value + usable_energy * terminal_value_per_kwh
+        reserve_energy = min(usable_energy, min_end_usable)
+        surplus_energy = max(0.0, usable_energy - min_end_usable)
+        total_value = value + reserve_energy * terminal_value_per_kwh + surplus_energy * config.min_sell_price
         if total_value > best_total_value:
             best_total_value = total_value
             best_final_idx = state_idx
@@ -535,7 +545,9 @@ def run_unified_dp(
             if value == neg_inf:
                 continue
             usable_energy = state_idx * energy_step
-            total_value = value + usable_energy * terminal_value_per_kwh
+            reserve_energy = min(usable_energy, min_end_usable)
+            surplus_energy = max(0.0, usable_energy - min_end_usable)
+            total_value = value + reserve_energy * terminal_value_per_kwh + surplus_energy * config.min_sell_price
             if total_value > best_total_value:
                 best_total_value = total_value
                 best_final_idx = state_idx

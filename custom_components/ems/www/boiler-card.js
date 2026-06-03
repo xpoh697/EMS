@@ -1001,14 +1001,23 @@ class BoilerCard extends HTMLElement {
     this._statusContent.appendChild(houseFlowRow);
     this._houseFlowVal = houseFlowRow.querySelector("#house-flow-val");
 
-    // PV Budget Today row
-    const pvBudgetTodayRow = document.createElement("div");
-    pvBudgetTodayRow.className = "status-info-row hidden";
-    pvBudgetTodayRow.innerHTML = `
-      <span class="status-info-label">PV-бюджет сегодня</span>
-      <span class="status-info-value" id="pv-budget-today-val">–</span>`;
-    this._statusContent.appendChild(pvBudgetTodayRow);
-    this._pvBudgetTodayVal = pvBudgetTodayRow.querySelector("#pv-budget-today-val");
+    // Base Limit Today row
+    const baseLimitTodayRow = document.createElement("div");
+    baseLimitTodayRow.className = "status-info-row hidden";
+    baseLimitTodayRow.innerHTML = `
+      <span class="status-info-label">Базовый лимит сегодня</span>
+      <span class="status-info-value" id="base-limit-today-val">–</span>`;
+    this._statusContent.appendChild(baseLimitTodayRow);
+    this._baseLimitTodayVal = baseLimitTodayRow.querySelector("#base-limit-today-val");
+
+    // Solar Surplus Today row
+    const solarSurplusTodayRow = document.createElement("div");
+    solarSurplusTodayRow.className = "status-info-row hidden";
+    solarSurplusTodayRow.innerHTML = `
+      <span class="status-info-label">Избыток СЭС сегодня</span>
+      <span class="status-info-value" id="solar-surplus-today-val">–</span>`;
+    this._statusContent.appendChild(solarSurplusTodayRow);
+    this._solarSurplusTodayVal = solarSurplusTodayRow.querySelector("#solar-surplus-today-val");
 
     // PV Used Today row
     const pvUsedTodayRow = document.createElement("div");
@@ -1028,14 +1037,23 @@ class BoilerCard extends HTMLElement {
     this._statusContent.appendChild(pvRemainingTodayRow);
     this._pvRemainingTodayVal = pvRemainingTodayRow.querySelector("#pv-remaining-today-val");
 
-    // PV Limit Tomorrow row
-    const pvLimitTomorrowRow = document.createElement("div");
-    pvLimitTomorrowRow.className = "status-info-row hidden";
-    pvLimitTomorrowRow.innerHTML = `
-      <span class="status-info-label">Свободный PV-лимит завтра</span>
-      <span class="status-info-value" id="pv-limit-tomorrow-val">–</span>`;
-    this._statusContent.appendChild(pvLimitTomorrowRow);
-    this._pvLimitTomorrowVal = pvLimitTomorrowRow.querySelector("#pv-limit-tomorrow-val");
+    // Base Limit Tomorrow row
+    const baseLimitTomorrowRow = document.createElement("div");
+    baseLimitTomorrowRow.className = "status-info-row hidden";
+    baseLimitTomorrowRow.innerHTML = `
+      <span class="status-info-label">Базовый лимит завтра</span>
+      <span class="status-info-value" id="base-limit-tomorrow-val">–</span>`;
+    this._statusContent.appendChild(baseLimitTomorrowRow);
+    this._baseLimitTomorrowVal = baseLimitTomorrowRow.querySelector("#base-limit-tomorrow-val");
+
+    // Solar Surplus Tomorrow row
+    const solarSurplusTomorrowRow = document.createElement("div");
+    solarSurplusTomorrowRow.className = "status-info-row hidden";
+    solarSurplusTomorrowRow.innerHTML = `
+      <span class="status-info-label">Избыток СЭС завтра</span>
+      <span class="status-info-value" id="solar-surplus-tomorrow-val">–</span>`;
+    this._statusContent.appendChild(solarSurplusTomorrowRow);
+    this._solarSurplusTomorrowVal = solarSurplusTomorrowRow.querySelector("#solar-surplus-tomorrow-val");
 
     // Divider
     const div2 = document.createElement("div");
@@ -1587,23 +1605,38 @@ class BoilerCard extends HTMLElement {
     }
 
     // ── Update PV Limits ──────────────────────────────────────────────────
-    const budgetToday = dpS?.attributes?.stats?.total_pv_budget_today;
+    const baseToday = dpS?.attributes?.stats?.boiler_average_budget_today;
+    const surplusToday = dpS?.attributes?.stats?.curtailed_pv_today;
     const usedToday = dpS?.attributes?.stats?.boiler_used_today;
     const remainingToday = dpS?.attributes?.stats?.remaining_pv_today;
-    const curtailedTomorrow = dpS?.attributes?.stats?.curtailed_pv_tomorrow;
+    const baseTomorrow = dpS?.attributes?.stats?.boiler_average_budget_tomorrow;
+    const surplusTomorrow = dpS?.attributes?.stats?.curtailed_pv_tomorrow;
 
-    if (this._pvBudgetTodayVal) {
-      if (budgetToday !== undefined && budgetToday !== null && budgetToday > 0.0) {
-        this._pvBudgetTodayVal.textContent = `${budgetToday.toFixed(1)} кВтч`;
-        this._pvBudgetTodayVal.parentElement.classList.remove("hidden");
+    const showTodayStats = (baseToday !== undefined && baseToday !== null && baseToday > 0.0) || 
+                           (surplusToday !== undefined && surplusToday !== null && surplusToday > 0.0);
+
+    if (this._baseLimitTodayVal) {
+      if (showTodayStats && baseToday !== undefined && baseToday !== null) {
+        this._baseLimitTodayVal.textContent = `${baseToday.toFixed(1)} кВтч`;
+        this._baseLimitTodayVal.parentElement.classList.remove("hidden");
       } else {
-        this._pvBudgetTodayVal.textContent = "–";
-        this._pvBudgetTodayVal.parentElement.classList.add("hidden");
+        this._baseLimitTodayVal.textContent = "–";
+        this._baseLimitTodayVal.parentElement.classList.add("hidden");
+      }
+    }
+
+    if (this._solarSurplusTodayVal) {
+      if (showTodayStats && surplusToday !== undefined && surplusToday !== null) {
+        this._solarSurplusTodayVal.textContent = `${surplusToday.toFixed(1)} кВтч`;
+        this._solarSurplusTodayVal.parentElement.classList.remove("hidden");
+      } else {
+        this._solarSurplusTodayVal.textContent = "–";
+        this._solarSurplusTodayVal.parentElement.classList.add("hidden");
       }
     }
 
     if (this._pvUsedTodayVal) {
-      if (budgetToday !== undefined && budgetToday !== null && budgetToday > 0.0 && usedToday !== undefined && usedToday !== null) {
+      if (showTodayStats && usedToday !== undefined && usedToday !== null) {
         this._pvUsedTodayVal.textContent = `${usedToday.toFixed(1)} кВтч`;
         this._pvUsedTodayVal.parentElement.classList.remove("hidden");
       } else {
@@ -1613,7 +1646,7 @@ class BoilerCard extends HTMLElement {
     }
 
     if (this._pvRemainingTodayVal) {
-      if (budgetToday !== undefined && budgetToday !== null && budgetToday > 0.0 && remainingToday !== undefined && remainingToday !== null) {
+      if (showTodayStats && remainingToday !== undefined && remainingToday !== null) {
         this._pvRemainingTodayVal.textContent = `${remainingToday.toFixed(1)} кВтч`;
         this._pvRemainingTodayVal.parentElement.classList.remove("hidden");
       } else {
@@ -1622,13 +1655,26 @@ class BoilerCard extends HTMLElement {
       }
     }
 
-    if (this._pvLimitTomorrowVal) {
-      if (curtailedTomorrow !== undefined && curtailedTomorrow !== null && curtailedTomorrow > 0.0) {
-        this._pvLimitTomorrowVal.textContent = `${curtailedTomorrow.toFixed(1)} кВтч`;
-        this._pvLimitTomorrowVal.parentElement.classList.remove("hidden");
+    const showTomorrowStats = (baseTomorrow !== undefined && baseTomorrow !== null && baseTomorrow > 0.0) || 
+                              (surplusTomorrow !== undefined && surplusTomorrow !== null && surplusTomorrow > 0.0);
+
+    if (this._baseLimitTomorrowVal) {
+      if (showTomorrowStats && baseTomorrow !== undefined && baseTomorrow !== null) {
+        this._baseLimitTomorrowVal.textContent = `${baseTomorrow.toFixed(1)} кВтч`;
+        this._baseLimitTomorrowVal.parentElement.classList.remove("hidden");
       } else {
-        this._pvLimitTomorrowVal.textContent = "–";
-        this._pvLimitTomorrowVal.parentElement.classList.add("hidden");
+        this._baseLimitTomorrowVal.textContent = "–";
+        this._baseLimitTomorrowVal.parentElement.classList.add("hidden");
+      }
+    }
+
+    if (this._solarSurplusTomorrowVal) {
+      if (showTomorrowStats && surplusTomorrow !== undefined && surplusTomorrow !== null) {
+        this._solarSurplusTomorrowVal.textContent = `${surplusTomorrow.toFixed(1)} кВтч`;
+        this._solarSurplusTomorrowVal.parentElement.classList.remove("hidden");
+      } else {
+        this._solarSurplusTomorrowVal.textContent = "–";
+        this._solarSurplusTomorrowVal.parentElement.classList.add("hidden");
       }
     }
 

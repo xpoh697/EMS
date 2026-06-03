@@ -264,16 +264,28 @@ def run_boiler_dp(
             rem_tomorrow -= boiler_hourly_draw
 
     # Рассчитываем раздельные динамические лимиты температуры
-    dynamic_t_max_elec_today = t_max_elec
+    dynamic_t_max_elec_today_pump = t_max_elec
+    dynamic_t_max_elec_today_only = t_max_elec
     total_budget_for_limit = total_pv_budget_today + actual_boiler_today
-    if total_budget_for_limit > 0.0 and eff_elec_pump > 0.0:
-        budget_rise = total_budget_for_limit * eff_elec_pump
-        dynamic_t_max_elec_today = min(t_max_elec, max(t_min, t_min + budget_rise))
+    if total_budget_for_limit > 0.0:
+        eff_pump_val = eff_elec_pump if eff_elec_pump > 0.0 else 3.35
+        budget_rise_pump = total_budget_for_limit * eff_pump_val
+        dynamic_t_max_elec_today_pump = min(t_max_elec, max(t_min, t_min + budget_rise_pump))
 
-    dynamic_t_max_elec_tomorrow = t_max_elec
-    if total_pv_budget_tomorrow > 0.0 and eff_elec_pump > 0.0:
-        budget_rise = total_pv_budget_tomorrow * eff_elec_pump
-        dynamic_t_max_elec_tomorrow = min(t_max_elec, max(t_min, t_min + budget_rise))
+        eff_only_val = eff_elec_only if eff_elec_only > 0.0 else 20.4
+        budget_rise_only = total_budget_for_limit * eff_only_val
+        dynamic_t_max_elec_today_only = min(t_max_elec, max(t_min, t_min + budget_rise_only))
+
+    dynamic_t_max_elec_tomorrow_pump = t_max_elec
+    dynamic_t_max_elec_tomorrow_only = t_max_elec
+    if total_pv_budget_tomorrow > 0.0:
+        eff_pump_val = eff_elec_pump if eff_elec_pump > 0.0 else 3.35
+        budget_rise_pump = total_pv_budget_tomorrow * eff_pump_val
+        dynamic_t_max_elec_tomorrow_pump = min(t_max_elec, max(t_min, t_min + budget_rise_pump))
+
+        eff_only_val = eff_elec_only if eff_elec_only > 0.0 else 20.4
+        budget_rise_only = total_pv_budget_tomorrow * eff_only_val
+        dynamic_t_max_elec_tomorrow_only = min(t_max_elec, max(t_min, t_min + budget_rise_only))
 
     # Run DP with relaxed constraint fallback
     best_path = None
@@ -520,7 +532,7 @@ def run_boiler_dp(
                         
                         is_solar_slot = (h - 1) in allocated_free_slots or (mode_config and mode_config.curtail_pv)
                         is_today_slot = slot.get("date") == today_date
-                        current_t_max_elec = (dynamic_t_max_elec_today if is_today_slot else dynamic_t_max_elec_tomorrow) if is_solar_slot else t_max_elec
+                        current_t_max_elec = (dynamic_t_max_elec_today_only if is_today_slot else dynamic_t_max_elec_tomorrow_only) if is_solar_slot else t_max_elec
                         
                         T_elec_end_val = min(current_t_max_elec, T_elec_cooled + max_rise_elec)
                         T_gas_end_val = T_gas_cooled
@@ -548,7 +560,7 @@ def run_boiler_dp(
                                         
                                         penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                                         if tariff <= 0.0:
-                                            reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min))
+                                            reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min)) + 0.01 * kwh
                                         else:
                                             reward = temp_reward * max(0.0, T_active - t_min)
                                         new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
@@ -572,7 +584,7 @@ def run_boiler_dp(
                         
                         is_solar_slot = (h - 1) in allocated_free_slots or (mode_config and mode_config.curtail_pv)
                         is_today_slot = slot.get("date") == today_date
-                        current_t_max_elec = (dynamic_t_max_elec_today if is_today_slot else dynamic_t_max_elec_tomorrow) if is_solar_slot else t_max_elec
+                        current_t_max_elec = (dynamic_t_max_elec_today_pump if is_today_slot else dynamic_t_max_elec_tomorrow_pump) if is_solar_slot else t_max_elec
                         
                         t_max_mode = current_t_max_elec
 
@@ -598,7 +610,7 @@ def run_boiler_dp(
                             
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                             if tariff <= 0.0:
-                                reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
+                                reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min)) + 0.01 * kwh
                             else:
                                 reward = temp_reward * max(0.0, T_active - t_min)
                             new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
@@ -778,6 +790,8 @@ def run_boiler_dp(
         "curtailed_pv_budget": round(curtailed_pv_today + curtailed_pv_tomorrow, 2),
         "curtailed_pv_today": round(curtailed_pv_today, 2),
         "curtailed_pv_tomorrow": round(curtailed_pv_tomorrow, 2),
+        "boiler_average_budget_today": round(boiler_average_budget_today, 2),
+        "boiler_average_budget_tomorrow": round(boiler_average_budget_tomorrow, 2),
         "total_pv_budget_today": round(total_pv_budget_today + actual_boiler_today, 2),
         "boiler_used_today": round(actual_boiler_today, 2),
         "remaining_pv_today": round(total_pv_budget_today, 2),
