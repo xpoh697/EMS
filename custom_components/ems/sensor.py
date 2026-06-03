@@ -3958,7 +3958,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             # Tomorrow slots if available
             dp_state = self.hass.states.get("sensor.dp")
             dp_schedule = dp_state.attributes.get("schedule", []) if dp_state else []
-            tomorrow_str = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
             for slot in dp_schedule:
                 if slot.get("date") == tomorrow_str:
                     schedule_list.append({
@@ -4033,7 +4033,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             ) or "sensor.load_consumption"
             load_state = self.hass.states.get(_load_entity_id)
             if load_state:
-                tomorrow_weekday = (now + datetime.timedelta(days=1)).weekday()
+                tomorrow_weekday = (now + timedelta(days=1)).weekday()
                 day_keys = [
                     "average_monday", "average_tuesday", "average_wednesday",
                     "average_thursday", "average_friday", "average_saturday",
