@@ -166,7 +166,7 @@ def run_boiler_dp(
         if curtail_active:
             pv_kwh = float(slot.get("pv_kwh", 0.0))
             planned_boiler = float(slot.get("planned_boiler_kwh", 0.0))
-            consumption_kwh = max(0.0, float(slot.get("consumption_kwh", 0.0)) - planned_boiler)
+            consumption_kwh = float(slot.get("consumption_kwh", 0.0))
             action = slot.get("action", "idle")
             battery_charge = float(slot.get("energy_kwh", 0.0)) if action in ("pv_charge", "grid_charge") else 0.0
             wasted = max(0.0, pv_kwh - consumption_kwh - battery_charge)

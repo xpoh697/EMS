@@ -4022,11 +4022,50 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self.async_write_ha_state()
             return
 
+        # Get historical average boiler profile
+        boiler_today_profile = [0.0] * 24
+        boiler_tomorrow_profile = [0.0] * 24
+        try:
+            from homeassistant.helpers import entity_registry as _er_mod
+            _load_registry = _er_mod.async_get(self.hass)
+            _load_entity_id = _load_registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{self._entry_id}_load_consumption"
+            ) or "sensor.load_consumption"
+            load_state = self.hass.states.get(_load_entity_id)
+            if load_state:
+                tomorrow_weekday = (now + datetime.timedelta(days=1)).weekday()
+                day_keys = [
+                    "average_monday", "average_tuesday", "average_wednesday",
+                    "average_thursday", "average_friday", "average_saturday",
+                    "average_sunday",
+                ]
+                tomorrow_key = day_keys[tomorrow_weekday]
+                raw_b_today = load_state.attributes.get("boiler_average_today", [0.0] * 24)
+                raw_b_tomorrow = load_state.attributes.get(f"boiler_{tomorrow_key}", [0.0] * 24)
+                
+                from .utils import safe_float_list
+                boiler_today_profile = safe_float_list(raw_b_today, 0.0)
+                boiler_tomorrow_profile = safe_float_list(raw_b_tomorrow, 0.0)
+        except Exception as ex:
+            _LOGGER.warning("EMS Boiler DP: failed to parse historical average profiles: %s", ex)
+
         # Convert schedule from sensor.dp back to list of dicts required by run_boiler_dp
         slots = []
+        today_str = now.strftime("%Y-%m-%d")
         for slot in dp_schedule:
+            slot_date = slot.get("date")
+            slot_hour = int(slot.get("hour", 0))
+            
+            hist_boiler = 0.0
+            if slot_date == today_str:
+                if slot_hour < len(boiler_today_profile):
+                    hist_boiler = boiler_today_profile[slot_hour]
+            else:
+                if slot_hour < len(boiler_tomorrow_profile):
+                    hist_boiler = boiler_tomorrow_profile[slot_hour]
+
             slots.append({
-                "date": slot.get("date"),
+                "date": slot_date,
                 "hour": slot.get("hour"),
                 "buy_price": float(slot.get("buy_price", 0.0)),
                 "sell_price": float(slot.get("sell_price", 0.0)),
@@ -4034,7 +4073,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 "expected_soc": float(slot.get("expected_soc", 50.0)),
                 "pv_kwh": float(slot.get("pv_kwh", 0.0)),
                 "consumption_kwh": float(slot.get("consumption_kwh", 0.0)),
-                "planned_boiler_kwh": float(slot.get("planned_boiler_kwh", 0.0)),
+                "planned_boiler_kwh": float(hist_boiler),
                 "action": slot.get("action", "idle"),
                 "energy_kwh": float(slot.get("energy_kwh", 0.0)),
             })
