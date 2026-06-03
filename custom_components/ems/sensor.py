@@ -4043,7 +4043,6 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 raw_b_today = load_state.attributes.get("boiler_average_today", [0.0] * 24)
                 raw_b_tomorrow = load_state.attributes.get(f"boiler_{tomorrow_key}", [0.0] * 24)
                 
-                from .utils import safe_float_list
                 boiler_today_profile = safe_float_list(raw_b_today, 0.0)
                 boiler_tomorrow_profile = safe_float_list(raw_b_tomorrow, 0.0)
         except Exception as ex:
