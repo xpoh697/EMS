@@ -6,10 +6,18 @@ if os.path.exists(debug_slots_path):
     with open(debug_slots_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     
-    slots_passed = data.get("slots_passed", [])
-    print(f"Timestamp of log: {data.get('timestamp')}")
-    print(f"Total slots: {len(slots_passed)}")
-    for idx, slot in enumerate(slots_passed):
-        print(f"Slot {idx:02d}: {slot.get('date')} H{slot.get('hour'):02d} | Buy: {slot.get('buy_price'):.4f} Sell: {slot.get('sell_price'):.4f} PV: {slot.get('pv_kwh'):.4f} Cons: {slot.get('consumption_kwh'):.4f} Boiler: {slot.get('planned_boiler_kwh'):.4f} | Action: {slot.get('action')} PhysMode: {slot.get('physical_mode')} ExpSOC: {slot.get('expected_soc')}%")
+    print("=== Boiler DP Debug Info ===")
+    print("t_gas:", data.get("t_gas"))
+    print("t_elec:", data.get("t_elec"))
+    print("t_min:", data.get("t_min"))
+    print("t_max_elec:", data.get("t_max_elec"))
+    print("t_max_gas:", data.get("t_max_gas"))
+    print("vol_elec:", data.get("vol_elec"))
+    print("vol_gas:", data.get("vol_gas"))
+    
+    slots = data.get("slots", [])
+    print("\nSlots:")
+    for s in slots:
+        print(f"  Hour {s.get('hour'):02d} | PV: {s.get('pv_kwh'):.2f} kWh | Cons: {s.get('consumption_kwh'):.2f} kWh | PhysMode: {s.get('physical_mode')} | Action: {s.get('action')}")
 else:
     print("Debug slots file not found.")

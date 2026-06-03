@@ -4184,6 +4184,13 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             except Exception as ex:
                 _LOGGER.warning("EMS Boiler DP: failed to calculate actual boiler today: %s", ex)
 
+            storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
+            try:
+                min_bat_soc = float(getattr(storage, "min_bat_soc", 20.0))
+                min_bat_soc = max(0.0, min(100.0, min_bat_soc))
+            except (ValueError, TypeError):
+                min_bat_soc = 20.0
+
             from .boiler_dp_engine import run_boiler_dp
             current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(
                 run_boiler_dp,
@@ -4203,6 +4210,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 heating_end_hour,
                 capacity,
                 actual_boiler_today,
+                min_bat_soc,
             )
 
             self._state = current_action

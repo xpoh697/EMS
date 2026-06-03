@@ -91,6 +91,7 @@ def run_boiler_dp(
     heating_end_hour: int = 23,
     bat_capacity: float = 5.12,
     actual_boiler_today: float = 0.0,
+    min_bat_soc: float = 20.0,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run Dynamic Programming strategy optimizer for hot water boiler.
 
@@ -334,6 +335,46 @@ def run_boiler_dp(
         budget_rise_only = total_pv_budget_tomorrow * eff_only_val
         dynamic_t_max_elec_tomorrow_only = min(t_max_elec, max(t_min, t_min + budget_rise_only))
 
+    # 2.5 Precalculate effective electricity tariffs for all slots to prevent inverter mode oscillations
+    for idx, slot in enumerate(slots):
+        buy_price = float(slot.get("buy_price", 0.0))
+        sell_price = float(slot.get("sell_price", 0.0))
+        mode_name = slot.get("physical_mode", "idle")
+        soc = float(slot.get("expected_soc", 50.0))
+        
+        mode_config = INVERTER_MODES.get(mode_name)
+        
+        if mode_name == "buy":
+            eff_tariff = buy_price
+        elif idx in allocated_free_slots:
+            eff_tariff = 0.0
+        elif mode_config and mode_config.curtail_pv:
+            limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
+            if soc >= limit_soc:
+                eff_tariff = 0.0
+            else:
+                # Battery charging has priority, treat as buy_price to disincentivize parasitic heating
+                eff_tariff = buy_price
+        else:
+            # Calculate effective tariff considering local energy coverage
+            pv_kwh = float(slot.get("pv_kwh", 0.0))
+            consumption_kwh = float(slot.get("consumption_kwh", 0.0))
+            pv_surplus = max(0.0, pv_kwh - consumption_kwh)
+            
+            safe_capacity = bat_capacity if bat_capacity > 0.0 else 5.12
+            # Battery energy stored above min_bat_soc
+            battery_energy_above_min = max(0.0, (soc - min_bat_soc) / 100.0 * safe_capacity)
+            
+            available_local_energy = pv_surplus + battery_energy_above_min
+            boiler_power = max(0.1, float(boiler_hourly_draw))
+            
+            local_covered = min(boiler_power, available_local_energy)
+            grid_import_needed = max(0.0, boiler_power - local_covered)
+            
+            eff_tariff = (local_covered * sell_price + grid_import_needed * buy_price) / boiler_power
+            
+        slot["effective_tariff"] = eff_tariff
+
     # Run DP with relaxed constraint fallback
     best_path = None
     relaxed_used = False
@@ -368,23 +409,8 @@ def run_boiler_dp(
             # Retrieve Inverter mode configurations
             mode_config = INVERTER_MODES.get(mode_name)
             
-            # Electricity pricing tariff logic
-            if mode_name == "buy":
-                tariff = buy_price
-            elif mode_name in ("sale_pv", "idle"):
-                tariff = sell_price
-            elif (h - 1) in allocated_free_slots:
-                # This slot is allocated free solar energy due to anticipated afternoon curtailment!
-                tariff = 0.0
-            elif mode_config and mode_config.curtail_pv:
-                limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
-                if soc >= limit_soc:
-                    tariff = 0.0
-                else:
-                    # Battery charging has priority, treat as buy_price to disincentivize parasitic heating
-                    tariff = buy_price
-            else:
-                tariff = sell_price
+            # Electricity pricing tariff logic (precalculated effective tariff)
+            tariff = slot.get("effective_tariff", sell_price)
 
             # Electric heating allowance check
             allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
@@ -765,20 +791,7 @@ def run_boiler_dp(
 
         # Retrieve Inverter mode configurations
         mode_config = INVERTER_MODES.get(mode_name)
-        if mode_name == "buy":
-            tariff = buy_price
-        elif mode_name in ("sale_pv", "idle"):
-            tariff = sell_price
-        elif idx in allocated_free_slots:
-            tariff = 0.0
-        elif mode_config and mode_config.curtail_pv:
-            limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
-            if soc >= limit_soc:
-                tariff = 0.0
-            else:
-                tariff = buy_price
-        else:
-            tariff = sell_price
+        tariff = slot.get("effective_tariff", sell_price)
 
         # Cost per 1°C rise calculations for each mode
         c_per_gas = (1.0 / eff_gas_only if eff_gas_only > 0.0 else 0.0) * gas_cost_m3
