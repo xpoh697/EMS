@@ -1547,7 +1547,7 @@ class EmsDpSensor(SensorEntity):
             buy_prices_today = self.hass.data.get(DOMAIN, {}).get("price_buy_today", [])
             has_prices_now = any(buy_prices_today)
             
-            force = (was_invalid and is_valid) or (has_no_prices_in_plan and has_prices_now)
+            force = (was_invalid and is_valid) or (has_no_prices_in_plan and has_prices_now) or (entity_id == "sensor.boiler_dp")
             
             ems_log(self.hass, _LOGGER, logging.DEBUG, f"EMS DP trigger: update from {entity_id} (force={force})")
             await self.async_update_strategy(force=force)
