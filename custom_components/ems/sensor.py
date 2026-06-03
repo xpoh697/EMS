@@ -1768,6 +1768,14 @@ class EmsDpSensor(SensorEntity):
             ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: boiler_dp_state found=%s state=%s", boiler_dp_state is not None, boiler_dp_state.state if boiler_dp_state else "None")
             if boiler_dp_state and boiler_dp_state.state not in (None, "unknown", "unavailable"):
                 boiler_schedule = boiler_dp_state.attributes.get("schedule", []) or []
+                if isinstance(boiler_schedule, list):
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.DEBUG,
+                        "EMS DP: read boiler schedule: %s",
+                        ", ".join([f"H{s.get('hour')}:{s.get('mode')}={s.get('energy', 0.0)}" for s in boiler_schedule if isinstance(s, dict)])
+                    )
                 ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP: boiler_schedule length=%d", len(boiler_schedule))
                 now = dt_util.now()
                 today_str = now.strftime("%Y-%m-%d")

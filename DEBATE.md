@@ -10748,3 +10748,37 @@ tomorrow_weekday = (now + timedelta(days=1)).weekday()
 
 ### Заключение
 Записать ход обсуждения в `DEBATE.md`. Модифицировать строку 1550 в [sensor.py](file:///e:/HA_INTEGRATIONS/EMS/custom_components/ems/sensor.py), добавив `or (entity_id == "sensor.boiler_dp")` в условие флага `force`. Выполнить деплой.
+## [2026-06-03 22:06] Задача: Добавить отладочное логирование в sensor.py для вывода содержимого boiler_schedule при чтении его в sensor.dp
+
+### Archi
+Для выяснения причины рассинхронизации данных между инвертором и бойлером, нам необходимо добавить отладочное логирование в метод `async_update_strategy` класса `EmsDpSensor` в файле [sensor.py](file:///e:/HA_INTEGRATIONS/EMS/custom_components/ems/sensor.py).
+Мы добавим логирование содержимого расписания бойлера непосредственно в момент его считывания инвертором:
+```python
+                if isinstance(boiler_schedule, list):
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.DEBUG,
+                        "EMS DP: read boiler schedule: %s",
+                        ", ".join([f"H{s.get('hour')}:{s.get('mode')}={s.get('energy', 0.0)}" for s in boiler_schedule if isinstance(s, dict)])
+                    )
+```
+Это позволит увидеть в `ems.log`, какие именно слоты и с какими значениями приходят от `sensor.boiler_dp` в `sensor.dp` во время первого и второго проходов.
+
+### Skeptic
+Критический анализ предложения Archi:
+1. **Безопасность типов**: Метод `get()` на элементах расписания может вернуть `None`. Нужно безопасно форматировать вывод (например, использовать `s.get('energy', 0.0)`).
+2. **Объем логов**: Лог будет выводиться при каждом пересчете инвертора (примерно каждые 30 секунд). Это увеличит размер `ems.log`. Но учитывая, что у нас настроена ротация логов (5 файлов по 5 МБ), это безопасно для дискового пространства на короткий период отладки.
+3. **Исключения**: Если `boiler_schedule` окажется не списком или будет содержать некорректные типы, код форматирования строки не должен упасть. Добавим проверку `isinstance(boiler_schedule, list)` перед логированием.
+
+### Archi (итерация 2)
+Принимаю замечания Skeptic:
+1. Обернем логирование в проверку `isinstance(boiler_schedule, list)`.
+2. Будем использовать безопасные значения по умолчанию для форматирования.
+3. Добавим эту строчку в [sensor.py](file:///e:/HA_INTEGRATIONS/EMS/custom_components/ems/sensor.py), выполним деплой и изучим вывод.
+
+### Skeptic (итерация 2)
+Доработки обеспечивают безопасность отладочного вывода и защищают от возможных падений при битых атрибутах. Согласовано.
+
+### Заключение
+Записать ход обсуждения в `DEBATE.md`. Добавить отладочный лог в [sensor.py](file:///e:/HA_INTEGRATIONS/EMS/custom_components/ems/sensor.py) сразу после строки `boiler_schedule = boiler_dp_state.attributes.get("schedule", []) or []`. Выполнить деплой.
