@@ -336,12 +336,26 @@ def run_boiler_dp(
         dynamic_t_max_elec_tomorrow_only = min(t_max_elec, max(t_min, t_min + budget_rise_only))
 
     # 2.5 Precalculate effective electricity tariffs for all slots to prevent inverter mode oscillations
+    cum_boiler_today = 0.0
+    cum_boiler_tomorrow = 0.0
     for idx, slot in enumerate(slots):
         buy_price = float(slot.get("buy_price", 0.0))
         sell_price = float(slot.get("sell_price", 0.0))
         mode_name = slot.get("physical_mode", "idle")
         soc = float(slot.get("expected_soc", 50.0))
         
+        # Reconstruct baseline SOC trajectory by adding back planned boiler energy (decouples feedback loop)
+        actual_planned = float(slot.get("actual_planned_boiler_kwh", 0.0))
+        safe_capacity = bat_capacity if bat_capacity > 0.0 else 5.12
+        
+        if slot.get("date") == today_date:
+            cum_boiler_today += actual_planned
+            adjusted_soc = soc + (cum_boiler_today / safe_capacity) * 100.0
+        else:
+            cum_boiler_tomorrow += actual_planned
+            adjusted_soc = soc + (cum_boiler_tomorrow / safe_capacity) * 100.0
+            
+        adjusted_soc = min(100.0, max(0.0, adjusted_soc))
         mode_config = INVERTER_MODES.get(mode_name)
         
         if mode_name == "buy":
@@ -350,20 +364,19 @@ def run_boiler_dp(
             eff_tariff = 0.0
         elif mode_config and mode_config.curtail_pv:
             limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
-            if soc >= limit_soc:
+            if adjusted_soc >= limit_soc:
                 eff_tariff = 0.0
             else:
                 # Battery charging has priority, treat as buy_price to disincentivize parasitic heating
                 eff_tariff = buy_price
         else:
-            # Calculate effective tariff considering local energy coverage
+            # Calculate effective tariff considering local energy coverage using baseline adjusted_soc
             pv_kwh = float(slot.get("pv_kwh", 0.0))
             consumption_kwh = float(slot.get("consumption_kwh", 0.0))
             pv_surplus = max(0.0, pv_kwh - consumption_kwh)
             
-            safe_capacity = bat_capacity if bat_capacity > 0.0 else 5.12
-            # Battery energy stored above min_bat_soc
-            battery_energy_above_min = max(0.0, (soc - min_bat_soc) / 100.0 * safe_capacity)
+            # Battery energy stored above min_bat_soc using adjusted_soc
+            battery_energy_above_min = max(0.0, (adjusted_soc - min_bat_soc) / 100.0 * safe_capacity)
             
             available_local_energy = pv_surplus + battery_energy_above_min
             boiler_power = max(0.1, float(boiler_hourly_draw))
