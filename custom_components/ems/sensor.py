@@ -92,6 +92,15 @@ def safe_float_list(val, default_val, length=24) -> list[float]:
         cleaned.extend([default_val] * (length - len(cleaned)))
     return cleaned[:length]
 
+def safe_round(val: Any, decimals: int = 4) -> float:
+    """Безопасно приводит значение к float и округляет до decimals знаков. Возвращает 0.0 при ошибке."""
+    if val is None:
+        return 0.0
+    try:
+        return round(float(val), decimals)
+    except (ValueError, TypeError):
+        return 0.0
+
 def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float], bool]:
     """Parse Solcast detailedForecast, detailedHourly, and forecasts attributes to compute baseline hourly kWh."""
     hourly_baselines = [0.0] * 24
@@ -392,33 +401,93 @@ async def async_setup_entry(
 
     # Calculate and log buy/sell price sensors
     def update_prices():
-        """Fetch and parse buy/sell prices, then save to hass.data."""
+        """Fetch and parse buy/sell prices, then save to hass.data.
+
+        Midnight rollover protection:
+        - Before parsing: save a snapshot of the current tomorrow-prices as
+          ``price_buy_prev_tomorrow`` / ``price_sell_prev_tomorrow``.  We only
+          overwrite the snapshot when the currently-stored tomorrow list is
+          non-empty (has at least one non-zero value), so the snapshot always
+          holds the last meaningful set of tomorrow prices.
+        - After parsing: if ``today_has_data`` comes back False (the sensor's
+          ``price_today`` attribute is absent or not a list) **and** a non-empty
+          prev_tomorrow snapshot exists, we promote that snapshot to ``price_buy_today``
+          / ``price_sell_today``.  This covers the window right after midnight when
+          the provider has already renamed yesterday's tomorrow → today, but the new
+          day's data hasn't been fetched yet by the HA sensor.
+        - ``price_tomorrow_has_data`` is stored as a separate bool so that
+          ``_calculate_strategy_sync`` can distinguish "no tomorrow data" from
+          "tomorrow prices are legitimately zero/negative".
+        """
         if DOMAIN not in hass.data:
             hass.data[DOMAIN] = {}
 
+        buy_today_has_data = False
+        sell_today_has_data = False
+        tomorrow_has_data_buy = False
+        tomorrow_has_data_sell = False
+
         if price_buy_sensor_id:
+            # --- snapshot: remember last valid tomorrow prices BEFORE they disappear ---
+            existing_buy_tomorrow = hass.data[DOMAIN].get("price_buy_tomorrow", [])
+            if any(v != 0.0 for v in existing_buy_tomorrow):
+                hass.data[DOMAIN]["price_buy_prev_tomorrow"] = list(existing_buy_tomorrow)
+
             buy_state = hass.states.get(price_buy_sensor_id)
-            buy_today, buy_tomorrow = parse_price_sensor(buy_state)
+            buy_today, buy_tomorrow, buy_today_has_data, tomorrow_has_data_buy = parse_price_sensor(buy_state)
+
+            # --- fallback: if today rolled over but new data not yet arrived ---
+            if not buy_today_has_data:
+                prev = hass.data[DOMAIN].get("price_buy_prev_tomorrow", [])
+                if any(v != 0.0 for v in prev):
+                    buy_today = list(prev)
+                    ems_log(
+                        hass, _LOGGER, logging.WARNING,
+                        "Price buy today attribute missing — using prev-tomorrow snapshot as today (midnight rollover)"
+                    )
+
             hass.data[DOMAIN]["price_buy_today"] = buy_today
             hass.data[DOMAIN]["price_buy_tomorrow"] = buy_tomorrow
             ems_log(
                 hass,
                 _LOGGER,
                 logging.INFO,
-                f"Parsed Buy Prices Today: {buy_today}, Tomorrow: {buy_tomorrow}"
+                f"Parsed Buy Prices Today (has_data={buy_today_has_data}): {buy_today}, "
+                f"Tomorrow (has_data={tomorrow_has_data_buy}): {buy_tomorrow}"
             )
 
         if price_sell_sensor_id:
+            # --- snapshot: remember last valid tomorrow prices BEFORE they disappear ---
+            existing_sell_tomorrow = hass.data[DOMAIN].get("price_sell_tomorrow", [])
+            if any(v != 0.0 for v in existing_sell_tomorrow):
+                hass.data[DOMAIN]["price_sell_prev_tomorrow"] = list(existing_sell_tomorrow)
+
             sell_state = hass.states.get(price_sell_sensor_id)
-            sell_today, sell_tomorrow = parse_price_sensor(sell_state)
+            sell_today, sell_tomorrow, sell_today_has_data, tomorrow_has_data_sell = parse_price_sensor(sell_state)
+
+            # --- fallback: if today rolled over but new data not yet arrived ---
+            if not sell_today_has_data:
+                prev = hass.data[DOMAIN].get("price_sell_prev_tomorrow", [])
+                if any(v != 0.0 for v in prev):
+                    sell_today = list(prev)
+                    ems_log(
+                        hass, _LOGGER, logging.WARNING,
+                        "Price sell today attribute missing — using prev-tomorrow snapshot as today (midnight rollover)"
+                    )
+
             hass.data[DOMAIN]["price_sell_today"] = sell_today
             hass.data[DOMAIN]["price_sell_tomorrow"] = sell_tomorrow
             ems_log(
                 hass,
                 _LOGGER,
                 logging.INFO,
-                f"Parsed Sell Prices Today: {sell_today}, Tomorrow: {sell_tomorrow}"
+                f"Parsed Sell Prices Today (has_data={sell_today_has_data}): {sell_today}, "
+                f"Tomorrow (has_data={tomorrow_has_data_sell}): {sell_tomorrow}"
             )
+
+        # Store a combined flag: tomorrow data is available when at least one price
+        # sensor has a valid price_tomorrow attribute list.
+        hass.data[DOMAIN]["price_tomorrow_has_data"] = tomorrow_has_data_buy or tomorrow_has_data_sell
 
     # Initial calculation
     update_prices()
@@ -884,6 +953,8 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
         self._last_day: int = dt_util.now().day
         self._actual_today_hourly: list[float] = [0.0] * 24
         self._last_actual_total: float | None = None
+        self._factor_threshold: float = 0.5
+        self._factor_type: str = "history_avg"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -917,6 +988,8 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             "battery_soc_sensor": self._bat_soc_entity_id,
             "actual_today_hourly": self._actual_today_hourly,
             "last_actual_total": self._last_actual_total,
+            "factor_threshold": self._factor_threshold,
+            "factor_type": self._factor_type,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -1078,10 +1151,16 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             # Calculate actual generation of elapsed hours (excluding the current hour)
             actual_elapsed = max(0.0, actual_today - self._actual_today_hourly[current_hour])
 
+            # Calculate dynamic threshold for morning noise (proportionate to total daily baseline, clamped between 0.5 and 3.0 kWh)
+            total_baseline = sum(self._baselines) if self._baselines else 0.0
+            self._factor_threshold = max(0.5, min(3.0, 0.1 * total_baseline))
+
             # Calculate Layer 2 corrective factor (safeguard against division by zero and morning noise)
-            if baseline_elapsed > 0.5:
+            if baseline_elapsed > self._factor_threshold:
                 self._factor = max(0.3, min(actual_elapsed / baseline_elapsed, 1.5))
+                self._factor_type = "live"
             else:
+                self._factor_type = "history_avg"
                 if self._factor_history:
                     avg_factor = sum(self._factor_history) / len(self._factor_history)
                     self._factor = max(0.3, min(avg_factor, 1.5))
@@ -1254,15 +1333,28 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
         factor = 1.0
         today_state = self.hass.states.get("sensor.pv_forecast_today")
         if today_state:
-            factor_attr = today_state.attributes.get("factor_today")
-            if factor_attr is not None:
+            factor_history = today_state.attributes.get("factor_history")
+            if isinstance(factor_history, list) and factor_history:
                 try:
-                    factor = max(0.3, min(float(factor_attr), 1.5))
+                    history_floats = [float(x) for x in factor_history if x is not None]
+                    if history_floats:
+                        factor = sum(history_floats) / len(history_floats)
+                    else:
+                        factor_attr = today_state.attributes.get("factor_today")
+                        if factor_attr is not None:
+                            factor = float(factor_attr)
                 except (ValueError, TypeError):
                     pass
+            else:
+                factor_attr = today_state.attributes.get("factor_today")
+                if factor_attr is not None:
+                    try:
+                        factor = float(factor_attr)
+                    except (ValueError, TypeError):
+                        pass
 
-        self._factor = factor
-        self._forecasts = [round(val * factor, 4) for val in self._baselines]
+        self._factor = max(0.3, min(factor, 1.5))
+        self._forecasts = [round(val * self._factor, 4) for val in self._baselines]
         self._state = round(sum(self._forecasts), 4)
 
         ems_log(
@@ -1283,14 +1375,30 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
         if new_state is None or new_state.state in (None, "unknown", "unavailable"):
             return
 
-        factor_attr = new_state.attributes.get("factor_today")
-        if factor_attr is None:
-            return
+        factor = 1.0
+        factor_history = new_state.attributes.get("factor_history")
+        if isinstance(factor_history, list) and factor_history:
+            try:
+                history_floats = [float(x) for x in factor_history if x is not None]
+                if history_floats:
+                    factor = sum(history_floats) / len(history_floats)
+                else:
+                    factor_attr = new_state.attributes.get("factor_today")
+                    if factor_attr is not None:
+                        factor = float(factor_attr)
+            except (ValueError, TypeError):
+                pass
+        else:
+            factor_attr = new_state.attributes.get("factor_today")
+            if factor_attr is not None:
+                try:
+                    factor = float(factor_attr)
+                except (ValueError, TypeError):
+                    return
+            else:
+                return
 
-        try:
-            factor = max(0.3, min(float(factor_attr), 1.5))
-        except (ValueError, TypeError):
-            return
+        factor = max(0.3, min(factor, 1.5))
 
         # Avoid updating if factor hasn't changed (saves DB writes and spams)
         if abs(self._factor - factor) < 0.0001:
@@ -1476,6 +1584,17 @@ class EmsDpSensor(SensorEntity):
         entity_id = event.data.get("entity_id")
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
+
+        ems_log(
+            self.hass,
+            _LOGGER,
+            logging.DEBUG,
+            "EMS DP generic listener: entity_id=%s old=%s new=%s",
+            entity_id,
+            old_state.state if old_state else "None",
+            new_state.state if new_state else "None",
+        )
+
         if new_state:
             # Check if it's a PV forecast update and compare with 5% threshold
             if entity_id in ("sensor.pv_forecast_today", "sensor.pv_forecast_tomorrow"):
@@ -1519,7 +1638,7 @@ class EmsDpSensor(SensorEntity):
                         slot.get("date"),
                         slot.get("hour"),
                         slot.get("mode"),
-                        slot.get("energy"),
+                        safe_round(slot.get("energy"), 4),
                     )
 
                 old_sched = (
@@ -1547,9 +1666,18 @@ class EmsDpSensor(SensorEntity):
             buy_prices_today = self.hass.data.get(DOMAIN, {}).get("price_buy_today", [])
             has_prices_now = any(buy_prices_today)
             
-            force = (was_invalid and is_valid) or (has_no_prices_in_plan and has_prices_now) or (entity_id == "sensor.boiler_dp")
+            force = (was_invalid and is_valid) or (has_no_prices_in_plan and has_prices_now)
+            if entity_id == "sensor.boiler_dp":
+                force = True
             
-            ems_log(self.hass, _LOGGER, logging.DEBUG, f"EMS DP trigger: update from {entity_id} (force={force})")
+            ems_log(
+                self.hass,
+                _LOGGER,
+                logging.DEBUG,
+                "EMS DP trigger: update from %s (force=%s)",
+                entity_id,
+                force,
+            )
             await self.async_update_strategy(force=force)
 
     async def _async_soc_listener(self, event) -> None:
@@ -1871,31 +1999,16 @@ class EmsDpSensor(SensorEntity):
                     sum(boiler_tomorrow)
                 )
             else:
-                if len(raw_today) == 24 and len(boiler_today) == 24:
-                    consumption_today = [max(0.0, float(c) - float(b)) for c, b in zip(raw_today, boiler_today)]
-                    ems_log(
-                        self.hass,
-                        _LOGGER,
-                        logging.DEBUG,
-                        "EMS DP: Using net average load profile today (sum: %.2fkWh, boiler average portion: %.2fkWh)",
-                        sum(consumption_today),
-                        sum(boiler_today)
-                    )
-                else:
-                    consumption_today = raw_today
-
-                if len(raw_tomorrow) == 24 and len(boiler_tomorrow) == 24:
-                    consumption_tomorrow = [max(0.0, float(c) - float(b)) for c, b in zip(raw_tomorrow, boiler_tomorrow)]
-                    ems_log(
-                        self.hass,
-                        _LOGGER,
-                        logging.DEBUG,
-                        "EMS DP: Using net average load profile tomorrow (sum: %.2fkWh, boiler average portion: %.2fkWh)",
-                        sum(consumption_tomorrow),
-                        sum(boiler_tomorrow)
-                    )
-                else:
-                    consumption_tomorrow = raw_tomorrow
+                consumption_today = raw_today
+                consumption_tomorrow = raw_tomorrow
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.DEBUG,
+                    "EMS DP: Vacation mode is DISABLED. Full house load profile used (including boiler: sum_today=%.2fkWh, sum_tomorrow=%.2fkWh)",
+                    sum(consumption_today),
+                    sum(consumption_tomorrow)
+                )
 
             # Sanitize lists with safe_float_list
             buy_prices_today = safe_float_list(buy_prices_today, 0.0)
@@ -2040,8 +2153,10 @@ class EmsDpSensor(SensorEntity):
                 "planned_boiler_kwh": float(planned_boiler_today[h]) if (h < len(planned_boiler_today) and planned_boiler_today[h] is not None) else 0.0,
                 "override": override,
             })
-        # Tomorrow
-        has_tomorrow_prices = any(buy_prices_tomorrow) or any(sell_prices_tomorrow)
+        # Tomorrow — use the flag stored by update_prices() rather than any()
+        # because any([0.0]*24) == False even when data was legitimately received
+        # (Nordpool can publish zero or negative prices during energy surplus periods).
+        has_tomorrow_prices = self.hass.data.get(DOMAIN, {}).get("price_tomorrow_has_data", False)
         if has_tomorrow_prices:
             for h in range(24):
                 override = overrides.get(tomorrow_str, {}).get(str(h))
@@ -2089,6 +2204,14 @@ class EmsDpSensor(SensorEntity):
             disable_discharge=False,
         )
 
+        # Create a copy of slots with planned_boiler_kwh set to 0.0 for the DP solver,
+        # since the boiler's average profile is already included in consumption_kwh.
+        math_slots = []
+        for slot in slots:
+            math_slot = slot.copy()
+            math_slot["planned_boiler_kwh"] = 0.0
+            math_slots.append(math_slot)
+
         try:
             (
                 chg_h,
@@ -2098,7 +2221,7 @@ class EmsDpSensor(SensorEntity):
                 pim_h,
                 stats,
             ) = run_unified_dp(
-                slots=slots,
+                slots=math_slots,
                 current_usable=current_usable,
                 usable_capacity=usable_capacity,
                 cycle_cost=cycle_cost,
@@ -2127,7 +2250,7 @@ class EmsDpSensor(SensorEntity):
                     pim_h,
                     stats,
                 ) = run_unified_dp(
-                    slots=slots,
+                    slots=math_slots,
                     current_usable=current_usable,
                     usable_capacity=usable_capacity,
                     cycle_cost=cycle_cost,
@@ -2214,10 +2337,10 @@ class EmsDpSensor(SensorEntity):
             curtail_active = mode_config.curtail_pv if mode_config else False
             wasted = 0.0
             if curtail_active:
-                planned_boiler = float(slot.get("planned_boiler_kwh", 0.0))
-                consumption_net = max(0.0, float(slot.get("consumption_kwh", 0.0)) - planned_boiler)
+                planned_boiler = float(slot.get("planned_boiler_kwh", 0.0) or 0.0)
+                consumption_actual = float(slot.get("consumption_kwh", 0.0) or 0.0) + planned_boiler
                 battery_charge = float(energy) if action in ("pv_charge", "grid_charge") else 0.0
-                wasted = max(0.0, float(slot.get("pv_kwh", 0.0)) - consumption_net - battery_charge)
+                wasted = max(0.0, float(slot.get("pv_kwh", 0.0) or 0.0) - consumption_actual - battery_charge)
                 wasted = round(wasted, 4)
 
             if slot["date"] == today_str:
@@ -2662,6 +2785,7 @@ class EmsSchedulerSensor(SensorEntity):
             "avg_pv_w": round(avg_pv, 1) if avg_pv is not None else None,
             "avg_load_w": round(avg_load, 1) if avg_load is not None else None,
             "pv_load_switch_active": self._dynamic_sale_pv_active,
+            "tomorrow_prices_available": self.hass.data.get(DOMAIN, {}).get("price_tomorrow_has_data", False),
             "version": VERSION,
         }
 
@@ -3445,7 +3569,7 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
         elif phase == "overnight_loss":
             # Вложенное слияние: обновляем только переданные брэкеты
             import copy
-            date_str = data.get("last_calibrated") or dt_util.now().date().isoformat()
+            date_str = data.get("last_calibrated") or dt_util.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # Форматируем и сливаем брэкеты газа
             if "gas" in data and isinstance(data["gas"], dict):
@@ -3511,6 +3635,34 @@ class EmsBoilerCalibrationSensor(RestoreSensor, SensorEntity):
         """Set active calibration phase and update transient data."""
         self._state = state
         self._calibration_data = calibration_data or {}
+        self.async_write_ha_state()
+
+    async def async_reset_calibration(self, reset_type: str = "all") -> None:
+        """Reset calibration parameters to default values and save immediately."""
+        import copy
+        
+        if reset_type in ("all", "heating"):
+            self._gas_only = {"efficiency_c_per_m3": 0.0, "last_calibrated": None}
+            self._gas_with_pump = {"efficiency_c_per_m3": 0.0, "last_calibrated": None}
+            self._elec_only = {"efficiency_c_per_kwh": 0.0, "heater_power_kw": 2.5, "last_calibrated": None}
+            self._elec_with_pump = {"efficiency_c_per_kwh": 0.0, "heater_power_kw": 2.5, "last_calibrated": None}
+
+        if reset_type in ("all", "standby"):
+            self._standby_losses = {
+                "gas":  {k: {"value": v, "updated_at": None} for k, v in STANDBY_LOSSES_PRESETS["gas"].items()},
+                "elec": {k: {"value": v, "updated_at": None} for k, v in STANDBY_LOSSES_PRESETS["elec"].items()},
+                "last_calibrated": None,
+            }
+            self._standby_costs = {}
+
+        self._calibration_data = {}
+        self._state = "idle"
+
+        store = self.hass.data[DOMAIN][self._entry_id].get("calibration_store")
+        if store:
+            store.reset(reset_type)
+            await store.async_save()
+
         self.async_write_ha_state()
 
 
@@ -3694,6 +3846,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         self._gas_cost_m3: float | None = None
         self._last_calc_time: datetime | None = None
         self._last_calc_temp: float | None = None
+        self._reactive_debounce_time: datetime | None = None
         self._calc_duration: float | None = None
         self._t_gas: float | None = None
         self._t_elec: float | None = None
@@ -3742,6 +3895,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "vol_gas": self._vol_gas,
             "gas_cost_m3": self._gas_cost_m3,
             "last_calculation": self._last_calc_time.isoformat() if self._last_calc_time else None,
+            "last_calc_temp": self._last_calc_temp,
             "calculation_duration": self._calc_duration,
             "manual_heating_active": manual_active,
             "manual_heating_mode": manual_mode,
@@ -3779,6 +3933,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._gas_cost_m3 = attrs.get("gas_cost_m3")
             self._t_gas = attrs.get("t_gas")
             self._t_elec = attrs.get("t_elec")
+            self._last_calc_temp = attrs.get("last_calc_temp")
             if attrs.get("last_calculation"):
                 try:
                     self._last_calc_time = datetime.fromisoformat(attrs["last_calculation"])
@@ -3832,10 +3987,20 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
 
-        # Break feedback loop: if the event comes from sensor.dp, only trigger
-        # if the schedule content (planning fields) has actually changed.
-        # sensor.dp always re-writes last_calculation/calculation_duration on
-        # every run, so attribute-only changes must NOT re-trigger sensor.boiler_dp.
+        ems_log(
+            self.hass,
+            _LOGGER,
+            logging.DEBUG,
+            "EMS Boiler DP listener: entity_id=%s old=%s new=%s",
+            entity_id,
+            old_state.state if old_state else "None",
+            new_state.state if new_state else "None",
+        )
+
+        # Break feedback loop: если событие от sensor.dp — проверяем реальное
+        # изменение расписания (дата, час, цены buy/sell, physical_mode).
+        # Поля last_calculation/calculation_duration меняются всегда, поэтому
+        # attribute-only изменения НЕ должны повторно запускать sensor.boiler_dp.
         if entity_id == "sensor.dp":
             if self.hass.data.setdefault(DOMAIN, {}).get("boiler_recalculating"):
                 self.hass.data[DOMAIN]["boiler_recalculating"] = False
@@ -3853,15 +4018,9 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 return (
                     slot.get("date"),
                     slot.get("hour"),
-                    slot.get("buy_price"),
-                    slot.get("sell_price"),
+                    safe_round(slot.get("buy_price"), 4),
+                    safe_round(slot.get("sell_price"), 4),
                     slot.get("physical_mode"),
-                    slot.get("expected_soc"),
-                    slot.get("pv_kwh"),
-                    slot.get("consumption_kwh"),
-                    slot.get("planned_boiler_kwh"),
-                    slot.get("action"),
-                    slot.get("energy_kwh"),
                 )
 
             old_sched = (
@@ -3885,8 +4044,13 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                     )
                     return
 
+        was_invalid = not old_state or old_state.state in (None, "unknown", "unavailable")
+        is_valid = new_state and new_state.state not in (None, "unknown", "unavailable")
+
         force = False
         if entity_id not in (self._gas_sensor, self._elec_sensor):
+            force = True
+        elif was_invalid and is_valid:
             force = True
         await self.async_update_boiler_dp(force=force)
 
@@ -4007,12 +4171,69 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             ems_log(self.hass, _LOGGER, logging.INFO, "EMS Boiler DP: Vacation mode is ENABLED. Boiler schedule set to IDLE.")
             return
 
-        # 2. Check debounce conditions
-        if not force and self._last_calc_time is not None and self._last_calc_temp is not None:
-            time_delta = (now - self._last_calc_time).total_seconds()
-            temp_delta = abs(t_curr - self._last_calc_temp)
-            if time_delta < 3600.0 and temp_delta < 3.0:
-                return
+        # 2. Check debounce and cooldown conditions
+        if not force:
+            if self._reactive_debounce_time is not None:
+                cooldown_rem = (now - self._reactive_debounce_time).total_seconds()
+                if cooldown_rem < 60.0:
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.DEBUG,
+                        "EMS Boiler DP: update debounced (cooldown: %.1fs remaining)",
+                        60.0 - cooldown_rem
+                    )
+                    return
+
+            if self._last_calc_time is not None and self._last_calc_temp is not None:
+                time_delta = (now - self._last_calc_time).total_seconds()
+                
+                # Safe retrieval of limits and storage parameters
+                t_min = float(options.get(CONF_THERMOSTAT_SET_TEMP, config.get(CONF_THERMOSTAT_SET_TEMP, DEFAULT_THERMOSTAT_SET_TEMP)))
+                storage = self.hass.data[DOMAIN].get(self._entry_id, {}).get("storage")
+                
+                t_max_elec = float(options.get(CONF_ELEC_BOILER_MAX_TEMP, config.get(CONF_ELEC_BOILER_MAX_TEMP, DEFAULT_ELEC_BOILER_MAX_TEMP)))
+                boiler_auto_temp_limit = float(getattr(storage, "boiler_auto_temp_limit", t_max_elec)) if storage else t_max_elec
+                t_max_elec = max(t_min, min(t_max_elec, boiler_auto_temp_limit))
+                
+                t_max_gas = float(options.get(CONF_GAS_BOILER_MAX_TEMP, config.get(CONF_GAS_BOILER_MAX_TEMP, DEFAULT_GAS_BOILER_MAX_TEMP)))
+                t_max_gas = max(t_min, min(t_max_gas, boiler_auto_temp_limit))
+
+                current_mode = str(self._state or "IDLE").upper()
+                is_heating_gas = "GAS" in current_mode
+                is_heating_elec = "ELEC" in current_mode
+                
+                skip_recalc = False
+                reason = ""
+                
+                if time_delta < 3600.0:
+                    if is_heating_gas:
+                        # Газовый нагрев активен: не пересчитываем DP, пока не нагреемся до t_max_gas (или пока температура не начнет падать)
+                        if t_curr < t_max_gas - 0.5 and t_curr >= self._last_calc_temp - 0.5:
+                            skip_recalc = True
+                            reason = f"Gas heating in progress (temp {t_curr:.2f}°C < target {t_max_gas:.2f}°C)"
+                    elif is_heating_elec:
+                        # Электрический нагрев активен: не пересчитываем DP, пока не нагреемся до t_max_elec (или пока температура не начнет падать)
+                        if t_curr < t_max_elec - 0.5 and t_curr >= self._last_calc_temp - 0.5:
+                            skip_recalc = True
+                            reason = f"Electric heating in progress (temp {t_curr:.2f}°C < target {t_max_elec:.2f}°C)"
+                    else:
+                        # Режимы IDLE/PUMP: пропускаем перерасчет при малых колебаниях и если текущая температура безопасна
+                        temp_delta = abs(t_curr - self._last_calc_temp)
+                        if temp_delta < 2.0 and t_curr >= t_min - 0.5:
+                            skip_recalc = True
+                            reason = f"Idle/Pump mode with minor temp change ({temp_delta:.2f}°C < 2.0°C and temp {t_curr:.2f}°C >= min {t_min:.2f}°C)"
+
+                if skip_recalc:
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.DEBUG,
+                        "EMS Boiler DP: update skipped — %s (time_delta=%.1fs < 3600s)",
+                        reason,
+                        time_delta,
+                    )
+                    return
 
         # 3. Retrieve schedule slots from sensor.dp
         dp_state = self.hass.states.get("sensor.dp")
@@ -4125,9 +4346,9 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         # 5. Extract limits and settings
         t_min = float(options.get(CONF_THERMOSTAT_SET_TEMP, config.get(CONF_THERMOSTAT_SET_TEMP, DEFAULT_THERMOSTAT_SET_TEMP)))
         storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
-        boiler_auto_temp_limit = float(getattr(storage, "boiler_auto_temp_limit", 60.0))
 
         t_max_elec = float(options.get(CONF_ELEC_BOILER_MAX_TEMP, config.get(CONF_ELEC_BOILER_MAX_TEMP, DEFAULT_ELEC_BOILER_MAX_TEMP)))
+        boiler_auto_temp_limit = float(getattr(storage, "boiler_auto_temp_limit", t_max_elec))
         t_max_elec = max(t_min, min(t_max_elec, boiler_auto_temp_limit))
 
         t_max_gas = float(options.get(CONF_GAS_BOILER_MAX_TEMP, config.get(CONF_GAS_BOILER_MAX_TEMP, DEFAULT_GAS_BOILER_MAX_TEMP)))
@@ -4211,6 +4432,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 capacity,
                 actual_boiler_today,
                 min_bat_soc,
+                vacation_mode,
             )
 
             self._state = current_action
@@ -4250,6 +4472,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         self._gas_cost_m3 = gas_cost_m3
         self._last_calc_time = now
         self._last_calc_temp = t_curr
+        self._reactive_debounce_time = now
         self._calc_duration = round(time.perf_counter() - start_time, 3)
 
         self.async_write_ha_state()
