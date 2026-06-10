@@ -160,16 +160,27 @@ class BoilerController:
         
     def _update_cutoff_states(self):
         """Обновление флагов отсечки нагрева и перекачки с учетом гистерезиса и режима Fail-Safe."""
+        # Получаем плановые целевые температуры из расписания DP для текущего часа
+        dp_t_max_elec = None
+        dp_t_max_gas = None
+        dp_state = self.hass.states.get("sensor.boiler_dp")
+        if dp_state and self.current_mode.lower() == "auto":
+            schedule = dp_state.attributes.get("schedule", [])
+            if schedule:
+                dp_t_max_elec = schedule[0].get("temp_elec_end")
+                dp_t_max_gas = schedule[0].get("temp_gas_end")
+
         # 1. Электробойлер
         t_elec = self._get_elec_temp()
-        t_max_elec = float(self.config.get("elec_boiler_max_temp", 70.0))
+        t_max_elec = dp_t_max_elec
         storage = self.storage
-        if storage and self.current_mode.lower() == "auto":
-            t_max_elec = min(t_max_elec, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
+        if t_max_elec is None:
+            t_max_elec = float(self.config.get("elec_boiler_max_temp", 70.0))
+            if storage and self.current_mode.lower() == "auto":
+                t_max_elec = min(t_max_elec, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
         hysteresis = 5.0
         
         if t_elec is None:
-            dp_state = self.hass.states.get("sensor.boiler_dp")
             mode = dp_state.state.upper() if dp_state else "IDLE"
             if "ELEC" in mode and self.current_mode.lower() == "auto":
                 if not self._elec_cutoff_active:
@@ -190,12 +201,13 @@ class BoilerController:
 
         # 2. Газовый котел
         t_gas = self._get_gas_temp()
-        t_max_gas = float(self.config.get("gas_boiler_max_temp", 50.0))
-        if storage and self.current_mode.lower() == "auto":
-            t_max_gas = min(t_max_gas, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
+        t_max_gas = dp_t_max_gas
+        if t_max_gas is None:
+            t_max_gas = float(self.config.get("gas_boiler_max_temp", 50.0))
+            if storage and self.current_mode.lower() == "auto":
+                t_max_gas = min(t_max_gas, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
         
         if t_gas is None:
-            dp_state = self.hass.states.get("sensor.boiler_dp")
             mode = dp_state.state.upper() if dp_state else "IDLE"
             if "GAS" in mode and self.current_mode.lower() == "auto":
                 if not self._gas_cutoff_active:
@@ -1918,10 +1930,18 @@ class BoilerController:
                         {ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": target_hvac}
                     )
                 if target_hvac == "heat":
-                    target_temp = float(self.config.get("gas_boiler_max_temp", 50.0))
-                    storage = self.storage
-                    if storage and self.current_mode.lower() == "auto":
-                        target_temp = min(target_temp, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
+                    target_temp = None
+                    dp_state = self.hass.states.get("sensor.boiler_dp")
+                    if dp_state and self.current_mode.lower() == "auto":
+                        schedule = dp_state.attributes.get("schedule", [])
+                        if schedule:
+                            target_temp = schedule[0].get("temp_gas_end")
+                            
+                    if target_temp is None:
+                        target_temp = float(self.config.get("gas_boiler_max_temp", 50.0))
+                        storage = self.storage
+                        if storage and self.current_mode.lower() == "auto":
+                            target_temp = min(target_temp, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
                     current_target_temp = current_gas.attributes.get("temperature") if current_gas else None
                     if current_target_temp != target_temp:
                         await self.hass.services.async_call(
