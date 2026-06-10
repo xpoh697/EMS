@@ -92,6 +92,7 @@ def run_boiler_dp(
     bat_capacity: float = 5.12,
     actual_boiler_today: float = 0.0,
     min_bat_soc: float = 20.0,
+    vacation_mode: bool = False,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run Dynamic Programming strategy optimizer for hot water boiler.
 
@@ -357,7 +358,8 @@ def run_boiler_dp(
             
         adjusted_soc = min(100.0, max(0.0, adjusted_soc))
         mode_config = INVERTER_MODES.get(mode_name)
-        
+        grid_available = getattr(mode_config, "is_grid_bypass", False) if mode_config else False
+
         if mode_name == "buy":
             eff_tariff = buy_price
         elif idx in allocated_free_slots:
@@ -365,28 +367,58 @@ def run_boiler_dp(
         elif mode_config and mode_config.curtail_pv:
             limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
             if adjusted_soc >= limit_soc:
+                # Battery is full enough — use curtailed PV for free
                 eff_tariff = 0.0
-            else:
-                # Battery charging has priority, treat as buy_price to disincentivize parasitic heating
+            elif grid_available:
+                # Grid is accessible (e.g. buy mode logic) — charge at buy_price
                 eff_tariff = buy_price
+            else:
+                # No grid access — only local energy (PV surplus + battery above min_soc)
+                pv_kwh = float(slot.get("pv_kwh", 0.0))
+                consumption_kwh = float(slot.get("consumption_kwh", 0.0))
+                pv_surplus = max(0.0, pv_kwh - consumption_kwh)
+                discharge_allowed = getattr(mode_config, "discharge_to_house", False)
+                bat_avail = max(0.0, (adjusted_soc - min_bat_soc) / 100.0 * safe_capacity) if discharge_allowed else 0.0
+                available_local = pv_surplus + bat_avail
+                boiler_power = max(0.1, float(boiler_hourly_draw))
+                if available_local <= 0.0:
+                    # No local energy at all — heating physically impossible
+                    eff_tariff = 9999.0
+                else:
+                    solar_covered = min(boiler_power, pv_surplus)
+                    remaining_power = boiler_power - solar_covered
+                    battery_covered = min(remaining_power, bat_avail)
+                    uncovered = remaining_power - battery_covered
+                    battery_valuation = max(buy_price, sell_price)
+                    eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + uncovered * 9999.0) / boiler_power
         else:
             # Calculate effective tariff considering local energy coverage using baseline adjusted_soc
             pv_kwh = float(slot.get("pv_kwh", 0.0))
             consumption_kwh = float(slot.get("consumption_kwh", 0.0))
             pv_surplus = max(0.0, pv_kwh - consumption_kwh)
-            
-            # Battery energy stored above min_bat_soc using adjusted_soc
-            battery_energy_above_min = max(0.0, (adjusted_soc - min_bat_soc) / 100.0 * safe_capacity)
-            
+
+            # Battery energy stored above min_bat_soc using adjusted_soc, only if discharge to house is allowed
+            discharge_allowed = getattr(mode_config, "discharge_to_house", False) if mode_config else False
+            if discharge_allowed:
+                battery_energy_above_min = max(0.0, (adjusted_soc - min_bat_soc) / 100.0 * safe_capacity)
+            else:
+                battery_energy_above_min = 0.0
+
             available_local_energy = pv_surplus + battery_energy_above_min
             boiler_power = max(0.1, float(boiler_hourly_draw))
-            
-            local_covered = min(boiler_power, available_local_energy)
-            grid_import_needed = max(0.0, boiler_power - local_covered)
-            
-            eff_tariff = (local_covered * sell_price + grid_import_needed * buy_price) / boiler_power
-            
+
+            solar_covered = min(boiler_power, pv_surplus)
+            remaining_power = boiler_power - solar_covered
+            battery_covered = min(remaining_power, battery_energy_above_min)
+            grid_import_needed = remaining_power - battery_covered
+
+            # If grid is not accessible in this mode — treat grid import as prohibitively expensive
+            grid_import_price = buy_price if grid_available else 9999.0
+            battery_valuation = max(buy_price, sell_price)
+            eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + grid_import_needed * grid_import_price) / boiler_power
+
         slot["effective_tariff"] = eff_tariff
+
 
     # Run DP with relaxed constraint fallback
     best_path = None
@@ -414,6 +446,8 @@ def run_boiler_dp(
 
         for h in range(1, N + 1):
             slot = slots[h - 1]
+            prev_planned_kwh = float(slot.get("actual_planned_boiler_kwh", 0.0) or 0.0)
+            was_elec = prev_planned_kwh > 0.05
             buy_price = slot.get("buy_price", 0.0)
             sell_price = slot.get("sell_price", 0.0)
             mode_name = slot.get("physical_mode", "idle")
@@ -428,6 +462,17 @@ def run_boiler_dp(
             # Electric heating allowance check
             allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
             allow_elec = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
+
+            # Cost per 1°C rise comparisons for ELEC and ELEC_PUMP
+            c_per_gas = (1.0 / eff_gas_only if eff_gas_only > 0.0 else 0.0) * gas_cost_m3
+            c_per_elec = (1.0 / eff_elec_only if eff_elec_only > 0.0 else 0.0) * tariff
+            c_per_gas_pump = (1.0 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * gas_cost_m3 + (0.1 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * tariff
+            c_per_elec_pump = (1.1 / eff_elec_pump if eff_elec_pump > 0.0 else 0.0) * tariff
+
+            is_solar_excess = (h - 1) in allocated_free_slots or tariff <= 0.0
+            
+            allow_elec_mode = allow_elec and (is_solar_excess or (c_per_elec < c_per_gas))
+            allow_elec_pump_mode = allow_elec and (is_solar_excess or (c_per_elec_pump < c_per_gas_pump))
 
             for prev_idx in range(num_states):
                 if dp[h - 1][prev_idx] == float("inf"):
@@ -456,7 +501,9 @@ def run_boiler_dp(
                         continue
                     if mode in ("GAS", "GAS_PUMP") and vol_gas <= 0.0:
                         continue
-                    if mode in ("ELEC", "ELEC_PUMP") and (vol_elec <= 0.0 or not allow_elec):
+                    if mode == "ELEC" and (vol_elec <= 0.0 or not allow_elec_mode):
+                        continue
+                    if mode == "ELEC_PUMP" and (vol_elec <= 0.0 or not allow_elec_pump_mode):
                         continue
 
                     # Mode-specific transitions
@@ -476,16 +523,16 @@ def run_boiler_dp(
                         if 0 <= curr_idx < num_states:
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             if T_curr >= GRID_MIN_TEMP and T_curr <= t_max_mode:
-                                if T_active >= t_min_limit:
+                                if not allowed_heating or T_active >= t_min_limit:
                                     cost = 0.0
                                     energy = 0.0
                                     
-                                    penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
+                                    penalty = 1000.0 * (t_min - T_active) if (relax and allowed_heating and T_active < t_min) else 0.0
                                     if tariff <= 0.0:
                                         reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min))
                                     else:
                                         reward = temp_reward * max(0.0, T_active - t_min)
-                                    new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
+                                    new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
                                     if new_cost < dp[h][curr_idx]:
                                         dp[h][curr_idx] = new_cost
                                         prev_state[h][curr_idx] = prev_idx
@@ -518,7 +565,7 @@ def run_boiler_dp(
                                     reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
                                 else:
                                     reward = temp_reward * max(0.0, T_active - t_min)
-                                new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
+                                new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
                                 if new_cost < dp[h][curr_idx]:
                                     dp[h][curr_idx] = new_cost
                                     prev_state[h][curr_idx] = prev_idx
@@ -559,7 +606,7 @@ def run_boiler_dp(
                                 reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_elec_end_val - t_min))
                             else:
                                 reward = temp_reward * max(0.0, T_active - t_min)
-                            new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
+                            new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
                             if new_cost < dp[h][curr_idx]:
                                 dp[h][curr_idx] = new_cost
                                 prev_state[h][curr_idx] = prev_idx
@@ -602,7 +649,7 @@ def run_boiler_dp(
                                 reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
                             else:
                                 reward = temp_reward * max(0.0, T_active - t_min)
-                            new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
+                            new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
                             if new_cost < dp[h][curr_idx]:
                                 dp[h][curr_idx] = new_cost
                                 prev_state[h][curr_idx] = prev_idx
@@ -649,7 +696,7 @@ def run_boiler_dp(
                                             reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min)) + 0.01 * kwh
                                         else:
                                             reward = temp_reward * max(0.0, T_active - t_min)
-                                        new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
+                                        new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if was_elec else 0.0)
                                         if new_cost < dp[h][curr_idx]:
                                             dp[h][curr_idx] = new_cost
                                             prev_state[h][curr_idx] = prev_idx
@@ -699,7 +746,7 @@ def run_boiler_dp(
                                 reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min)) + 0.01 * kwh
                             else:
                                 reward = temp_reward * max(0.0, T_active - t_min)
-                            new_cost = dp[h - 1][prev_idx] + cost + penalty - reward
+                            new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if was_elec else 0.0)
                             if new_cost < dp[h][curr_idx]:
                                 dp[h][curr_idx] = new_cost
                                 prev_state[h][curr_idx] = prev_idx
@@ -710,7 +757,25 @@ def run_boiler_dp(
                                 bypass_state[h][curr_idx] = T_bypass_end_val
 
         # Backtrack if path found
-        best_idx = min(range(num_states), key=lambda i: dp[N][i])
+        # Calculate terminal rewards at hour N to solve finite-horizon boundary effects
+        terminal_rewards = [0.0] * num_states
+        if not vacation_mode and N > 0:
+            sell_price_final = float(slots[-1].get("sell_price", 0.0))
+            for i in range(num_states):
+                t_gas_final = GRID_MIN_TEMP + i * 0.5
+                t_elec_final = elec_temp[N][i]
+                
+                reward_elec = 0.0
+                if vol_elec > 0.0 and eff_elec_only > 0.0:
+                    reward_elec = max(0.0, t_elec_final - t_min) * (sell_price_final / eff_elec_only) * 0.85
+                    
+                reward_gas = 0.0
+                if vol_gas > 0.0 and eff_gas_only > 0.0:
+                    reward_gas = max(0.0, t_gas_final - t_min) * (gas_cost_m3 / eff_gas_only) * 0.85
+                    
+                terminal_rewards[i] = reward_elec + reward_gas
+
+        best_idx = min(range(num_states), key=lambda i: dp[N][i] - terminal_rewards[i])
         if dp[N][best_idx] != float("inf"):
             path = []
             curr_idx = best_idx
