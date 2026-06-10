@@ -587,6 +587,9 @@ def run_boiler_dp(
                             
                             if T_curr < t_min_limit or T_curr > t_max_mode:
                                 continue
+                            if T_curr < T_gas_prev:
+                                # Active heating must not result in temperature drop
+                                continue
                             if T_active < t_min_limit:
                                 continue
                             
@@ -615,7 +618,7 @@ def run_boiler_dp(
                                 prev_energy[h][curr_idx] = energy
                                 elec_temp[h][curr_idx] = T_elec_end_val
                                 bypass_state[h][curr_idx] = T_bypass_end_val
-
+ 
                     elif mode == "GAS_PUMP":
                         if T_elec_prev < t_min:
                             continue
@@ -623,12 +626,15 @@ def run_boiler_dp(
                         T_bypass_end_val = True
                         t_max_mode = t_max_gas
                         max_rise = 40.0
-
+ 
                         for curr_idx in range(num_states):
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
-
+ 
                             if T_curr < t_min_limit or T_curr > t_max_mode:
+                                continue
+                            if T_curr < T_mixed:
+                                # Active heating must not result in temperature drop
                                 continue
                             if T_active < t_min_limit:
                                 continue
@@ -658,7 +664,7 @@ def run_boiler_dp(
                                 prev_energy[h][curr_idx] = energy
                                 elec_temp[h][curr_idx] = T_curr
                                 bypass_state[h][curr_idx] = T_bypass_end_val
-
+ 
                     elif mode == "ELEC":
                         power_kw = cal_data.get("elec_only", {}).get("heater_power_kw", 2.5)
                         max_rise_elec = power_kw * eff_elec_only
@@ -681,6 +687,9 @@ def run_boiler_dp(
                             if 0 <= curr_idx < num_states:
                                 T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                                 if T_curr >= GRID_MIN_TEMP and T_curr <= t_max_mode:
+                                    if T_elec_end_val < T_elec_prev:
+                                        # Active heating must not result in temperature drop
+                                        continue
                                     if T_active >= t_min_limit:
                                         delta_T = T_elec_end_val - T_elec_cooled
                                         if delta_T <= 0.0:
@@ -705,7 +714,7 @@ def run_boiler_dp(
                                             prev_energy[h][curr_idx] = energy
                                             elec_temp[h][curr_idx] = T_elec_end_val
                                             bypass_state[h][curr_idx] = T_bypass_end_val
-
+ 
                     elif mode == "ELEC_PUMP":
                         if T_elec_prev < t_min:
                             continue
@@ -720,12 +729,15 @@ def run_boiler_dp(
                         current_t_max_elec = (dynamic_t_max_elec_today_pump if is_today_slot else dynamic_t_max_elec_tomorrow_pump) if is_solar_slot else t_max_elec
                         
                         t_max_mode = current_t_max_elec
-
+ 
                         for curr_idx in range(num_states):
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
-
+ 
                             if T_curr < t_min_limit or T_curr > t_max_mode:
+                                continue
+                            if T_curr < T_mixed:
+                                # Active heating must not result in temperature drop
                                 continue
                             if T_active < t_min_limit:
                                 continue
