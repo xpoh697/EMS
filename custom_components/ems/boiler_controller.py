@@ -12,7 +12,7 @@ from homeassistant.components.climate import DOMAIN as CLIMATE_DOMAIN
 from homeassistant.const import ATTR_ENTITY_ID, ATTR_TEMPERATURE, SERVICE_TURN_OFF, SERVICE_TURN_ON, STATE_ON, STATE_OFF
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
-from .const import CONF_CALIBRATION_TYPE, CONF_WATER_FLOW_SENSOR
+from .const import CONF_CALIBRATION_TYPE, CONF_WATER_FLOW_SENSOR, CONF_PEOPLE_HOME_SENSOR
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ class BoilerController:
         self.gas_capacity = config.get("gas_boiler_capacity", 100)
         self.elec_capacity = config.get("elec_boiler_capacity", 100)
         self.gas_cost_m3 = config.get("gas_cost_m3", 0.0)
+        self.people_home_sensor = config.get(CONF_PEOPLE_HOME_SENSOR)
         
         # EMA solar deficit variables to protect home battery
         self._solar_deficit_cutoff = False
@@ -94,6 +95,14 @@ class BoilerController:
             ["select.ems_boiler_mode"],
             self._async_system_mode_changed
         )
+
+        # 4a. Следим за изменением сенсора присутствия
+        if self.people_home_sensor:
+            async_track_state_change_event(
+                self.hass,
+                [self.people_home_sensor],
+                self._async_people_home_changed
+            )
 
         # 5. Следим за изменением температуры для работы программного термостата и перекачки
         temp_entities = []
@@ -1703,6 +1712,33 @@ class BoilerController:
                 await self.async_stop_manual_heating()
             await self._async_apply_current_dp_plan()
 
+    async def _async_people_home_changed(self, event) -> None:
+        """Handle presence sensor state change."""
+        new_state = event.data.get("new_state")
+        old_state = event.data.get("old_state")
+        if old_state is not None and new_state is not None and old_state.state == new_state.state:
+            # Ignore attribute changes
+            return
+        _LOGGER.debug("Occupancy sensor changed state: %s", new_state.state if new_state else "None")
+        await self._async_apply_current_dp_plan()
+
+    def _are_people_home(self) -> bool:
+        """Check if people are home based on the presence sensor."""
+        if not self.people_home_sensor:
+            return True
+        state = self.hass.states.get(self.people_home_sensor)
+        if not state or state.state in (None, "unknown", "unavailable"):
+            return True
+        val = state.state.lower()
+        if val in ("0", "off", "not_home", "false"):
+            return False
+        try:
+            if float(state.state) == 0:
+                return False
+        except ValueError:
+            pass
+        return True
+
     async def _async_apply_current_dp_plan(self):
         """Apply current DP plan recommended actions to physical hardware if in Auto mode."""
         if self.current_mode.lower() != "auto":
@@ -1717,6 +1753,14 @@ class BoilerController:
 
         mode = dp_state.state.upper()
         recommended_bypass = dp_state.attributes.get("recommended_bypass", "OFF").upper()
+
+        # Apply occupancy override for gas heating (no one home -> IDLE)
+        if "GAS" in mode and not self._are_people_home():
+            _LOGGER.info(
+                "EMS Boiler Controller: DP recommends %s, but no one is home. Overriding mode to IDLE",
+                mode
+            )
+            mode = "IDLE"
 
         if mode == "GAS":
             t_min = float(self.config.get("thermostat_set_temp", 45.0))

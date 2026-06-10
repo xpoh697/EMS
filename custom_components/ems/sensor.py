@@ -43,6 +43,7 @@ from .const import (
     CONF_FALLBACK_CONSUMPTION,
     CONF_DEBUG,
     CONF_VACATION_MODE_ENTITY,
+    CONF_PEOPLE_HOME_SENSOR,
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
     CONF_SYSTEM_COST,
@@ -3829,6 +3830,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
 
         self._gas_sensor: str | None = None
         self._elec_sensor: str | None = None
+        self._people_home_sensor: str | None = None
 
         self._state: str = "IDLE"
         self._recommended_bypass: str = "OFF"
@@ -3907,6 +3909,23 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "boiler_auto_temp_limit": self._boiler_auto_temp_limit,
         }
 
+    def _are_people_home(self) -> bool:
+        """Check if people are home based on the configured presence sensor."""
+        if not self._people_home_sensor:
+            return True
+        state = self.hass.states.get(self._people_home_sensor)
+        if not state or state.state in (None, "unknown", "unavailable"):
+            return True
+        val = state.state.lower()
+        if val in ("0", "off", "not_home", "false"):
+            return False
+        try:
+            if float(state.state) == 0:
+                return False
+        except ValueError:
+            pass
+        return True
+
     async def async_added_to_hass(self) -> None:
         """Handle entity registry addition and restore state."""
         await super().async_added_to_hass()
@@ -3945,6 +3964,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         options = self._entry.options
         self._gas_sensor = options.get("gas_boiler_climate", config.get("gas_boiler_climate"))
         self._elec_sensor = options.get("elec_boiler_temp", config.get("elec_boiler_temp"))
+        self._people_home_sensor = options.get(CONF_PEOPLE_HOME_SENSOR, config.get(CONF_PEOPLE_HOME_SENSOR))
 
         listeners = [
             "sensor.dp",
@@ -3960,6 +3980,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             listeners.append(self._gas_sensor)
         if self._elec_sensor:
             listeners.append(self._elec_sensor)
+        if self._people_home_sensor:
+            listeners.append(self._people_home_sensor)
 
         self.async_on_remove(
             async_track_state_change_event(
@@ -3996,6 +4018,18 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             old_state.state if old_state else "None",
             new_state.state if new_state else "None",
         )
+
+        # Ignore attribute-only changes for the people_home_sensor (e.g. GPS update spam)
+        if entity_id == self._people_home_sensor:
+            if old_state is not None and new_state is not None and old_state.state == new_state.state:
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.DEBUG,
+                    "EMS Boiler DP: attribute-only update for presence sensor %s ignored",
+                    entity_id
+                )
+                return
 
         # Break feedback loop: если событие от sensor.dp — проверяем реальное
         # изменение расписания (дата, час, цены buy/sell, physical_mode).
@@ -4434,6 +4468,20 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 min_bat_soc,
                 vacation_mode,
             )
+
+            # Apply occupancy override for gas heating
+            if not self._are_people_home():
+                if current_action in ("GAS", "GAS_PUMP"):
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.INFO,
+                        "EMS Boiler DP: Occupancy sensor override applied (no one home). Overriding %s to IDLE",
+                        current_action
+                    )
+                    current_action = "IDLE"
+                if schedule_list and schedule_list[0].get("action") in ("GAS", "GAS_PUMP"):
+                    schedule_list[0]["action"] = "IDLE"
 
             self._state = current_action
             self._schedule = schedule_list

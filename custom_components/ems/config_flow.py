@@ -23,6 +23,7 @@ from .const import (
     CONF_VACATION_MODE_ENTITY,
     CONF_CALIBRATION_TYPE,
     CONF_WATER_FLOW_SENSOR,
+    CONF_PEOPLE_HOME_SENSOR,
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
     CONF_SYSTEM_COST,
@@ -510,6 +511,17 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         else:
             schema_dict[vol.Optional(CONF_WATER_FLOW_SENSOR)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["sensor", "binary_sensor"])
+            )
+
+        # Optional: CONF_PEOPLE_HOME_SENSOR
+        val_people = get_value(CONF_PEOPLE_HOME_SENSOR)
+        if val_people:
+            schema_dict[vol.Optional(CONF_PEOPLE_HOME_SENSOR, default=val_people)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["sensor", "binary_sensor", "zone"])
+            )
+        else:
+            schema_dict[vol.Optional(CONF_PEOPLE_HOME_SENSOR)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["sensor", "binary_sensor", "zone"])
             )
 
         return self.async_show_form(
