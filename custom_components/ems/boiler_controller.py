@@ -1778,7 +1778,7 @@ class BoilerController:
             t_min = float(self.config.get("thermostat_set_temp", 45.0))
             t_elec = self._get_elec_temp()
             if t_elec is not None:
-                threshold = t_min - 10.0
+                threshold = t_min - 6.0
                 
                 # Исправленный гистерезис задержки газового нагрева:
                 # Вход в задержку при t_elec > threshold + 1.0
@@ -1843,9 +1843,9 @@ class BoilerController:
                                 "EMS Bypass decision: t_elec=%.1f, t_min=%.1f (thermostat_set_temp), mode=%s",
                                 t_elec_val, t_min, mode
                             )
-                            if t_elec_val >= (t_min - 10.0):
+                            if t_elec_val >= (t_min - 6.0):
                                 target_bypass = "ON"
-                            elif t_elec_val < (t_min - 11.0):
+                            elif t_elec_val < (t_min - 7.0):
                                 target_bypass = "OFF"
                             else:
                                 # В пределах зоны гистерезиса сохраняем текущее состояние
