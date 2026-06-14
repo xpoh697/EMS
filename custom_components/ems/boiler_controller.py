@@ -44,6 +44,8 @@ class BoilerController:
         self._elec_cutoff_active = False
         self._gas_cutoff_active = False
         self._gas_heating_delayed = False
+        self._t_max_elec = None
+        self._t_max_gas = None
         
         # Флаги ручного цикла нагрева
         self._manual_heating_active = False
@@ -178,6 +180,7 @@ class BoilerController:
             t_max_elec = float(self.config.get("elec_boiler_max_temp", 70.0))
             if storage and self.current_mode.lower() == "auto":
                 t_max_elec = min(t_max_elec, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
+        self._t_max_elec = t_max_elec
         hysteresis = 5.0
         
         if t_elec is None:
@@ -206,6 +209,7 @@ class BoilerController:
             t_max_gas = float(self.config.get("gas_boiler_max_temp", 50.0))
             if storage and self.current_mode.lower() == "auto":
                 t_max_gas = min(t_max_gas, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
+        self._t_max_gas = t_max_gas
         
         if t_gas is None:
             mode = dp_state.state.upper() if dp_state else "IDLE"
@@ -1888,17 +1892,19 @@ class BoilerController:
                     heater_on = (target_heater_state == STATE_ON)
                     t_elec = self._get_elec_temp()
                     
-                    t_max_elec = float(self.config.get("elec_boiler_max_temp", 70.0))
-                    storage = self.storage
-                    if storage and self.current_mode.lower() == "auto":
-                        t_max_elec = min(t_max_elec, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
+                    t_max_elec = self._t_max_elec
+                    if t_max_elec is None:
+                        t_max_elec = float(self.config.get("elec_boiler_max_temp", 70.0))
+                        storage = self.storage
+                        if storage and self.current_mode.lower() == "auto":
+                            t_max_elec = min(t_max_elec, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
                         
                     if t_elec is None:
                         target_pump_state_logical = False
                     else:
-                        if t_elec >= (t_max_elec - 5.0) and heater_on:
+                        if t_elec >= (t_max_elec - 5.0):
                             target_pump_state_logical = True
-                        elif t_elec <= (t_max_elec - 10.0) or not heater_on:
+                        elif t_elec <= (t_max_elec - 10.0):
                             target_pump_state_logical = False
                         else:
                             target_pump_state_logical = (current_pump.state == STATE_ON) if current_pump else False
