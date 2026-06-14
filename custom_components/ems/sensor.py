@@ -5,7 +5,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -102,7 +102,19 @@ def safe_round(val: Any, decimals: int = 4) -> float:
     except (ValueError, TypeError):
         return 0.0
 
-def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float], bool]:
+def normalize_to_utc(dt_val) -> datetime | None:
+    """Нормализует datetime или строковое представление даты/времени к UTC."""
+    if dt_val is None:
+        return None
+    if isinstance(dt_val, datetime):
+        return dt_util.as_utc(dt_val)
+    if isinstance(dt_val, str):
+        parsed = dt_util.parse_datetime(dt_val)
+        if parsed:
+            return dt_util.as_utc(parsed)
+    return None
+
+def parse_solcast_forecast(hass: HomeAssistant, state_obj, target_date: date) -> tuple[list[float], bool]:
     """Parse Solcast detailedForecast, detailedHourly, and forecasts attributes to compute baseline hourly kWh."""
     hourly_baselines = [0.0] * 24
     if not state_obj:
@@ -110,12 +122,13 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
 
     attrs = state_obj.attributes
     _LOGGER.info(
-        "EMS PV Debug for %s: state=%s, attrs_keys=%s, detailedForecast_len=%s, analysis=%s",
+        "EMS PV Debug for %s: state=%s, attrs_keys=%s, detailedForecast_len=%s, analysis=%s, target_date=%s",
         state_obj.entity_id,
         state_obj.state,
         list(attrs.keys()),
         len(attrs.get("detailedForecast", [])) if isinstance(attrs.get("detailedForecast"), list) else "None",
-        attrs.get("analysis")
+        attrs.get("analysis"),
+        target_date
     )
     forecast_list = None
     matched_attr = None
@@ -127,6 +140,25 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
             forecast_list = val
             matched_attr = attr_name
             break
+
+    analysis = attrs.get("analysis", {})
+    intervals = []
+    if isinstance(analysis, dict):
+        intervals = analysis.get("intervals", [])
+
+    if forecast_list:
+        _LOGGER.info(
+            "EMS TEMP DEBUG: forecast_list len=%d, matched_attr=%s, first 5 slots: %s",
+            len(forecast_list),
+            matched_attr,
+            [{k: str(v) for k, v in slot.items() if k in ("period_start", "pv_estimate", "pv_estimate10", "estimate", "estimate10")} for slot in forecast_list[:5] if isinstance(slot, dict)]
+        )
+    if intervals:
+        _LOGGER.info(
+            "EMS TEMP DEBUG: intervals len=%d, first 5: %s",
+            len(intervals),
+            [str(slot) for slot in intervals[:5]]
+        )
 
     if forecast_list is None:
         # Fallback: if no detailed forecast attribute is present, check if there's a simple state value
@@ -156,11 +188,6 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
                 hourly_baselines[h] = round(total_val * weight, 4)
         return hourly_baselines, True
 
-    analysis = attrs.get("analysis", {})
-    intervals = []
-    if isinstance(analysis, dict):
-        intervals = analysis.get("intervals", [])
-
     # Group slots by local hour
     # Default slot duration: 1.0 for hourly forecast, 0.5 for half-hourly
     slot_duration = 1.0 if matched_attr == "detailedHourly" else 0.5
@@ -174,8 +201,8 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
                     second_slot = forecast_list[1]
                     if isinstance(second_slot, dict):
                         next_start_str = second_slot.get("period_start")
-                        start_dt = dt_util.parse_datetime(start_str)
-                        next_dt = dt_util.parse_datetime(next_start_str)
+                        start_dt = start_str if isinstance(start_str, datetime) else dt_util.parse_datetime(start_str)
+                        next_dt = next_start_str if isinstance(next_start_str, datetime) else dt_util.parse_datetime(next_start_str)
                         if start_dt and next_dt:
                             calculated_duration = abs((next_dt - start_dt).total_seconds()) / 3600.0
                             if calculated_duration > 0.0:
@@ -183,6 +210,23 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
         except Exception:
             pass
 
+    # Build confidence map based on normalized UTC datetime
+    confidence_map = {}
+    if isinstance(intervals, list):
+        for slot in intervals:
+            if isinstance(slot, dict):
+                p_start = slot.get("period_start")
+                if p_start:
+                    try:
+                        p_dt = p_start if isinstance(p_start, datetime) else dt_util.parse_datetime(p_start)
+                        if p_dt:
+                            p_dt_utc = normalize_to_utc(p_dt)
+                            if p_dt_utc:
+                                confidence_map[p_dt_utc] = slot.get("confidence", 1.0)
+                    except Exception:
+                        pass
+
+    has_slots_for_target_date = False
     for i, slot in enumerate(forecast_list):
         if not isinstance(slot, dict):
             continue
@@ -192,18 +236,16 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
             continue
 
         try:
-            parsed_dt = dt_util.parse_datetime(period_start)
+            parsed_dt = period_start if isinstance(period_start, datetime) else dt_util.parse_datetime(period_start)
             if not parsed_dt:
                 continue
             local_dt = dt_util.as_local(parsed_dt)
+            if local_dt.date() != target_date:
+                continue
+            has_slots_for_target_date = True
             local_hour = local_dt.hour
         except Exception:
-            if len(forecast_list) == 48:
-                local_hour = min(23, max(0, i // 2))
-            elif len(forecast_list) == 24:
-                local_hour = min(23, max(0, i))
-            else:
-                continue
+            continue
 
         try:
             pv_estimate = float(slot.get("pv_estimate", 0.0))
@@ -215,10 +257,11 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
         except (ValueError, TypeError):
             pv_estimate10 = 0.0
 
-        # Retrieve confidence
+        # Retrieve confidence from mapped UTC datetime
         confidence = 1.0
-        if isinstance(intervals, list) and i < len(intervals):
-            confidence_val = intervals[i].get("confidence", 1.0)
+        parsed_dt_utc = normalize_to_utc(parsed_dt)
+        if parsed_dt_utc and parsed_dt_utc in confidence_map:
+            confidence_val = confidence_map[parsed_dt_utc]
         else:
             confidence_val = analysis.get("confidence", 1.0)
 
@@ -234,6 +277,33 @@ def parse_solcast_forecast(hass: HomeAssistant, state_obj) -> tuple[list[float],
 
         if 0 <= local_hour < 24:
             hourly_baselines[local_hour] += baseline_kwh
+
+    # Если для этой даты в детальном списке прогноза не нашлось ни одной записи,
+    # делаем фолбэк на распределение суммарного значения по кривой
+    if not has_slots_for_target_date:
+        try:
+            total_val = float(state_obj.state)
+        except (ValueError, TypeError):
+            total_val = 0.0
+
+        ems_log(
+            hass,
+            _LOGGER,
+            logging.WARNING,
+            f"No forecast slots found for target date {target_date} on {state_obj.entity_id}. "
+            f"Using hardcoded solar bell curve to distribute daily total of {total_val} kWh."
+        )
+
+        solar_weights = {
+            6: 0.02, 7: 0.05, 8: 0.08, 9: 0.10, 10: 0.12, 11: 0.13,
+            12: 0.13, 13: 0.12, 14: 0.10, 15: 0.07, 16: 0.04, 17: 0.02,
+            18: 0.02,
+        }
+        if total_val > 0.0:
+            for h in range(24):
+                weight = solar_weights.get(h, 0.0)
+                hourly_baselines[h] = round(total_val * weight, 4)
+            return hourly_baselines, True
 
     return [round(val, 4) for val in hourly_baselines], False
 
@@ -1100,9 +1170,9 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Source PV forecast sensor {self._source_forecast_id} not found!")
             return
 
-        self._baselines, self._is_fallback = parse_solcast_forecast(self.hass, state_obj)
-
         now = dt_util.now()
+        self._baselines, self._is_fallback = parse_solcast_forecast(self.hass, state_obj, now.date())
+
         current_hour = now.hour
 
         # Midnight transition check
@@ -1329,7 +1399,9 @@ class EmsPvForecastTomorrowSensor(SensorEntity):
             ems_log(self.hass, _LOGGER, logging.ERROR, f"Source PV forecast sensor {self._source_forecast_id} not found!")
             return
 
-        self._baselines, self._is_fallback = parse_solcast_forecast(self.hass, state_obj)
+        now = dt_util.now()
+        tomorrow_date = (now + timedelta(days=1)).date()
+        self._baselines, self._is_fallback = parse_solcast_forecast(self.hass, state_obj, tomorrow_date)
 
         factor = 1.0
         today_state = self.hass.states.get("sensor.pv_forecast_today")
@@ -2559,6 +2631,32 @@ class EmsSchedulerSensor(SensorEntity):
         if base_mode == "sale_pv_no_bat" and self._dynamic_sale_pv_active:
             return "sale_pv"
 
+        # Apply PV surplus override for IDLE mode
+        if active_override is None and base_mode == "idle":
+            pv_sensor_id = options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION))
+            load_sensor_id = options.get(CONF_CURRENT_HOUSE_CONSUMPTION, config.get(CONF_CURRENT_HOUSE_CONSUMPTION))
+
+            current_pv = self._avg_buffer(self._pv_buffer)
+            if current_pv is None and pv_sensor_id:
+                current_pv = self._read_power_w(pv_sensor_id)
+
+            current_load = self._avg_buffer(self._load_buffer)
+            if current_load is None and load_sensor_id:
+                current_load = self._read_power_w(load_sensor_id)
+
+            if current_pv is not None and current_load is not None and current_pv > (current_load + 50.0):
+                current_slot = schedule[0] if schedule else {}
+                try:
+                    sell_price = float(current_slot.get("sell_price", 0.0))
+                except (ValueError, TypeError):
+                    sell_price = 0.0
+                try:
+                    min_sell_price = float(storage.min_sell_price)
+                except (ValueError, TypeError):
+                    min_sell_price = 0.0
+
+                return "sale_pv" if sell_price > min_sell_price else "stop_sale"
+
         return base_mode
 
     @property
@@ -2728,6 +2826,42 @@ class EmsSchedulerSensor(SensorEntity):
         if schedule:
             raw_mode = schedule[0].get("action", raw_mode)
             mapping_reason = schedule[0].get("mapping_reason")
+
+        # Get base_mode for surplus check
+        base_mode = None
+        if schedule:
+            base_mode = schedule[0].get("physical_mode")
+        elif dp_state is not None:
+            base_mode = dp_state.state
+
+        # Apply PV surplus override for IDLE mode in attributes
+        if active_override is None and base_mode == "idle":
+            pv_sensor_id = options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION))
+            load_sensor_id = options.get(CONF_CURRENT_HOUSE_CONSUMPTION, config.get(CONF_CURRENT_HOUSE_CONSUMPTION))
+
+            current_pv = self._avg_buffer(self._pv_buffer)
+            if current_pv is None and pv_sensor_id:
+                current_pv = self._read_power_w(pv_sensor_id)
+
+            current_load = self._avg_buffer(self._load_buffer)
+            if current_load is None and load_sensor_id:
+                current_load = self._read_power_w(load_sensor_id)
+
+            if current_pv is not None and current_load is not None and current_pv > (current_load + 50.0):
+                current_slot = schedule[0] if schedule else {}
+                try:
+                    sell_price = float(current_slot.get("sell_price", 0.0))
+                except (ValueError, TypeError):
+                    sell_price = 0.0
+                try:
+                    min_sell_price = float(storage.min_sell_price)
+                except (ValueError, TypeError):
+                    min_sell_price = 0.0
+
+                overridden_mode = "sale_pv" if sell_price > min_sell_price else "stop_sale"
+                mapping_reason = f"idle_pv_surplus_override: {overridden_mode} (PV {current_pv:.1f}W > Load {current_load:.1f}W + 50W, Sell Price {sell_price:.4f} vs Min {min_sell_price:.4f})"
+                if dispatched_plan:
+                    dispatched_plan[0]["physical_mode"] = overridden_mode
 
         if active_override is not None:
             raw_mode = active_override.split(":", 1)[0]
@@ -3893,6 +4027,9 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "t_min": self._t_min,
             "t_max_elec": self._t_max_elec,
             "t_max_gas": self._t_max_gas,
+            "config_t_min": float(self._entry.options.get(CONF_THERMOSTAT_SET_TEMP, self._entry.data.get(CONF_THERMOSTAT_SET_TEMP, DEFAULT_THERMOSTAT_SET_TEMP))),
+            "config_max_elec": float(self._entry.options.get(CONF_ELEC_BOILER_MAX_TEMP, self._entry.data.get(CONF_ELEC_BOILER_MAX_TEMP, DEFAULT_ELEC_BOILER_MAX_TEMP))),
+            "config_max_gas": float(self._entry.options.get(CONF_GAS_BOILER_MAX_TEMP, self._entry.data.get(CONF_GAS_BOILER_MAX_TEMP, DEFAULT_GAS_BOILER_MAX_TEMP))),
             "vol_elec": self._vol_elec,
             "vol_gas": self._vol_gas,
             "gas_cost_m3": self._gas_cost_m3,

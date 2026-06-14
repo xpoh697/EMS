@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.9.1";
+const CARD_VERSION = "1.9.2";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -1936,9 +1936,9 @@ class BoilerCard extends HTMLElement {
     const dpS = this._hass.states["sensor.boiler_dp"];
     if (!dpS || !dpS.attributes) return;
 
-    const t_min = dpS.attributes.t_min ?? 45.0;
-    const t_max_gas = dpS.attributes.t_max_gas ?? 50.0;
-    const t_max_elec = dpS.attributes.t_max_elec ?? 70.0;
+    const t_min = dpS.attributes.config_t_min ?? dpS.attributes.t_min ?? 45.0;
+    const t_max_gas = dpS.attributes.config_max_gas ?? dpS.attributes.t_max_gas ?? 50.0;
+    const t_max_elec = dpS.attributes.config_max_elec ?? dpS.attributes.t_max_elec ?? 70.0;
 
     const mode = this._mhModeSelect.value;
     const t_max = (mode.includes("GAS")) ? t_max_gas : t_max_elec;
