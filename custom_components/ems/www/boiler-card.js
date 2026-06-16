@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.9.2";
+const CARD_VERSION = "1.9.3";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -1818,6 +1818,15 @@ class BoilerCard extends HTMLElement {
       ? (this._hass.config.currency === "RUB" ? " руб." : " " + this._hass.config.currency)
       : " руб.";
 
+    const formatCostPerC = (v) => {
+      if (v === null || v === undefined) return "–";
+      const val = parseFloat(v);
+      if (isNaN(val)) return "–";
+      if (val === 0) return "0.00" + currency;
+      if (val < 0.1) return val.toFixed(4) + currency;
+      return val.toFixed(2) + currency;
+    };
+
     const volGas = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.vol_gas) || 0;
     const volElec = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.vol_elec) || 0;
     const tMinVal = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.t_min) || 40.0;
@@ -1912,19 +1921,19 @@ class BoilerCard extends HTMLElement {
       <div class="modal-section-title">Стоимость нагрева на 1°C</div>
       <div class="modal-row-detail">
         <span class="m-label">Газ (без насоса)</span>
-        <span class="m-val">${slot.cost_per_c_gas != null ? slot.cost_per_c_gas.toFixed(2) + currency : "–"}</span>
+        <span class="m-val">${formatCostPerC(slot.cost_per_c_gas)}</span>
       </div>
       <div class="modal-row-detail">
         <span class="m-label">Газ + Насос</span>
-        <span class="m-val">${slot.cost_per_c_gas_pump != null ? slot.cost_per_c_gas_pump.toFixed(2) + currency : "–"}</span>
+        <span class="m-val">${formatCostPerC(slot.cost_per_c_gas_pump)}</span>
       </div>
       <div class="modal-row-detail">
         <span class="m-label">Электро (без насоса)</span>
-        <span class="m-val">${slot.cost_per_c_elec != null ? slot.cost_per_c_elec.toFixed(2) + currency : "–"}</span>
+        <span class="m-val">${formatCostPerC(slot.cost_per_c_elec)}</span>
       </div>
       <div class="modal-row-detail">
         <span class="m-label">Электро + Насос</span>
-        <span class="m-val">${slot.cost_per_c_elec_pump != null ? slot.cost_per_c_elec_pump.toFixed(2) + currency : "–"}</span>
+        <span class="m-val">${formatCostPerC(slot.cost_per_c_elec_pump)}</span>
       </div>
     `;
     

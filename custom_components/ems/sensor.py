@@ -2117,8 +2117,11 @@ class EmsDpSensor(SensorEntity):
                 consumption_tomorrow,
                 fallback_consumption,
                 overrides,
+                vacation_mode,
                 planned_boiler_today,
                 planned_boiler_tomorrow,
+                self._boiler_average_profile_today,
+                self._boiler_average_profile_tomorrow,
             )
 
             self._state = result.get("current_action", "idle")
@@ -2187,8 +2190,11 @@ class EmsDpSensor(SensorEntity):
         consumption_tomorrow: list[float],
         fallback_consumption: float,
         overrides: dict[str, dict[str, str]],
+        vacation_mode: bool = False,
         planned_boiler_today: list[float] = None,
         planned_boiler_tomorrow: list[float] = None,
+        boiler_average_today: list[float] = None,
+        boiler_average_tomorrow: list[float] = None,
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
         from .dp_engine import run_unified_dp, DPConfig
@@ -2277,12 +2283,31 @@ class EmsDpSensor(SensorEntity):
             disable_discharge=False,
         )
 
-        # Create a copy of slots with planned_boiler_kwh set to 0.0 for the DP solver,
-        # since the boiler's average profile is already included in consumption_kwh.
+        if boiler_average_today is None:
+            boiler_average_today = [0.0] * 24
+        if boiler_average_tomorrow is None:
+            boiler_average_tomorrow = [0.0] * 24
+
+        # Create a copy of slots for the DP solver.
+        # Since the boiler's average profile is already included in consumption_kwh (if vacation_mode is False),
+        # we adjust consumption_kwh by subtracting the boiler's historical average and adding the actual planned boiler heating.
         math_slots = []
         for slot in slots:
             math_slot = slot.copy()
-            math_slot["planned_boiler_kwh"] = 0.0
+            h = slot["hour"]
+            is_tomorrow = slot["date"] == tomorrow_str
+            avg_profile = boiler_average_tomorrow if is_tomorrow else boiler_average_today
+            avg_boiler = avg_profile[h] if h < len(avg_profile) else 0.0
+            planned_boiler = slot["planned_boiler_kwh"]
+            base_cons = slot["consumption_kwh"]
+
+            if not vacation_mode:
+                adjusted_cons = max(0.0, base_cons - avg_boiler + planned_boiler)
+            else:
+                adjusted_cons = max(0.0, base_cons + planned_boiler)
+
+            math_slot["consumption_kwh"] = adjusted_cons
+            math_slot["planned_boiler_kwh"] = 0.0  # merged into consumption_kwh
             math_slots.append(math_slot)
 
         try:
@@ -4583,6 +4608,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             except (ValueError, TypeError):
                 min_bat_soc = 20.0
 
+            battery_cycle_cost = float(self.hass.data.get(DOMAIN, {}).get("bat_degradation_per_kwh", 0.0))
+
             from .boiler_dp_engine import run_boiler_dp
             current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(
                 run_boiler_dp,
@@ -4604,6 +4631,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 actual_boiler_today,
                 min_bat_soc,
                 vacation_mode,
+                battery_cycle_cost,
             )
 
             # Apply occupancy override for gas heating

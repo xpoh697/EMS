@@ -93,6 +93,7 @@ def run_boiler_dp(
     actual_boiler_today: float = 0.0,
     min_bat_soc: float = 20.0,
     vacation_mode: bool = False,
+    battery_cycle_cost: float = 0.0,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run Dynamic Programming strategy optimizer for hot water boiler.
 
@@ -257,7 +258,9 @@ def run_boiler_dp(
             pv_kwh = float(slot.get("pv_kwh", 0.0))
             
             is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
-            if allow_elec_static and pv_kwh > 0.5 and is_curtailed:
+            has_full_charge = max_soc_today >= 90.0
+            is_eligible_hour = is_curtailed or (has_full_charge and pv_kwh > consumption_kwh)
+            if allow_elec_static and pv_kwh > 0.5 and is_eligible_hour:
                 soc = float(slot.get("expected_soc", 50.0))
                 limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
                 already_free = soc >= limit_soc
@@ -291,7 +294,9 @@ def run_boiler_dp(
             pv_kwh = float(slot.get("pv_kwh", 0.0))
             
             is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
-            if allow_elec_static and pv_kwh > 0.5 and is_curtailed:
+            has_full_charge_tomorrow = max_soc_tomorrow >= 90.0
+            is_eligible_hour = is_curtailed or (has_full_charge_tomorrow and pv_kwh > consumption_kwh)
+            if allow_elec_static and pv_kwh > 0.5 and is_eligible_hour:
                 soc = float(slot.get("expected_soc", 50.0))
                 limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
                 already_free = soc >= limit_soc
@@ -389,7 +394,11 @@ def run_boiler_dp(
                     remaining_power = boiler_power - solar_covered
                     battery_covered = min(remaining_power, bat_avail)
                     uncovered = remaining_power - battery_covered
-                    battery_valuation = max(buy_price, sell_price)
+                    is_solar_mode = mode_name in ("sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")
+                    if is_solar_mode or pv_surplus > 0.0:
+                        battery_valuation = sell_price + battery_cycle_cost
+                    else:
+                        battery_valuation = max(buy_price, sell_price) + battery_cycle_cost
                     eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + uncovered * 9999.0) / boiler_power
         else:
             # Calculate effective tariff considering local energy coverage using baseline adjusted_soc
@@ -414,7 +423,11 @@ def run_boiler_dp(
 
             # If grid is not accessible in this mode — treat grid import as prohibitively expensive
             grid_import_price = buy_price if grid_available else 9999.0
-            battery_valuation = max(buy_price, sell_price)
+            is_solar_mode = mode_name in ("sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")
+            if is_solar_mode or pv_surplus > 0.0:
+                battery_valuation = sell_price + battery_cycle_cost
+            else:
+                battery_valuation = max(buy_price, sell_price) + battery_cycle_cost
             eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + grid_import_needed * grid_import_price) / boiler_power
 
         slot["effective_tariff"] = eff_tariff
