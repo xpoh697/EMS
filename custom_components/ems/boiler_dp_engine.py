@@ -411,7 +411,7 @@ def run_boiler_dp(
                     uncovered = remaining_power - battery_covered
                     is_solar_mode = mode_name in ("sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")
                     if is_solar_mode or pv_surplus > 0.0:
-                        battery_valuation = max_solar_sell + battery_cycle_cost
+                        battery_valuation = max(sell_price, max_solar_sell) + battery_cycle_cost
                     else:
                         battery_valuation = max(buy_price, sell_price) + battery_cycle_cost
                     eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + uncovered * 9999.0) / boiler_power
@@ -440,7 +440,7 @@ def run_boiler_dp(
             grid_import_price = buy_price if grid_available else 9999.0
             is_solar_mode = mode_name in ("sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")
             if is_solar_mode or pv_surplus > 0.0:
-                battery_valuation = max_solar_sell + battery_cycle_cost
+                battery_valuation = max(sell_price, max_solar_sell) + battery_cycle_cost
             else:
                 battery_valuation = max(buy_price, sell_price) + battery_cycle_cost
             eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + grid_import_needed * grid_import_price) / boiler_power
