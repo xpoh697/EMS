@@ -259,13 +259,14 @@ def run_boiler_dp(
             mode_config = INVERTER_MODES.get(mode_name)
             allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
             allow_elec_static = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
-            pv_kwh = float(slot.get("pv_kwh", 0.0))
+            pv_kwh = float(slot.get("pv_kwh", 0.0) or 0.0)
+            consumption_kwh = float(slot.get("consumption_kwh", 0.0) or 0.0)
             
             is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
             has_full_charge = max_soc_today >= 90.0
             is_eligible_hour = is_curtailed or (has_full_charge and pv_kwh > consumption_kwh)
             if allow_elec_static and pv_kwh > 0.5 and is_eligible_hour:
-                soc = float(slot.get("expected_soc", 50.0))
+                soc = float(slot.get("expected_soc", 50.0) or 50.0)
                 limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
                 already_free = soc >= limit_soc
                 if not already_free:
@@ -295,13 +296,14 @@ def run_boiler_dp(
             mode_config = INVERTER_MODES.get(mode_name)
             allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
             allow_elec_static = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
-            pv_kwh = float(slot.get("pv_kwh", 0.0))
+            pv_kwh = float(slot.get("pv_kwh", 0.0) or 0.0)
+            consumption_kwh = float(slot.get("consumption_kwh", 0.0) or 0.0)
             
             is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
             has_full_charge_tomorrow = max_soc_tomorrow >= 90.0
             is_eligible_hour = is_curtailed or (has_full_charge_tomorrow and pv_kwh > consumption_kwh)
             if allow_elec_static and pv_kwh > 0.5 and is_eligible_hour:
-                soc = float(slot.get("expected_soc", 50.0))
+                soc = float(slot.get("expected_soc", 50.0) or 50.0)
                 limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
                 already_free = soc >= limit_soc
                 if not already_free:
