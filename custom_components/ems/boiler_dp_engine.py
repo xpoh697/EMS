@@ -249,6 +249,13 @@ def run_boiler_dp(
     allocated_free_slots = set()
     boiler_hourly_draw = cal_data.get("elec_with_pump", {}).get("heater_power_kw") or 2.5
 
+    # Calculate daily totals for today and tomorrow to check if average generation covers house + boiler
+    total_pv_today = sum(float(s.get("pv_kwh", 0.0) or 0.0) for s in slots if s.get("date") == today_date)
+    total_cons_today = sum(float(s.get("consumption_kwh", 0.0) or 0.0) for s in slots if s.get("date") == today_date)
+    
+    total_pv_tomorrow = sum(float(s.get("pv_kwh", 0.0) or 0.0) for s in slots if s.get("date") != today_date)
+    total_cons_tomorrow = sum(float(s.get("consumption_kwh", 0.0) or 0.0) for s in slots if s.get("date") != today_date)
+
     # Распределение лимита для сегодняшнего дня
     if total_pv_budget_today >= 0.5:
         eligible_today = []
@@ -263,7 +270,7 @@ def run_boiler_dp(
             consumption_kwh = float(slot.get("consumption_kwh", 0.0) or 0.0)
             
             is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
-            has_full_charge = max_soc_today >= 90.0
+            has_full_charge = (max_soc_today >= 90.0) and (total_pv_today > total_cons_today)
             is_eligible_hour = is_curtailed or (has_full_charge and pv_kwh > consumption_kwh)
             if allow_elec_static and pv_kwh > 0.5 and is_eligible_hour:
                 soc = float(slot.get("expected_soc", 50.0) or 50.0)
@@ -300,7 +307,7 @@ def run_boiler_dp(
             consumption_kwh = float(slot.get("consumption_kwh", 0.0) or 0.0)
             
             is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
-            has_full_charge_tomorrow = max_soc_tomorrow >= 90.0
+            has_full_charge_tomorrow = (max_soc_tomorrow >= 90.0) and (total_pv_tomorrow > total_cons_tomorrow)
             is_eligible_hour = is_curtailed or (has_full_charge_tomorrow and pv_kwh > consumption_kwh)
             if allow_elec_static and pv_kwh > 0.5 and is_eligible_hour:
                 soc = float(slot.get("expected_soc", 50.0) or 50.0)
