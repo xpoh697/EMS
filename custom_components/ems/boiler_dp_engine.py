@@ -148,6 +148,10 @@ def run_boiler_dp(
 
     # 2. Curtailed PV Energy Budget Allocation (Arbitrage)
     today_date = slots[0].get("date") if slots else None
+
+    # Calculate maximum export prices during solar hours for today and tomorrow
+    max_sell_today = max([float(s.get("sell_price", 0.0) or 0.0) for s in slots if s.get("date") == today_date and float(s.get("pv_kwh", 0.0) or 0.0) > 0.5], default=0.0)
+    max_sell_tomorrow = max([float(s.get("sell_price", 0.0) or 0.0) for s in slots if s.get("date") != today_date and float(s.get("pv_kwh", 0.0) or 0.0) > 0.5], default=0.0)
     
     # 2.1 Calculate historical averages budget
     boiler_average_budget_today = 0.0
@@ -349,6 +353,8 @@ def run_boiler_dp(
         sell_price = float(slot.get("sell_price", 0.0))
         mode_name = slot.get("physical_mode", "idle")
         soc = float(slot.get("expected_soc", 50.0))
+        is_tomorrow = slot.get("date") != today_date
+        max_solar_sell = max_sell_tomorrow if is_tomorrow else max_sell_today
         
         # Reconstruct baseline SOC trajectory by adding back planned boiler energy (decouples feedback loop)
         actual_planned = float(slot.get("actual_planned_boiler_kwh", 0.0))
@@ -396,7 +402,7 @@ def run_boiler_dp(
                     uncovered = remaining_power - battery_covered
                     is_solar_mode = mode_name in ("sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")
                     if is_solar_mode or pv_surplus > 0.0:
-                        battery_valuation = sell_price + battery_cycle_cost
+                        battery_valuation = max_solar_sell + battery_cycle_cost
                     else:
                         battery_valuation = max(buy_price, sell_price) + battery_cycle_cost
                     eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + uncovered * 9999.0) / boiler_power
@@ -425,7 +431,7 @@ def run_boiler_dp(
             grid_import_price = buy_price if grid_available else 9999.0
             is_solar_mode = mode_name in ("sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")
             if is_solar_mode or pv_surplus > 0.0:
-                battery_valuation = sell_price + battery_cycle_cost
+                battery_valuation = max_solar_sell + battery_cycle_cost
             else:
                 battery_valuation = max(buy_price, sell_price) + battery_cycle_cost
             eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + grid_import_needed * grid_import_price) / boiler_power
