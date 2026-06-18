@@ -286,7 +286,7 @@ def run_boiler_dp(
                 item[0]
             )
         )
-        rem_today = total_pv_budget_today
+        rem_today = max(0.0, total_pv_budget_today - actual_boiler_today)
         for idx, slot in eligible_today:
             if rem_today <= 0.0:
                 break
@@ -333,7 +333,7 @@ def run_boiler_dp(
     # Рассчитываем раздельные динамические лимиты температуры
     dynamic_t_max_elec_today_pump = t_max_elec
     dynamic_t_max_elec_today_only = t_max_elec
-    total_budget_for_limit = total_pv_budget_today + actual_boiler_today
+    total_budget_for_limit = total_pv_budget_today
     if total_budget_for_limit > 0.0:
         eff_pump_val = eff_elec_pump if eff_elec_pump > 0.0 else 3.35
         budget_rise_pump = total_budget_for_limit * eff_pump_val
@@ -970,9 +970,9 @@ def run_boiler_dp(
         "curtailed_pv_tomorrow": round(curtailed_pv_tomorrow, 2),
         "boiler_average_budget_today": round(boiler_average_budget_today, 2),
         "boiler_average_budget_tomorrow": round(boiler_average_budget_tomorrow, 2),
-        "total_pv_budget_today": round(total_pv_budget_today + actual_boiler_today, 2),
+        "total_pv_budget_today": round(total_pv_budget_today, 2),
         "boiler_used_today": round(actual_boiler_today, 2),
-        "remaining_pv_today": round(total_pv_budget_today, 2),
+        "remaining_pv_today": round(max(0.0, total_pv_budget_today - actual_boiler_today), 2),
     }
 
     current_action = best_path[0]["mode"] if best_path else "IDLE"
