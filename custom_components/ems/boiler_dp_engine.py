@@ -383,7 +383,8 @@ def run_boiler_dp(
         if mode_name == "buy":
             eff_tariff = buy_price
         elif idx in allocated_free_slots:
-            eff_tariff = 0.0
+            is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
+            eff_tariff = 0.0 if (is_curtailed or sell_price <= 0.0) else sell_price
         elif mode_config and mode_config.curtail_pv:
             limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
             if adjusted_soc >= limit_soc:
