@@ -911,11 +911,15 @@ def run_boiler_dp(
         mode_config = INVERTER_MODES.get(mode_name)
         tariff = slot.get("effective_tariff", sell_price)
 
+        sell_price_float = float(sell_price or 0.0)
+        buy_price_float = float(buy_price or 0.0)
+        real_tariff = tariff if tariff > 0.0 else (sell_price_float if sell_price_float > 0.0 else buy_price_float)
+
         # Cost per 1°C rise calculations for each mode
         c_per_gas = (1.0 / eff_gas_only if eff_gas_only > 0.0 else 0.0) * gas_cost_m3
-        c_per_gas_pump = (1.0 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * gas_cost_m3 + (0.1 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * tariff
-        c_per_elec = (1.0 / eff_elec_only if eff_elec_only > 0.0 else 0.0) * tariff
-        c_per_elec_pump = (1.1 / eff_elec_pump if eff_elec_pump > 0.0 else 0.0) * tariff
+        c_per_gas_pump = (1.0 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * gas_cost_m3 + (0.1 / eff_gas_pump if eff_gas_pump > 0.0 else 0.0) * real_tariff
+        c_per_elec = (1.0 / eff_elec_only if eff_elec_only > 0.0 else 0.0) * real_tariff
+        c_per_elec_pump = (1.1 / eff_elec_pump if eff_elec_pump > 0.0 else 0.0) * real_tariff
 
         # Determine electric heating allowance
         allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
