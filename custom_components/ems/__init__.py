@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from aiohttp import web
 import voluptuous as vol
@@ -76,6 +77,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register WebSocket API (once per HA start, not per entry)
     if not hass.data[DOMAIN].get("_ws_registered"):
         websocket_api.async_register_command(hass, ws_get_boiler_config)
+        websocket_api.async_register_command(hass, ws_get_history_30_days)
         hass.data[DOMAIN]["_ws_registered"] = True
 
     # Register options update listener to reload when settings change
@@ -155,6 +157,234 @@ async def ws_get_boiler_config(hass: HomeAssistant, connection: websocket_api.Ac
         "heating_end_hour": "number.ems_boiler_heating_end_hour",
         "boiler_auto_temp_limit": "number.ems_boiler_auto_temp_limit",
     })
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ems/get_history_30_days",
+        vol.Optional("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Return 30 days of hourly history statistics for unified chart."""
+    _LOGGER.debug("ws_get_history_30_days: called with msg %s", msg)
+    entry_id = msg.get("entry_id")
+    if not entry_id:
+        entries = hass.config_entries.async_entries(DOMAIN)
+        if not entries:
+            _LOGGER.error("ws_get_history_30_days: No EMS integration configured")
+            connection.send_error(msg["id"], "not_found", "No EMS integration configured")
+            return
+        entry_id = entries[0].entry_id
+
+    _LOGGER.debug("ws_get_history_30_days: resolved entry_id=%s", entry_id)
+    ems_data = hass.data.get(DOMAIN, {})
+    if entry_id not in ems_data:
+        _LOGGER.error("ws_get_history_30_days: EMS integration is still loading")
+        connection.send_error(msg["id"], "not_ready", "EMS integration is still loading")
+        return
+
+    config = ems_data[entry_id]
+
+    from .const import (
+        CONF_TOTAL_LOAD_CONSUMPTION,
+        CONF_PV_GENERATION_TODAY,
+        CONF_CURRENT_PV_GENERATION,
+        CONF_TOTAL_GRID_IMPORT,
+        CONF_TOTAL_GRID_EXPORT,
+        CONF_BAT_SOC_ENTITY,
+        CONF_PRICE_BUY_SENSOR,
+        CONF_PRICE_SELL_SENSOR,
+        CONF_BAT_CAPACITY_ENTITY,
+    )
+
+    load_entity = config.get(CONF_TOTAL_LOAD_CONSUMPTION)
+    pv_entity = config.get(CONF_PV_GENERATION_TODAY) or config.get(CONF_CURRENT_PV_GENERATION)
+    import_entity = config.get(CONF_TOTAL_GRID_IMPORT)
+    export_entity = config.get(CONF_TOTAL_GRID_EXPORT)
+    soc_entity = config.get(CONF_BAT_SOC_ENTITY)
+    buy_entity = config.get(CONF_PRICE_BUY_SENSOR)
+    sell_entity = config.get(CONF_PRICE_SELL_SENSOR)
+    cap_entity = config.get(CONF_BAT_CAPACITY_ENTITY)
+
+    _LOGGER.debug(
+        "ws_get_history_30_days: entities resolved: load=%s, pv=%s, import=%s, export=%s, soc=%s, buy=%s, sell=%s, cap=%s",
+        load_entity, pv_entity, import_entity, export_entity, soc_entity, buy_entity, sell_entity, cap_entity
+    )
+
+    capacity = 5.12
+    if cap_entity:
+        state = hass.states.get(cap_entity)
+        if state and state.state not in (None, "unknown", "unavailable"):
+            try:
+                capacity = float(state.state)
+                unit = state.attributes.get("unit_of_measurement")
+                if unit == "Wh" or capacity > 100.0:
+                    capacity /= 1000.0
+            except (ValueError, TypeError):
+                pass
+    _LOGGER.debug("ws_get_history_30_days: battery capacity=%s", capacity)
+
+    if "recorder" not in hass.config.components:
+        _LOGGER.error("ws_get_history_30_days: recorder not loaded")
+        connection.send_error(msg["id"], "recorder_not_loaded", "Recorder is not loaded")
+        return
+
+    from homeassistant.components.recorder.statistics import statistics_during_period
+    import homeassistant.util.dt as dt_util
+
+    now = dt_util.now()
+    start_time = (now - timedelta(days=31)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    entity_ids = {load_entity, pv_entity, import_entity, export_entity, soc_entity, buy_entity, sell_entity}
+    entity_ids = {e for e in entity_ids if e}
+
+    _LOGGER.debug("ws_get_history_30_days: querying DB stats for entities=%s from %s to %s", entity_ids, start_time, now)
+
+    try:
+        stats = await hass.async_add_executor_job(
+            statistics_during_period,
+            hass,
+            start_time,
+            now,
+            entity_ids,
+            "hour",
+            None,
+            {"sum", "mean"},
+        )
+        _LOGGER.debug("ws_get_history_30_days: DB query complete, returned %s entities", len(stats) if stats else 0)
+    except Exception as err:
+        _LOGGER.exception("ws_get_history_30_days: error querying stats DB")
+        connection.send_error(msg["id"], "db_error", f"Error fetching statistics: {err}")
+        return
+
+    def process_stats(stats_data, tzinfo):
+        _LOGGER.debug("ws_get_history_30_days: processing statistics data in executor thread")
+        # Group statistics by entity ID
+        data_by_entity = {}
+        for entity_id in [load_entity, pv_entity, import_entity, export_entity, soc_entity, buy_entity, sell_entity]:
+            if not entity_id:
+                continue
+            ent_stats = stats_data.get(entity_id, [])
+            ent_stats = sorted(ent_stats, key=lambda x: x.get("start") or 0)
+            data_by_entity[entity_id] = ent_stats
+            _LOGGER.debug("ws_get_history_30_days: entity %s has %d stats records", entity_id, len(ent_stats))
+
+        def parse_start(start):
+            if isinstance(start, (int, float)):
+                dt = datetime.fromtimestamp(start, tz=tzinfo)
+            elif isinstance(start, datetime):
+                dt = dt_util.as_local(start)
+            else:
+                return None, None
+            return dt.strftime("%Y-%m-%d"), dt.hour
+
+        def get_hourly_deltas(ent_stats):
+            deltas = {}
+            for i in range(1, len(ent_stats)):
+                prev = ent_stats[i-1]
+                curr = ent_stats[i]
+                prev_sum = prev.get("sum")
+                curr_sum = curr.get("sum")
+                if prev_sum is not None and curr_sum is not None:
+                    delta = curr_sum - prev_sum
+                    if delta < 0:
+                        delta = 0.0
+                    date_str, hour = parse_start(curr.get("start"))
+                    if date_str:
+                        deltas[(date_str, hour)] = round(delta, 3)
+            return deltas
+
+        def get_hourly_means(ent_stats):
+            means = {}
+            for item in ent_stats:
+                val = item.get("mean")
+                if val is None:
+                    val = item.get("state")
+                if val is not None:
+                    date_str, hour = parse_start(item.get("start"))
+                    if date_str:
+                        means[(date_str, hour)] = round(float(val), 4)
+            return means
+
+        load_deltas = get_hourly_deltas(data_by_entity.get(load_entity, []))
+        pv_deltas = get_hourly_deltas(data_by_entity.get(pv_entity, []))
+        import_deltas = get_hourly_deltas(data_by_entity.get(import_entity, []))
+        export_deltas = get_hourly_deltas(data_by_entity.get(export_entity, []))
+        
+        soc_means = get_hourly_means(data_by_entity.get(soc_entity, []))
+        buy_means = get_hourly_means(data_by_entity.get(buy_entity, []))
+        sell_means = get_hourly_means(data_by_entity.get(sell_entity, []))
+
+        _LOGGER.debug(
+            "ws_get_history_30_days: stats deltas/means computed: load=%d, pv=%d, import=%d, export=%d, soc=%d, buy=%d, sell=%d",
+            len(load_deltas), len(pv_deltas), len(import_deltas), len(export_deltas), len(soc_means), len(buy_means), len(sell_means)
+        )
+
+        # Fill hourly grid for 31 days
+        now_local = datetime.now(tz=tzinfo)
+        start_dt = (now_local - timedelta(days=31)).replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        result_days = {}
+        last_soc = 50.0
+        last_buy = 0.0
+        last_sell = 0.0
+        
+        current_dt = start_dt
+        while current_dt <= now_local:
+            date_str = current_dt.strftime("%Y-%m-%d")
+            hour = current_dt.hour
+            
+            day_entry = result_days.setdefault(date_str, [None]*24)
+            
+            load_val = load_deltas.get((date_str, hour), 0.0)
+            pv_val = pv_deltas.get((date_str, hour), 0.0)
+            import_val = import_deltas.get((date_str, hour), 0.0)
+            export_val = export_deltas.get((date_str, hour), 0.0)
+            
+            soc_val = soc_means.get((date_str, hour))
+            if soc_val is not None:
+                last_soc = soc_val
+            else:
+                soc_val = last_soc
+                
+            buy_val = buy_means.get((date_str, hour))
+            if buy_val is not None:
+                last_buy = buy_val
+            else:
+                buy_val = last_buy
+                
+            sell_val = sell_means.get((date_str, hour))
+            if sell_val is not None:
+                last_sell = sell_val
+            else:
+                sell_val = last_sell
+                
+            day_entry[hour] = {
+                "hour": hour,
+                "load_kwh": load_val,
+                "pv_kwh": pv_val,
+                "import_kwh": import_val,
+                "export_kwh": export_val,
+                "bat_soc": soc_val,
+                "price_buy": buy_val,
+                "price_sell": sell_val,
+            }
+            
+            current_dt += timedelta(hours=1)
+            
+        # Clean up partial hours
+        valid_days = {}
+        for d, hrs in result_days.items():
+            if None not in hrs or d == now_local.strftime("%Y-%m-%d"):
+                valid_days[d] = [h for h in hrs if h is not None]
+        
+        _LOGGER.debug("ws_get_history_30_days: returning %d days of data", len(valid_days))
+        return valid_days
+
+    processed = await hass.async_add_executor_job(process_stats, stats, now.tzinfo)
+    connection.send_result(msg["id"], {"days": processed, "capacity": capacity})
 
 
 async def _async_register_card(hass: HomeAssistant) -> None:

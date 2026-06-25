@@ -108,6 +108,7 @@ class EmsSchedulerCard extends HTMLElement {
     this._lastStatsKey = null;
     this._consumptionEntityId = 'sensor.load_consumption_2'; // fallback until WS resolves
     this._wsConfigFetched = false;
+    this._cardId = Math.random().toString(36).substr(2, 9);
   }
 
   set hass(hass) {
@@ -146,6 +147,7 @@ class EmsSchedulerCard extends HTMLElement {
     }).then(result => {
       if (result && result.consumption_entity) {
         this._consumptionEntityId = result.consumption_entity;
+        this._configEntryId = result.entry_id;
         console.info('[EmsCard] consumption_entity resolved:', this._consumptionEntityId);
         // Reset chart cache so it redraws with the correct entity
         const container = this.shadowRoot && this.shadowRoot.getElementById('chart-svg-container');
@@ -704,6 +706,52 @@ class EmsSchedulerCard extends HTMLElement {
 
         <!-- Statistics View -->
         <div id="stats-view" class="hidden">
+          <!-- Unified Daily History (Last 30 Days) -->
+          <div class="stats-header">
+            <span class="stats-title">Unified Daily History (Last 30 Days)</span>
+            <select id="history-day-select" class="day-select">
+              <option value="">Loading dates...</option>
+            </select>
+          </div>
+          <div class="chart-container" style="margin-bottom: 24px;">
+            <div id="history-chart-tooltip" class="chart-tooltip"></div>
+            <div id="history-chart-svg-container"></div>
+            <div class="chart-legend" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; justify-items: start; margin-top: 12px; padding: 0 8px;">
+              <div class="legend-item">
+                <div class="legend-color" style="background: #ffd54f;"></div>
+                <span>PV Gen</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #0288d1;"></div>
+                <span>Import</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #ef5350;"></div>
+                <span>Export</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #ffa726;"></div>
+                <span>House Load</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #26a69a;"></div>
+                <span>Bat Disch</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #4dd0e1; height: 2px; border-radius: 0;"></div>
+                <span>SOC</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #ab47bc; height: 2px; border-radius: 0;"></div>
+                <span>Buy Price</span>
+              </div>
+              <div class="legend-item">
+                <div class="legend-color" style="background: #ec407a; height: 2px; border-radius: 0;"></div>
+                <span>Sell Price</span>
+              </div>
+            </div>
+          </div>
+
           <!-- Load Consumption Profile -->
           <div class="stats-header">
             <span class="stats-title">Load Consumption Profile</span>
@@ -910,6 +958,7 @@ class EmsSchedulerCard extends HTMLElement {
         planBtn.classList.remove('active');
         statsView.classList.remove('hidden');
         planView.classList.add('hidden');
+        this._fetchHistoryData();
         this._updateUI();
       });
     }
@@ -1131,6 +1180,8 @@ class EmsSchedulerCard extends HTMLElement {
     if (this._activeTab === 'plan') {
       this._renderTimeline(hourlyData);
     } else if (this._activeTab === 'stats') {
+      this._fetchHistoryData();
+      this._drawHistoryChart();
       this._drawStatsChart();
       this._drawSolarChart();
       this._drawPriceChart();
@@ -1285,6 +1336,13 @@ class EmsSchedulerCard extends HTMLElement {
       return;
     }
 
+    // Read tomorrow prices availability flag from sensor.scheduler attributes
+    const entityId = this._resolveConfigValue('entity', 'sensor.scheduler');
+    const stateObj = entityId ? this._hass.states[entityId] : null;
+    const tomorrowPricesAvailable = stateObj && stateObj.attributes
+      ? (stateObj.attributes.tomorrow_prices_available === true)
+      : false;
+
     const dates = Array.from(new Set(sortedKeys.map(k => k.split(' ')[0]))).sort();
     const todayStr = dates[0];
     const tomorrowStr = dates[1] || '';
@@ -1300,10 +1358,11 @@ class EmsSchedulerCard extends HTMLElement {
     const overridesStr = JSON.stringify(
       Object.fromEntries(sortedKeys.map(k => [k, data[k].mode + (data[k].is_manual ? '*' : '')]))
     );
-    const fullCacheKey = currentKeysStr + '|' + overridesStr;
+    const fullCacheKey = currentKeysStr + '|' + overridesStr + '|tmr=' + tomorrowPricesAvailable;
     if (container._lastKeys !== fullCacheKey) {
       let html = '';
       let currentDayLabel = '';
+
       sortedKeys.forEach((key, idx) => {
         const slotDate = key.split(' ')[0];
         let label = 'TODAY';
@@ -1311,6 +1370,11 @@ class EmsSchedulerCard extends HTMLElement {
           label = 'TOMORROW';
         } else if (slotDate !== todayStr) {
           label = slotDate;
+        }
+
+        // If this is a TOMORROW slot and prices are not yet available — skip entirely (no header, no cards)
+        if (label === 'TOMORROW' && !tomorrowPricesAvailable) {
+          return;
         }
 
         const hourData = data[key];
@@ -1417,7 +1481,8 @@ class EmsSchedulerCard extends HTMLElement {
   }
 
   _drawStatsChart() {
-    if (!this._hass) return;
+    try {
+      if (!this._hass) return;
 
     const consumptionEntityId = this._consumptionEntityId;
     const consumptionState = this._hass.states[consumptionEntityId];
@@ -1639,10 +1704,314 @@ class EmsSchedulerCard extends HTMLElement {
         }
       });
     });
+    } catch (err) {
+      console.error('[EmsCard] Error drawing stats chart:', err);
+      const container = this.shadowRoot.getElementById('chart-svg-container');
+      if (container) {
+        container.innerHTML = `<div style="text-align:center; padding:20px; color:#ef5350; font-size:0.9rem; opacity:0.8;">Error drawing stats chart: ${err.message}</div>`;
+      }
+    }
+  }
+
+  _fetchHistoryData() {
+    if (this._historyData || this._fetchingHistory || !this._hass) return;
+    this._fetchingHistory = true;
+    
+    this._hass.connection.sendMessagePromise({
+      type: 'ems/get_history_30_days',
+      entry_id: this._configEntryId || (this._config && this._config.entry_id)
+    }).then(result => {
+      this._historyData = result.days || {};
+      this._batteryCapacity = result.capacity || 5.12;
+      this._fetchingHistory = false;
+      
+      const select = this.shadowRoot.getElementById('history-day-select');
+      if (select) {
+        select.innerHTML = '';
+        const dates = Object.keys(this._historyData).sort().reverse();
+        dates.forEach(date => {
+          const opt = document.createElement('option');
+          opt.value = date;
+          opt.innerText = date;
+          select.appendChild(opt);
+        });
+        
+        if (dates.length > 0) {
+          this._selectedHistoryDate = dates[0];
+          select.value = dates[0];
+        }
+        
+        // Listener for change
+        select.addEventListener('change', (e) => {
+          this._selectedHistoryDate = e.target.value;
+          this._drawHistoryChart();
+        });
+      }
+      this._drawHistoryChart();
+    }).catch(err => {
+      console.warn('[EmsCard] Failed to fetch 30 days history:', err);
+      this._fetchingHistory = false;
+      this._historyData = {};
+      const select = this.shadowRoot.getElementById('history-day-select');
+      if (select) {
+        select.innerHTML = '<option value="">Error loading data</option>';
+      }
+    });
+  }
+
+  _drawHistoryChart() {
+    try {
+      if (!this._historyData || !this._selectedHistoryDate) return;
+      const dayData = this._historyData[this._selectedHistoryDate] || [];
+    if (dayData.length === 0) return;
+
+    // Get previous day data for SOC transition (to calculate discharge at hour 0)
+    const dates = Object.keys(this._historyData).sort();
+    const idx = dates.indexOf(this._selectedHistoryDate);
+    const prevDayData = idx > 0 ? this._historyData[dates[idx - 1]] : null;
+
+    const capacity = this._batteryCapacity || 5.12;
+    
+    // Arrays for data points
+    const pv = [];
+    const load = [];
+    const imp = [];
+    const exp = [];
+    const soc = [];
+    const buy = [];
+    const sell = [];
+    const batDisch = [];
+
+    for (let h = 0; h < 24; h++) {
+      const slot = dayData[h] || { pv_kwh: 0, load_kwh: 0, import_kwh: 0, export_kwh: 0, bat_soc: 50, price_buy: 0, price_sell: 0 };
+      pv.push(slot.pv_kwh || 0);
+      load.push(slot.load_kwh || 0);
+      imp.push(slot.import_kwh || 0);
+      exp.push(slot.export_kwh || 0);
+      soc.push(slot.bat_soc || 0);
+      buy.push(slot.price_buy || 0);
+      sell.push(slot.price_sell || 0);
+
+      // Battery discharge
+      const prevSoc = (h > 0)
+        ? (dayData[h - 1] && dayData[h - 1].bat_soc !== undefined ? dayData[h - 1].bat_soc : 50)
+        : (prevDayData && prevDayData[23] && prevDayData[23].bat_soc !== undefined ? prevDayData[23].bat_soc : slot.bat_soc);
+      const dis = Math.max(0.0, (prevSoc - (slot.bat_soc || 50)) / 100.0 * capacity);
+      batDisch.push(dis);
+    }
+
+    const container = this.shadowRoot.getElementById('history-chart-svg-container');
+    if (!container) return;
+
+    // Find scales
+    const maxEnergy = Math.max(1.0, ...pv, ...load, ...imp, ...exp, ...batDisch);
+    const maxPrice = Math.max(1.0, ...buy, ...sell);
+
+    // Dimensions
+    const W = 540, H = 280;
+    const padL = 42, padR = 42, padT = 20, padB = 38;
+    const chartW = W - padL - padR;
+    const chartH = H - padT - padB;
+    const chartCenterY = padT + chartH / 2;
+    const barSpacing = chartW / 24;
+    const subBarW = 5.8;
+
+    // Grid lines
+    let gridHtml = '';
+    const gridLevels = [1, 0.5, 0, -0.5, -1];
+    gridLevels.forEach(lvl => {
+      const y = chartCenterY - lvl * (chartH / 2);
+      const val = lvl * maxEnergy;
+      gridHtml += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>`;
+      gridHtml += `<text x="${padL - 4}" y="${(y + 3).toFixed(1)}" fill="rgba(255,255,255,0.35)" font-size="8" text-anchor="end" font-weight="700">${val.toFixed(1)}</text>`;
+    });
+
+    // Right Y labels (SOC 0-100%)
+    const rightLevels = [0, 25, 50, 75, 100];
+    rightLevels.forEach(lvl => {
+      const y = padT + chartH - (lvl / 100) * chartH;
+      gridHtml += `<text x="${W - padR + 6}" y="${(y + 3).toFixed(1)}" fill="rgba(255,255,255,0.35)" font-size="8" text-anchor="start" font-weight="700">${lvl}%</text>`;
+    });
+
+    // X Labels
+    let xLabelsHtml = '';
+    for (let i = 0; i < 24; i += 3) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      xLabelsHtml += `<text x="${x.toFixed(1)}" y="${H - padB + 13}" fill="rgba(255,255,255,0.4)" font-size="8" text-anchor="middle" font-weight="700">${String(i).padStart(2,'0')}:00</text>`;
+    }
+
+    // Bars
+    let barsHtml = `
+      <defs>
+        <!-- PV Gradient (goes up, so top is 0%, bottom 100%) -->
+        <linearGradient id="pv-grad-${this._cardId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#ffd54f" stop-opacity="0.95"/>
+          <stop offset="100%" stop-color="#ff8f00" stop-opacity="0.45"/>
+        </linearGradient>
+        <!-- Import Gradient (goes up, so top is 0%, bottom 100%) -->
+        <linearGradient id="import-grad-${this._cardId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#40c4ff" stop-opacity="0.95"/>
+          <stop offset="100%" stop-color="#0091ea" stop-opacity="0.45"/>
+        </linearGradient>
+        <!-- Export Gradient (goes down, so top is 0-line at 0%, bottom is peak at 100%) -->
+        <linearGradient id="export-grad-${this._cardId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#ff1744" stop-opacity="0.45"/>
+          <stop offset="100%" stop-color="#d50000" stop-opacity="0.95"/>
+        </linearGradient>
+      </defs>
+    `;
+    for (let i = 0; i < 24; i++) {
+      const xSlot = padL + i * barSpacing + (barSpacing - subBarW * 3 - 0.6) / 2;
+      
+      // PV Gen (yellow, going up)
+      const pvH = (pv[i] / maxEnergy) * (chartH / 2);
+      if (pvH > 1.2) {
+        barsHtml += `<rect x="${xSlot.toFixed(1)}" y="${(chartCenterY - pvH).toFixed(1)}" width="${subBarW}" height="${pvH.toFixed(1)}" fill="url(#pv-grad-${this._cardId})" rx="1.5" ry="1.5"/>`;
+      }
+
+      // Import (blue, going up)
+      const impH = (imp[i] / maxEnergy) * (chartH / 2);
+      if (impH > 1.2) {
+        barsHtml += `<rect x="${(xSlot + subBarW + 0.3).toFixed(1)}" y="${(chartCenterY - impH).toFixed(1)}" width="${subBarW}" height="${impH.toFixed(1)}" fill="url(#import-grad-${this._cardId})" rx="1.5" ry="1.5"/>`;
+      }
+
+      // Export (red, going down)
+      const expH = (exp[i] / maxEnergy) * (chartH / 2);
+      if (expH > 1.2) {
+        barsHtml += `<rect x="${(xSlot + subBarW * 2 + 0.6).toFixed(1)}" y="${chartCenterY.toFixed(1)}" width="${subBarW}" height="${expH.toFixed(1)}" fill="url(#export-grad-${this._cardId})" rx="1.5" ry="1.5"/>`;
+      }
+    }
+
+    // Lines & Areas
+    let loadPoints = [];
+    let batPoints = [];
+    let socPoints = [];
+    let buyPoints = [];
+    let sellPoints = [];
+
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing + barSpacing / 2;
+      const loadY = chartCenterY - (load[i] / maxEnergy) * (chartH / 2);
+      const batY = chartCenterY - (batDisch[i] / maxEnergy) * (chartH / 2);
+      
+      const socY = padT + chartH - (soc[i] / 100.0) * chartH;
+      const buyY = padT + chartH - (buy[i] / maxPrice) * chartH;
+      const sellY = padT + chartH - (sell[i] / maxPrice) * chartH;
+
+      loadPoints.push(`${x.toFixed(1)},${loadY.toFixed(1)}`);
+      batPoints.push(`${x.toFixed(1)},${batY.toFixed(1)}`);
+      socPoints.push(`${x.toFixed(1)},${socY.toFixed(1)}`);
+      buyPoints.push(`${x.toFixed(1)},${buyY.toFixed(1)}`);
+      sellPoints.push(`${x.toFixed(1)},${sellY.toFixed(1)}`);
+    }
+
+    // Bat Area path
+    const areaPoints = [`${(padL + barSpacing / 2).toFixed(1)},${chartCenterY}`]
+      .concat(batPoints)
+      .concat([`${(padL + 23 * barSpacing + barSpacing / 2).toFixed(1)},${chartCenterY}`]);
+
+    // Hover zones
+    let hoverHtml = '';
+    for (let i = 0; i < 24; i++) {
+      const x = padL + i * barSpacing;
+      const hourStr = String(i).padStart(2, '0') + ':00';
+      const centerX = padL + i * barSpacing + barSpacing / 2;
+      hoverHtml += `
+        <rect class="hov-history" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" 
+          data-hour="${hourStr}" 
+          data-pv="${pv[i].toFixed(2)}"
+          data-imp="${imp[i].toFixed(2)}"
+          data-exp="${exp[i].toFixed(2)}"
+          data-load="${load[i].toFixed(2)}"
+          data-bat="${batDisch[i].toFixed(2)}"
+          data-soc="${soc[i].toFixed(1)}"
+          data-buy="${buy[i].toFixed(2)}"
+          data-sell="${sell[i].toFixed(2)}"
+          data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>
+      `;
+    }
+
+    const stateObj = this._hass.states[this._resolveConfigValue('entity', 'sensor.scheduler')];
+    const currency = (stateObj && stateObj.attributes && stateObj.attributes.unit_of_measurement) || 'PLN';
+
+    container.innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;overflow:visible;">
+        ${gridHtml}
+        <line x1="${padL}" y1="${chartCenterY}" x2="${W - padR}" y2="${chartCenterY}" stroke="rgba(255,255,255,0.25)" stroke-width="1.5"/>
+        ${xLabelsHtml}
+        <line class="history-hover-line" x1="0" y1="${padT}" x2="0" y2="${padT + chartH}" stroke="rgba(255, 255, 255, 0.3)" stroke-width="1.5" stroke-dasharray="3 3" style="opacity: 0; pointer-events: none;"/>
+        ${barsHtml}
+        
+        <!-- Battery Discharge Area -->
+        <polygon points="${areaPoints.join(' ')}" fill="rgba(38,166,154,0.15)"/>
+        
+        <!-- Curves -->
+        <path d="M ${batPoints.join(' L ')}" fill="none" stroke="#26a69a" stroke-width="2"/>
+        <path d="M ${loadPoints.join(' L ')}" fill="none" stroke="#ffa726" stroke-width="2.5"/>
+        <path d="M ${socPoints.join(' L ')}" fill="none" stroke="#4dd0e1" stroke-width="1.5" stroke-dasharray="4 2"/>
+        <path d="M ${buyPoints.join(' L ')}" fill="none" stroke="#ab47bc" stroke-width="1.5" stroke-dasharray="3 3"/>
+        <path d="M ${sellPoints.join(' L ')}" fill="none" stroke="#ec407a" stroke-width="1.5" stroke-dasharray="3 3"/>
+        
+        ${hoverHtml}
+      </svg>
+    `;
+
+    // Tooltip logic
+    const tooltip = this.shadowRoot.getElementById('history-chart-tooltip');
+    if (!tooltip) return;
+
+    container.querySelectorAll('.hov-history').forEach(zone => {
+      zone.addEventListener('mousemove', (e) => {
+        const hour = zone.getAttribute('data-hour');
+        tooltip.innerHTML = `
+          <div class="tooltip-hour">${hour}</div>
+          <div class="tooltip-row"><span class="tooltip-label">PV Gen:</span><span class="tooltip-val" style="color:#ffd54f">${zone.getAttribute('data-pv')} kWh</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Import:</span><span class="tooltip-val" style="color:#0288d1">${zone.getAttribute('data-imp')} kWh</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Export:</span><span class="tooltip-val" style="color:#ef5350">${zone.getAttribute('data-exp')} kWh</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">House Load:</span><span class="tooltip-val" style="color:#ffa726">${zone.getAttribute('data-load')} kWh</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">From Battery:</span><span class="tooltip-val" style="color:#26a69a">${zone.getAttribute('data-bat')} kWh</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Battery SOC:</span><span class="tooltip-val" style="color:#4dd0e1">${zone.getAttribute('data-soc')}%</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Buy Price:</span><span class="tooltip-val" style="color:#ab47bc">${zone.getAttribute('data-buy')} ${currency}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Sell Price:</span><span class="tooltip-val" style="color:#ec407a">${zone.getAttribute('data-sell')} ${currency}</span></div>
+        `;
+        const chartContainer = zone.closest('.chart-container');
+        if (chartContainer) {
+          const rect = chartContainer.getBoundingClientRect();
+          let left = e.clientX - rect.left + 16;
+          let top = e.clientY - rect.top - 140;
+          if (left + 160 > rect.width) left = e.clientX - rect.left - 170;
+          if (top < 0) top = e.clientY - rect.top + 16;
+          tooltip.style.left = `${left}px`;
+          tooltip.style.top = `${top}px`;
+        }
+        tooltip.style.opacity = '1';
+
+        const xPos = zone.getAttribute('data-x');
+        const hoverLine = container.querySelector('.history-hover-line');
+        if (hoverLine) {
+          hoverLine.setAttribute('x1', xPos);
+          hoverLine.setAttribute('x2', xPos);
+          hoverLine.style.opacity = '1';
+        }
+      });
+      zone.addEventListener('mouseleave', () => {
+        tooltip.style.opacity = '0';
+        const hoverLine = container.querySelector('.history-hover-line');
+        if (hoverLine) hoverLine.style.opacity = '0';
+      });
+    });
+    } catch (err) {
+      console.error('[EmsCard] Error rendering history chart:', err);
+      const container = this.shadowRoot.getElementById('history-chart-svg-container');
+      if (container) {
+        container.innerHTML = `<div style="text-align:center; padding:20px; color:#ef5350; font-size:0.9rem; opacity:0.8;">Error drawing history chart: ${err.message}</div>`;
+      }
+    }
   }
 
   _drawSolarChart() {
-    if (!this._hass) return;
+    try {
+      if (!this._hass) return;
 
     const solarEntityId = 'sensor.pv_forecast_today';
     const solarState = this._hass.states[solarEntityId];
@@ -1863,10 +2232,18 @@ class EmsSchedulerCard extends HTMLElement {
         }
       });
     });
+    } catch (err) {
+      console.error('[EmsCard] Error drawing solar chart:', err);
+      const container = this.shadowRoot.getElementById('solar-chart-svg-container');
+      if (container) {
+        container.innerHTML = `<div style="text-align:center; padding:20px; color:#ef5350; font-size:0.9rem; opacity:0.8;">Error drawing solar chart: ${err.message}</div>`;
+      }
+    }
   }
 
   _drawPriceChart() {
-    if (!this._hass) return;
+    try {
+      if (!this._hass) return;
 
     const entityId = this._resolveConfigValue('entity', 'sensor.scheduler');
     if (!entityId) return;
@@ -2048,6 +2425,13 @@ class EmsSchedulerCard extends HTMLElement {
         }
       });
     });
+    } catch (err) {
+      console.error('[EmsCard] Error drawing price chart:', err);
+      const container = this.shadowRoot.getElementById('price-chart-svg-container');
+      if (container) {
+        container.innerHTML = `<div style="text-align:center; padding:20px; color:#ef5350; font-size:0.9rem; opacity:0.8;">Error drawing price chart: ${err.message}</div>`;
+      }
+    }
   }
 
   _openModal(timestamp, currentMode) {
