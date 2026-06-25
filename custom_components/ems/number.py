@@ -338,7 +338,11 @@ class EmsBoilerAutoTempLimitNumber(NumberEntity):
     @property
     def native_value(self) -> float:
         """Return the current auto temp limit."""
-        return getattr(self._storage, "boiler_auto_temp_limit", 60.0)
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        default_limit = 60.0
+        if entry:
+            default_limit = float(entry.options.get("elec_boiler_max_temp", entry.data.get("elec_boiler_max_temp", 60.0)))
+        return getattr(self._storage, "boiler_auto_temp_limit", default_limit)
 
     async def async_set_native_value(self, value: float) -> None:
         """Update the auto temp limit value."""

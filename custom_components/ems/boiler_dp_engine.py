@@ -528,6 +528,8 @@ def run_boiler_dp(
                 for mode in ["IDLE", "PUMP_ONLY", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"]:
                     if mode != "IDLE" and not allowed_heating:
                         continue
+                    if mode in ("PUMP_ONLY", "GAS_PUMP", "ELEC_PUMP") and tariff > 0.0:
+                        continue
                     if mode in ("GAS", "GAS_PUMP") and T_elec_prev >= t_min:
                         continue
                     if mode in ("GAS", "GAS_PUMP") and vol_gas <= 0.0:
@@ -554,7 +556,8 @@ def run_boiler_dp(
                         if 0 <= curr_idx < num_states:
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             if T_curr >= GRID_MIN_TEMP and T_curr <= t_max_mode:
-                                if not allowed_heating or T_active >= t_min_limit:
+                                current_t_min = (t_min - 5.0 if not T_bypass_end_val else t_min) if not relax else 20.0
+                                if not allowed_heating or T_active >= current_t_min:
                                     cost = 0.0
                                     energy = 0.0
                                     
@@ -562,7 +565,7 @@ def run_boiler_dp(
                                     if tariff <= 0.0:
                                         reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min))
                                     else:
-                                        reward = temp_reward * max(0.0, T_active - t_min)
+                                        reward = 0.0
                                     new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
                                     if new_cost < dp[h][curr_idx]:
                                         dp[h][curr_idx] = new_cost
@@ -595,7 +598,7 @@ def run_boiler_dp(
                                 if tariff <= 0.0:
                                     reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
                                 else:
-                                    reward = temp_reward * max(0.0, T_active - t_min)
+                                    reward = 0.0
                                 new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
                                 if new_cost < dp[h][curr_idx]:
                                     dp[h][curr_idx] = new_cost
@@ -609,92 +612,72 @@ def run_boiler_dp(
                     elif mode == "GAS":
                         T_elec_end_val = T_elec_cooled
                         T_bypass_end_val = False
-                        t_max_mode = t_max_gas
-                        max_rise = 40.0
-
-                        for curr_idx in range(num_states):
+                        
+                        target_t_curr = min(t_max_gas, t_min + 5.0)
+                        curr_idx = int(round((target_t_curr - GRID_MIN_TEMP) * 2))
+                        
+                        if 0 <= curr_idx < num_states:
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
                             
-                            if T_curr < t_min_limit or T_curr > t_max_mode:
-                                continue
-                            if T_curr < T_gas_prev:
-                                # Active heating must not result in temperature drop
-                                continue
-                            if T_active < t_min_limit:
-                                continue
-                            
-                            delta_T = T_curr - T_gas_cooled
-                            if delta_T <= 0.0 or delta_T > max_rise:
-                                continue
-                            
-                            heat_rise = delta_T
-                            gas_qty = heat_rise / eff_gas_only if eff_gas_only > 0.0 else 0.0
-                            if gas_qty <= 0.0:
-                                continue
-                            cost = gas_qty * gas_cost_m3
-                            energy = gas_qty
-                            
-                            penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
-                            if tariff <= 0.0:
-                                reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_elec_end_val - t_min))
-                            else:
-                                reward = temp_reward * max(0.0, T_active - t_min)
-                            new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
-                            if new_cost < dp[h][curr_idx]:
-                                dp[h][curr_idx] = new_cost
-                                prev_state[h][curr_idx] = prev_idx
-                                prev_mode[h][curr_idx] = mode
-                                prev_cost[h][curr_idx] = cost
-                                prev_energy[h][curr_idx] = energy
-                                elec_temp[h][curr_idx] = T_elec_end_val
-                                bypass_state[h][curr_idx] = T_bypass_end_val
+                            if T_curr >= T_gas_prev: # Active heating must not result in temperature drop
+                                delta_T = T_curr - T_gas_cooled
+                                if 0.0 < delta_T <= 40.0:
+                                    gas_qty = delta_T / eff_gas_only if eff_gas_only > 0.0 else 0.0
+                                    if gas_qty > 0.0:
+                                        cost = gas_qty * gas_cost_m3
+                                        energy = gas_qty
+                                        
+                                        penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
+                                        if tariff <= 0.0:
+                                            reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_elec_end_val - t_min))
+                                        else:
+                                            reward = 0.0
+                                        new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
+                                        if new_cost < dp[h][curr_idx]:
+                                            dp[h][curr_idx] = new_cost
+                                            prev_state[h][curr_idx] = prev_idx
+                                            prev_mode[h][curr_idx] = mode
+                                            prev_cost[h][curr_idx] = cost
+                                            prev_energy[h][curr_idx] = energy
+                                            elec_temp[h][curr_idx] = T_elec_end_val
+                                            bypass_state[h][curr_idx] = T_bypass_end_val
  
                     elif mode == "GAS_PUMP":
                         if T_elec_prev < t_min:
                             continue
                         T_mixed = (T_gas_cooled * vol_gas + T_elec_cooled * vol_elec) / total_vol if total_vol > 0.0 else (T_gas_cooled + T_elec_cooled) / 2.0
                         T_bypass_end_val = True
-                        t_max_mode = t_max_gas
-                        max_rise = 40.0
- 
-                        for curr_idx in range(num_states):
+                        
+                        target_t_curr = min(t_max_gas, t_min + 5.0)
+                        curr_idx = int(round((target_t_curr - GRID_MIN_TEMP) * 2))
+                        
+                        if 0 <= curr_idx < num_states:
                             T_curr = GRID_MIN_TEMP + curr_idx * 0.5
                             T_active = T_curr
  
-                            if T_curr < t_min_limit or T_curr > t_max_mode:
-                                continue
-                            if T_curr < T_mixed:
-                                # Active heating must not result in temperature drop
-                                continue
-                            if T_active < t_min_limit:
-                                continue
-                            
-                            delta_T = T_curr - T_mixed
-                            if delta_T <= 0.0 or delta_T > max_rise:
-                                continue
-                            
-                            heat_rise = delta_T
-                            gas_qty = heat_rise / eff_gas_pump if eff_gas_pump > 0.0 else 0.0
-                            if gas_qty <= 0.0:
-                                continue
-                            cost = gas_qty * gas_cost_m3 + 0.1 * tariff
-                            energy = gas_qty
-                            
-                            penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
-                            if tariff <= 0.0:
-                                reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
-                            else:
-                                reward = temp_reward * max(0.0, T_active - t_min)
-                            new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
-                            if new_cost < dp[h][curr_idx]:
-                                dp[h][curr_idx] = new_cost
-                                prev_state[h][curr_idx] = prev_idx
-                                prev_mode[h][curr_idx] = mode
-                                prev_cost[h][curr_idx] = cost
-                                prev_energy[h][curr_idx] = energy
-                                elec_temp[h][curr_idx] = T_curr
-                                bypass_state[h][curr_idx] = T_bypass_end_val
+                            if T_curr >= T_mixed: # Active heating must not result in temperature drop
+                                delta_T = T_curr - T_mixed
+                                if 0.0 < delta_T <= 40.0:
+                                    gas_qty = delta_T / eff_gas_pump if eff_gas_pump > 0.0 else 0.0
+                                    if gas_qty > 0.0:
+                                        cost = gas_qty * gas_cost_m3 + 0.1 * tariff
+                                        energy = gas_qty
+                                        
+                                        penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
+                                        if tariff <= 0.0:
+                                            reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min))
+                                        else:
+                                            reward = 0.0
+                                        new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if not was_elec else 0.0)
+                                        if new_cost < dp[h][curr_idx]:
+                                            dp[h][curr_idx] = new_cost
+                                            prev_state[h][curr_idx] = prev_idx
+                                            prev_mode[h][curr_idx] = mode
+                                            prev_cost[h][curr_idx] = cost
+                                            prev_energy[h][curr_idx] = energy
+                                            elec_temp[h][curr_idx] = T_curr
+                                            bypass_state[h][curr_idx] = T_bypass_end_val
  
                     elif mode == "ELEC":
                         power_kw = cal_data.get("elec_only", {}).get("heater_power_kw", 2.5)
@@ -721,7 +704,8 @@ def run_boiler_dp(
                                     if T_elec_end_val < T_elec_prev:
                                         # Active heating must not result in temperature drop
                                         continue
-                                    if T_active >= t_min_limit:
+                                    current_t_min = (t_min - 5.0 if not T_bypass_end_val else t_min) if not relax else 20.0
+                                    if T_active >= current_t_min:
                                         delta_T = T_elec_end_val - T_elec_cooled
                                         if delta_T <= 0.0:
                                             continue
@@ -735,7 +719,7 @@ def run_boiler_dp(
                                         if tariff <= 0.0:
                                             reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min)) + 0.01 * kwh
                                         else:
-                                            reward = temp_reward * max(0.0, T_active - t_min)
+                                            reward = 0.0
                                         new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if was_elec else 0.0)
                                         if new_cost < dp[h][curr_idx]:
                                             dp[h][curr_idx] = new_cost
@@ -788,7 +772,7 @@ def run_boiler_dp(
                             if tariff <= 0.0:
                                 reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min)) + 0.01 * kwh
                             else:
-                                reward = temp_reward * max(0.0, T_active - t_min)
+                                reward = 0.0
                             new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if was_elec else 0.0)
                             if new_cost < dp[h][curr_idx]:
                                 dp[h][curr_idx] = new_cost

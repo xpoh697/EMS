@@ -166,3 +166,23 @@ start_manual_heating:
 stop_manual_heating:
   name: Stop Manual Heating
   description: Stops the active manual heating cycle and shuts down heating elements.
+
+reset_calibration:
+  name: Reset Boiler Calibration
+  description: Resets boiler calibration efficiency coefficients and/or standby loss brackets to default preset values, aborting any active calibration phase.
+  fields:
+    reset_type:
+      name: Reset Type
+      description: The type of parameters to reset ("all" for everything, "heating" for efficiencies, "standby" for standby losses).
+      required: false
+      default: all
+      example: standby
+      selector:
+        select:
+          options:
+            - label: Everything (all)
+              value: all
+            - label: Heating efficiencies (heating)
+              value: heating
+            - label: Standby losses (standby)
+              value: standby

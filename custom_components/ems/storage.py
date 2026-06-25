@@ -220,6 +220,20 @@ class EmsCalibrationStore:
         import copy
         return copy.deepcopy(self._data)
 
+    def reset(self, reset_type: str = "all") -> None:
+        """Reset calibration data to defaults in memory."""
+        import copy
+        defaults = copy.deepcopy(_CALIBRATION_DEFAULTS)
+        if reset_type == "all":
+            self._data = defaults
+        elif reset_type == "heating":
+            for key in ["gas_only", "gas_with_pump", "elec_only", "elec_with_pump"]:
+                if key in defaults:
+                    self._data[key] = defaults[key]
+        elif reset_type == "standby":
+            if "standby_losses" in defaults:
+                self._data["standby_losses"] = defaults["standby_losses"]
+
     def update_phase(self, phase: str, data: dict) -> None:
         """Update coefficients for a specific phase in memory (call async_save to persist).
 

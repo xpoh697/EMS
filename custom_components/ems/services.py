@@ -27,6 +27,7 @@ SERVICE_SET_OVERRIDE = "set_manual_override"
 SERVICE_CLEAR_OVERRIDE = "clear_manual_override"
 SERVICE_CLEAR_ALL_OVERRIDES = "clear_all_overrides"
 SERVICE_START_CALIBRATION = "start_calibration"
+SERVICE_RESET_CALIBRATION = "reset_calibration"
 
 SET_OVERRIDE_SCHEMA = vol.Schema({
     vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{4}-\d{2}-\d{2}$")),
@@ -53,6 +54,10 @@ START_CALIBRATION_SCHEMA = vol.Schema({
 START_MANUAL_HEATING_SCHEMA = vol.Schema({
     vol.Required("mode"): vol.In(["GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP", "PUMP_ONLY"]),
     vol.Required("setpoint"): vol.All(vol.Coerce(float), vol.Range(min=20.0, max=85.0)),
+})
+
+RESET_CALIBRATION_SCHEMA = vol.Schema({
+    vol.Optional("reset_type", default="all"): vol.In(["all", "heating", "standby"]),
 })
 
 
@@ -241,6 +246,19 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
     hass.services.async_register(
         DOMAIN, "stop_manual_heating", handle_stop_manual_heating
     )
+
+    async def handle_reset_calibration(call: ServiceCall) -> None:
+        """Handle resetting boiler calibration."""
+        reset_type = call.data.get("reset_type", "all")
+        controller = hass.data[DOMAIN][entry.entry_id].get("boiler_controller")
+        if not controller:
+            _LOGGER.error("Boiler controller not initialized for config entry %s", entry.entry_id)
+            return
+        await controller.async_reset_calibration(reset_type)
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_RESET_CALIBRATION, handle_reset_calibration, schema=RESET_CALIBRATION_SCHEMA
+    )
     _LOGGER.debug("EMS services successfully registered")
 
 
@@ -251,6 +269,7 @@ def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_CLEAR_OVERRIDE,
         SERVICE_CLEAR_ALL_OVERRIDES,
         SERVICE_START_CALIBRATION,
+        SERVICE_RESET_CALIBRATION,
         "start_manual_heating",
         "stop_manual_heating",
     ]:

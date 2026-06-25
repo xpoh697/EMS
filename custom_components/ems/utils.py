@@ -83,12 +83,24 @@ def calculate_battery_degradation(price: float, cycles: float | int, capacity: f
         return 0.0
     return round(float(price) / total_throughput, 6)
 
-def parse_price_sensor(state_obj) -> tuple[list[float], list[float]]:
-    """Parse hourly prices for today and tomorrow from a price sensor."""
+def parse_price_sensor(state_obj) -> tuple[list[float], list[float], bool, bool]:
+    """Parse hourly prices for today and tomorrow from a price sensor.
+
+    Returns:
+        (price_today, price_tomorrow, today_has_data, tomorrow_has_data)
+
+        The *_has_data flags are True when the corresponding sensor attribute
+        exists as a list — regardless of whether the values are zero or negative.
+        This lets callers distinguish "no data received yet" from
+        "data received but prices happen to be zero/negative" (valid Nordpool case).
+    """
     price_today = [0.0] * 24
     price_tomorrow = [0.0] * 24
+    today_has_data = False
+    tomorrow_has_data = False
+
     if not state_obj or not state_obj.attributes:
-        return price_today, price_tomorrow
+        return price_today, price_tomorrow, today_has_data, tomorrow_has_data
 
     attrs = state_obj.attributes
 
@@ -114,6 +126,7 @@ def parse_price_sensor(state_obj) -> tuple[list[float], list[float]]:
                             hour = local_dt.hour
                             if 0 <= hour < 24:
                                 price_today[hour] = round(float(price_val), 6)
+                                today_has_data = True  # at least one price for today parsed
                 except Exception:
                     pass
 
@@ -134,10 +147,11 @@ def parse_price_sensor(state_obj) -> tuple[list[float], list[float]]:
                             hour = local_dt.hour
                             if 0 <= hour < 24:
                                 price_tomorrow[hour] = round(float(price_val), 6)
+                                tomorrow_has_data = True  # at least one price for tomorrow parsed
                 except Exception:
                     pass
 
-    return price_today, price_tomorrow
+    return price_today, price_tomorrow, today_has_data, tomorrow_has_data
 
 def map_dp_to_physical(
     action: str | None,

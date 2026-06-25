@@ -1770,23 +1770,17 @@ class BoilerController:
         mode = dp_state.state.upper()
         recommended_bypass = dp_state.attributes.get("recommended_bypass", "OFF").upper()
 
-        # Apply occupancy override for gas heating (no one home -> IDLE)
-        if "GAS" in mode and not self._are_people_home():
-            _LOGGER.info(
-                "EMS Boiler Controller: DP recommends %s, but no one is home. Overriding mode to IDLE",
-                mode
-            )
-            mode = "IDLE"
-
+        # 1. First, check if we should delay gas heating because the electric boiler is warm.
+        # This applies regardless of presence (if it's warm, we delay gas heating and keep bypass ON).
         if mode == "GAS":
             t_min = float(self.config.get("thermostat_set_temp", 45.0))
             t_elec = self._get_elec_temp()
             if t_elec is not None:
                 threshold = t_min - 6.0
                 
-                # Исправленный гистерезис задержки газового нагрева:
-                # Вход в задержку при t_elec > threshold + 1.0
-                # Выход из задержки при t_elec <= threshold
+                # Gas heating delay hysteresis:
+                # Enter delay when t_elec > threshold + 1.0
+                # Exit delay when t_elec <= threshold
                 if self._gas_heating_delayed:
                     if t_elec <= threshold:
                         _LOGGER.info(
@@ -1812,6 +1806,15 @@ class BoilerController:
         else:
             self._gas_heating_delayed = False
 
+        # 2. If gas heating is NOT delayed, apply occupancy override:
+        # If the mode is GAS (or GAS_PUMP) and no one is home, override mode to IDLE to save energy.
+        if "GAS" in mode and not self._are_people_home():
+            _LOGGER.info(
+                "EMS Boiler Controller: DP recommends %s, but no one is home. Overriding mode to IDLE",
+                mode
+            )
+            mode = "IDLE"
+
         await self._async_set_boiler_mode(mode, recommended_bypass)
 
     async def _async_set_boiler_mode(self, mode: str, recommended_bypass: str):
@@ -1826,44 +1829,46 @@ class BoilerController:
                 valve_domain = self.bypass_valve.split(".")[0]
                 current_valve = self.hass.states.get(self.bypass_valve)
                 
-                # Определяем целевое состояние байпаса:
-                # - GAS -> Закрыт (OFF)
-                # - Режимы с нагревом (ELEC, ELEC_PUMP, GAS_PUMP) -> Открыт (ON)
-                # - Остальное (IDLE и др.) -> Сохраняется неизменным
-                if mode == "GAS":
-                    target_bypass = "OFF"
-                elif mode in ("GAS_PUMP", "ELEC_PUMP", "PUMP_ONLY"):
+                # Determine target bypass:
+                # 1. If gas heating is delayed, force bypass ON to consume electric heat
+                if getattr(self, "_gas_heating_delayed", False):
                     target_bypass = "ON"
+                    bypass_source = "Gas Heating Delay"
+                # 2. If recommended_bypass is provided by DP sensor and is valid, use it directly
+                elif recommended_bypass and recommended_bypass.upper() in ("ON", "OFF"):
+                    target_bypass = recommended_bypass.upper()
+                    bypass_source = "DP solver recommendation"
+                # 3. Fallback logic when recommended_bypass is missing or invalid (e.g. error/idle states)
                 else:
-                    # Для режимов IDLE и ELEC целевое состояние байпаса определяется
-                    # температурой электробойлера относительно thermostat_set_temp с гистерезисом 1.0°C
                     try:
                         t_elec = self._get_elec_temp()
                         t_min = float(self.config.get("thermostat_set_temp", 40.0))
                         
                         if self.current_mode.lower() == "auto" and t_elec is not None:
                             t_elec_val = float(t_elec)
-                            _LOGGER.debug(
-                                "EMS Bypass decision: t_elec=%.1f, t_min=%.1f (thermostat_set_temp), mode=%s",
-                                t_elec_val, t_min, mode
-                            )
                             if t_elec_val >= (t_min - 6.0):
                                 target_bypass = "ON"
                             elif t_elec_val < (t_min - 7.0):
                                 target_bypass = "OFF"
                             else:
-                                # В пределах зоны гистерезиса сохраняем текущее состояние
                                 target_bypass = current_valve.state.upper() if current_valve else "OFF"
                         else:
-                            target_bypass = current_valve.state.upper() if current_valve else None
+                            target_bypass = current_valve.state.upper() if current_valve else "OFF"
                     except (ValueError, TypeError):
                         target_bypass = "OFF"
+                    bypass_source = "Local Fallback Logic"
 
                 if target_bypass in ("ON", "OFF"):
                     target_service = SERVICE_TURN_ON if target_bypass == "ON" else SERVICE_TURN_OFF
                     target_state = STATE_ON if target_bypass == "ON" else STATE_OFF
                     if not current_valve or current_valve.state != target_state:
-                        _LOGGER.info("EMS Boiler Controller: Setting bypass valve from %s to %s", current_valve.state if current_valve else "unknown", target_state)
+                        _LOGGER.info(
+                            "EMS Boiler Controller: Setting bypass valve from %s to %s (source: %s, mode: %s)",
+                            current_valve.state if current_valve else "unknown",
+                            target_state,
+                            bypass_source,
+                            mode
+                        )
                         await self.hass.services.async_call(
                             valve_domain,
                             target_service,
