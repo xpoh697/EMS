@@ -1803,9 +1803,17 @@ class EmsSchedulerCard extends HTMLElement {
     const container = this.shadowRoot.getElementById('history-chart-svg-container');
     if (!container) return;
 
-    // Find scales
-    const maxEnergy = Math.max(1.0, ...pv, ...load, ...imp, ...exp, ...batDisch);
-    const maxPrice = Math.max(1.0, ...buy, ...sell);
+    // Find scales (filtering out null/undefined values to avoid NaN from Math.max)
+    const cleanPv = pv.filter(v => v !== null && v !== undefined);
+    const cleanLoad = load.filter(v => v !== null && v !== undefined);
+    const cleanImp = imp.filter(v => v !== null && v !== undefined);
+    const cleanExp = exp.filter(v => v !== null && v !== undefined);
+    const cleanBat = batDisch.filter(v => v !== null && v !== undefined);
+    const cleanBuy = buy.filter(v => v !== null && v !== undefined);
+    const cleanSell = sell.filter(v => v !== null && v !== undefined);
+
+    const maxEnergy = Math.max(1.0, ...cleanPv, ...cleanLoad, ...cleanImp, ...cleanExp, ...cleanBat);
+    const maxPrice = Math.max(1.0, ...cleanBuy, ...cleanSell);
 
     // Dimensions
     const W = 540, H = 280;
@@ -1867,9 +1875,9 @@ class EmsSchedulerCard extends HTMLElement {
       const impVal = imp[i];
       const expVal = exp[i];
 
-      const pvH = (pvVal / maxEnergy) * (chartH / 2);
-      const impH = (impVal / maxEnergy) * (chartH / 2);
-      const expH = (expVal / maxEnergy) * (chartH / 2);
+      const pvH = pvVal !== null && pvVal !== undefined ? (pvVal / maxEnergy) * (chartH / 2) : 0;
+      const impH = impVal !== null && impVal !== undefined ? (impVal / maxEnergy) * (chartH / 2) : 0;
+      const expH = expVal !== null && expVal !== undefined ? (expVal / maxEnergy) * (chartH / 2) : 0;
 
       // PV Gen (yellow, going up)
       if (pvH > 1.2) {
@@ -1896,25 +1904,38 @@ class EmsSchedulerCard extends HTMLElement {
 
     for (let i = 0; i < dayData.length; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
-      const loadY = chartCenterY - (load[i] / maxEnergy) * (chartH / 2);
-      const batY = chartCenterY - (batDisch[i] / maxEnergy) * (chartH / 2);
       
-      const socY = padT + chartH - (soc[i] / 100.0) * chartH;
-      const buyY = padT + chartH - (buy[i] / maxPrice) * chartH;
-      const sellY = padT + chartH - (sell[i] / maxPrice) * chartH;
-
-      loadPoints.push(`${x.toFixed(1)},${loadY.toFixed(1)}`);
-      batPoints.push(`${x.toFixed(1)},${batY.toFixed(1)}`);
-      socPoints.push(`${x.toFixed(1)},${socY.toFixed(1)}`);
-      buyPoints.push(`${x.toFixed(1)},${buyY.toFixed(1)}`);
-      sellPoints.push(`${x.toFixed(1)},${sellY.toFixed(1)}`);
+      if (load[i] !== null && load[i] !== undefined) {
+        const loadY = chartCenterY - (load[i] / maxEnergy) * (chartH / 2);
+        loadPoints.push(`${x.toFixed(1)},${loadY.toFixed(1)}`);
+      }
+      if (batDisch[i] !== null && batDisch[i] !== undefined) {
+        const batY = chartCenterY - (batDisch[i] / maxEnergy) * (chartH / 2);
+        batPoints.push(`${x.toFixed(1)},${batY.toFixed(1)}`);
+      }
+      if (soc[i] !== null && soc[i] !== undefined) {
+        const socY = padT + chartH - (soc[i] / 100.0) * chartH;
+        socPoints.push(`${x.toFixed(1)},${socY.toFixed(1)}`);
+      }
+      if (buy[i] !== null && buy[i] !== undefined) {
+        const buyY = padT + chartH - (buy[i] / maxPrice) * chartH;
+        buyPoints.push(`${x.toFixed(1)},${buyY.toFixed(1)}`);
+      }
+      if (sell[i] !== null && sell[i] !== undefined) {
+        const sellY = padT + chartH - (sell[i] / maxPrice) * chartH;
+        sellPoints.push(`${x.toFixed(1)},${sellY.toFixed(1)}`);
+      }
     }
 
-    // Bat Area path
-    const lastHourIdx = dayData.length - 1;
-    const areaPoints = [`${(padL + barSpacing / 2).toFixed(1)},${chartCenterY}`]
-      .concat(batPoints)
-      .concat([`${(padL + lastHourIdx * barSpacing + barSpacing / 2).toFixed(1)},${chartCenterY}`]);
+    // Bat Area path (closed at the last valid battery discharge point to avoid area leaks)
+    let areaPoints = [];
+    if (batPoints.length > 0) {
+      const lastPoint = batPoints[batPoints.length - 1];
+      const lastX = lastPoint.split(',')[0];
+      areaPoints = [`${(padL + barSpacing / 2).toFixed(1)},${chartCenterY}`]
+        .concat(batPoints)
+        .concat([`${lastX},${chartCenterY}`]);
+    }
 
     // Hover zones
     let hoverHtml = '';
@@ -1922,17 +1943,27 @@ class EmsSchedulerCard extends HTMLElement {
       const x = padL + i * barSpacing;
       const hourStr = String(i).padStart(2, '0') + ':00';
       const centerX = padL + i * barSpacing + barSpacing / 2;
+      
+      const pvStr = pv[i] !== null && pv[i] !== undefined ? pv[i].toFixed(2) : 'null';
+      const impStr = imp[i] !== null && imp[i] !== undefined ? imp[i].toFixed(2) : 'null';
+      const expStr = exp[i] !== null && exp[i] !== undefined ? exp[i].toFixed(2) : 'null';
+      const loadStr = load[i] !== null && load[i] !== undefined ? load[i].toFixed(2) : 'null';
+      const batStr = batDisch[i] !== null && batDisch[i] !== undefined ? batDisch[i].toFixed(2) : 'null';
+      const socStr = soc[i] !== null && soc[i] !== undefined ? soc[i].toFixed(1) : 'null';
+      const buyStr = buy[i] !== null && buy[i] !== undefined ? buy[i].toFixed(2) : 'null';
+      const sellStr = sell[i] !== null && sell[i] !== undefined ? sell[i].toFixed(2) : 'null';
+
       hoverHtml += `
         <rect class="hov-history" x="${x.toFixed(1)}" y="${padT}" width="${barSpacing}" height="${chartH}" fill="transparent" 
           data-hour="${hourStr}" 
-          data-pv="${pv[i].toFixed(2)}"
-          data-imp="${imp[i].toFixed(2)}"
-          data-exp="${exp[i].toFixed(2)}"
-          data-load="${load[i].toFixed(2)}"
-          data-bat="${batDisch[i].toFixed(2)}"
-          data-soc="${soc[i].toFixed(1)}"
-          data-buy="${buy[i].toFixed(2)}"
-          data-sell="${sell[i].toFixed(2)}"
+          data-pv="${pvStr}"
+          data-imp="${impStr}"
+          data-exp="${expStr}"
+          data-load="${loadStr}"
+          data-bat="${batStr}"
+          data-soc="${socStr}"
+          data-buy="${buyStr}"
+          data-sell="${sellStr}"
           data-x="${centerX.toFixed(1)}" style="cursor:crosshair"/>
       `;
     }
@@ -1969,16 +2000,25 @@ class EmsSchedulerCard extends HTMLElement {
     container.querySelectorAll('.hov-history').forEach(zone => {
       zone.addEventListener('mousemove', (e) => {
         const hour = zone.getAttribute('data-hour');
+        const pvVal = zone.getAttribute('data-pv');
+        const impVal = zone.getAttribute('data-imp');
+        const expVal = zone.getAttribute('data-exp');
+        const loadVal = zone.getAttribute('data-load');
+        const batVal = zone.getAttribute('data-bat');
+        const socVal = zone.getAttribute('data-soc');
+        const buyVal = zone.getAttribute('data-buy');
+        const sellVal = zone.getAttribute('data-sell');
+
         tooltip.innerHTML = `
           <div class="tooltip-hour">${hour}</div>
-          <div class="tooltip-row"><span class="tooltip-label">PV Gen:</span><span class="tooltip-val" style="color:#ffd54f">${zone.getAttribute('data-pv')} kWh</span></div>
-          <div class="tooltip-row"><span class="tooltip-label">Import:</span><span class="tooltip-val" style="color:#0288d1">${zone.getAttribute('data-imp')} kWh</span></div>
-          <div class="tooltip-row"><span class="tooltip-label">Export:</span><span class="tooltip-val" style="color:#ef5350">${zone.getAttribute('data-exp')} kWh</span></div>
-          <div class="tooltip-row"><span class="tooltip-label">House Load:</span><span class="tooltip-val" style="color:#ffa726">${zone.getAttribute('data-load')} kWh</span></div>
-          <div class="tooltip-row"><span class="tooltip-label">From Battery:</span><span class="tooltip-val" style="color:#26a69a">${zone.getAttribute('data-bat')} kWh</span></div>
-          <div class="tooltip-row"><span class="tooltip-label">Battery SOC:</span><span class="tooltip-val" style="color:#4dd0e1">${zone.getAttribute('data-soc')}%</span></div>
-          <div class="tooltip-row"><span class="tooltip-label">Buy Price:</span><span class="tooltip-val" style="color:#ff5252">${zone.getAttribute('data-buy')} ${currency}</span></div>
-          <div class="tooltip-row"><span class="tooltip-label">Sell Price:</span><span class="tooltip-val" style="color:#4caf50">${zone.getAttribute('data-sell')} ${currency}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">PV Gen:</span><span class="tooltip-val" style="color:#ffd54f">${pvVal !== 'null' ? pvVal + ' kWh' : '--'}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Import:</span><span class="tooltip-val" style="color:#0288d1">${impVal !== 'null' ? impVal + ' kWh' : '--'}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Export:</span><span class="tooltip-val" style="color:#ef5350">${expVal !== 'null' ? expVal + ' kWh' : '--'}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">House Load:</span><span class="tooltip-val" style="color:#ffa726">${loadVal !== 'null' ? loadVal + ' kWh' : '--'}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">From Battery:</span><span class="tooltip-val" style="color:#26a69a">${batVal !== 'null' ? batVal + ' kWh' : '--'}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Battery SOC:</span><span class="tooltip-val" style="color:#4dd0e1">${socVal !== 'null' ? socVal + '%' : '--'}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Buy Price:</span><span class="tooltip-val" style="color:#ff5252">${buyVal !== 'null' ? buyVal + ' ' + currency : '--'}</span></div>
+          <div class="tooltip-row"><span class="tooltip-label">Sell Price:</span><span class="tooltip-val" style="color:#4caf50">${sellVal !== 'null' ? sellVal + ' ' + currency : '--'}</span></div>
         `;
         const chartContainer = zone.closest('.chart-container');
         if (chartContainer) {

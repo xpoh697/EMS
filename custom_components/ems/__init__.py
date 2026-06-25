@@ -351,22 +351,28 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
         last_sell = 0.0
         
         current_dt = start_dt
-        while current_dt <= now_local:
+        end_dt = now_local.replace(hour=23, minute=0, second=0, microsecond=0)
+        while current_dt <= end_dt:
             date_str = current_dt.strftime("%Y-%m-%d")
             hour = current_dt.hour
             
             day_entry = result_days.setdefault(date_str, [None]*24)
             
-            load_val = load_deltas.get((date_str, hour), 0.0)
-            pv_val = pv_deltas.get((date_str, hour), 0.0)
-            import_val = import_deltas.get((date_str, hour), 0.0)
-            export_val = export_deltas.get((date_str, hour), 0.0)
+            is_future = current_dt > now_local
             
-            soc_val = soc_means.get((date_str, hour))
-            if soc_val is not None:
-                last_soc = soc_val
+            load_val = None if is_future else load_deltas.get((date_str, hour), 0.0)
+            pv_val = None if is_future else pv_deltas.get((date_str, hour), 0.0)
+            import_val = None if is_future else import_deltas.get((date_str, hour), 0.0)
+            export_val = None if is_future else export_deltas.get((date_str, hour), 0.0)
+            
+            if is_future:
+                soc_val = None
             else:
-                soc_val = last_soc
+                soc_val = soc_means.get((date_str, hour))
+                if soc_val is not None:
+                    last_soc = soc_val
+                else:
+                    soc_val = last_soc
                 
             buy_val = buy_means.get((date_str, hour))
             if buy_val is not None:
