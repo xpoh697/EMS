@@ -1783,21 +1783,27 @@ class EmsSchedulerCard extends HTMLElement {
     const batDisch = [];
 
     for (let h = 0; h < 24; h++) {
-      const slot = dayData[h] || { pv_kwh: 0, load_kwh: 0, import_kwh: 0, export_kwh: 0, bat_soc: 50, price_buy: 0, price_sell: 0 };
-      pv.push(slot.pv_kwh || 0);
-      load.push(slot.load_kwh || 0);
-      imp.push(slot.import_kwh || 0);
-      exp.push(slot.export_kwh || 0);
-      soc.push(slot.bat_soc || 0);
-      buy.push(slot.price_buy || 0);
-      sell.push(slot.price_sell || 0);
+      const slot = dayData[h] || {};
+      pv.push(slot.pv_kwh !== undefined && slot.pv_kwh !== null ? slot.pv_kwh : null);
+      load.push(slot.load_kwh !== undefined && slot.load_kwh !== null ? slot.load_kwh : null);
+      imp.push(slot.import_kwh !== undefined && slot.import_kwh !== null ? slot.import_kwh : null);
+      exp.push(slot.export_kwh !== undefined && slot.export_kwh !== null ? slot.export_kwh : null);
+      soc.push(slot.bat_soc !== undefined && slot.bat_soc !== null ? slot.bat_soc : null);
+      buy.push(slot.price_buy !== undefined && slot.price_buy !== null ? slot.price_buy : null);
+      sell.push(slot.price_sell !== undefined && slot.price_sell !== null ? slot.price_sell : null);
 
       // Battery discharge
-      const prevSoc = (h > 0)
-        ? (dayData[h - 1] && dayData[h - 1].bat_soc !== undefined ? dayData[h - 1].bat_soc : 50)
-        : (prevDayData && prevDayData[23] && prevDayData[23].bat_soc !== undefined ? prevDayData[23].bat_soc : slot.bat_soc);
-      const dis = Math.max(0.0, (prevSoc - (slot.bat_soc || 50)) / 100.0 * capacity);
-      batDisch.push(dis);
+      if (slot.bat_soc === null || slot.bat_soc === undefined) {
+        batDisch.push(null);
+      } else {
+        const prevSoc = (h > 0)
+          ? (dayData[h - 1] && dayData[h - 1].bat_soc !== undefined && dayData[h - 1].bat_soc !== null ? dayData[h - 1].bat_soc : slot.bat_soc)
+          : (prevDayData && prevDayData[23] && prevDayData[23].bat_soc !== undefined && prevDayData[23].bat_soc !== null ? prevDayData[23].bat_soc : slot.bat_soc);
+        
+        const prevSocVal = prevSoc !== null && prevSoc !== undefined ? prevSoc : slot.bat_soc;
+        const dis = Math.max(0.0, (prevSocVal - slot.bat_soc) / 100.0 * capacity);
+        batDisch.push(dis);
+      }
     }
 
     const container = this.shadowRoot.getElementById('history-chart-svg-container');
