@@ -259,7 +259,7 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
         connection.send_error(msg["id"], "db_error", f"Error fetching statistics: {err}")
         return
 
-    def process_stats(stats_data, tzinfo):
+    def process_stats(stats_data, tzinfo, buy_prices_fallback, sell_prices_fallback):
         _LOGGER.debug("ws_get_history_30_days: processing statistics data in executor thread")
         # Group statistics by entity ID
         data_by_entity = {}
@@ -316,6 +316,25 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
         soc_means = get_hourly_means(data_by_entity.get(soc_entity, []))
         buy_means = get_hourly_means(data_by_entity.get(buy_entity, []))
         sell_means = get_hourly_means(data_by_entity.get(sell_entity, []))
+
+        def populate_from_fallback(prices_list, target_means):
+            if not isinstance(prices_list, list):
+                return
+            for item in prices_list:
+                if isinstance(item, dict) and "start" in item and "price" in item:
+                    try:
+                        start_str = item["start"]
+                        if "T" in start_str:
+                            parts = start_str.split("T")
+                            date_part = parts[0]
+                            hour_part = int(parts[1].split(":")[0])
+                            price_val = float(item["price"])
+                            target_means[(date_part, hour_part)] = round(price_val, 4)
+                    except (ValueError, TypeError, IndexError):
+                        pass
+
+        populate_from_fallback(buy_prices_fallback, buy_means)
+        populate_from_fallback(sell_prices_fallback, sell_means)
 
         _LOGGER.debug(
             "ws_get_history_30_days: stats deltas/means computed: load=%d, pv=%d, import=%d, export=%d, soc=%d, buy=%d, sell=%d",
@@ -383,7 +402,27 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
         _LOGGER.debug("ws_get_history_30_days: returning %d days of data", len(valid_days))
         return valid_days
 
-    processed = await hass.async_add_executor_job(process_stats, stats, now.tzinfo)
+    # Extract fallback price attributes in the thread-safe async context
+    buy_state = hass.states.get(buy_entity) if buy_entity else None
+    sell_state = hass.states.get(sell_entity) if sell_entity else None
+
+    buy_prices_fallback = []
+    if buy_state:
+        for attr in ("price_today", "price_tomorrow"):
+            val = buy_state.attributes.get(attr)
+            if isinstance(val, list):
+                buy_prices_fallback.extend(val)
+
+    sell_prices_fallback = []
+    if sell_state:
+        for attr in ("price_today", "price_tomorrow"):
+            val = sell_state.attributes.get(attr)
+            if isinstance(val, list):
+                sell_prices_fallback.extend(val)
+
+    processed = await hass.async_add_executor_job(
+        process_stats, stats, now.tzinfo, buy_prices_fallback, sell_prices_fallback
+    )
     connection.send_result(msg["id"], {"days": processed, "capacity": capacity})
 
 
