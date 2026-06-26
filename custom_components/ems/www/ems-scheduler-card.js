@@ -1583,7 +1583,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     // Average profile line
     let points = [];
-    for (let i = 0; i < dayData.length; i++) {
+    for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
       const y = padT + chartH - (average[i] / maxVal) * chartH;
       points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
@@ -1592,7 +1592,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     // Dot markers on average line
     let dotsHtml = '';
-    for (let i = 0; i < dayData.length; i++) {
+    for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
       const y = padT + chartH - (average[i] / maxVal) * chartH;
       dotsHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="#ffe082" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
@@ -1600,7 +1600,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     // Net average profile line (no boiler)
     let netPoints = [];
-    for (let i = 0; i < dayData.length; i++) {
+    for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
       const y = padT + chartH - (netAverage[i] / maxVal) * chartH;
       netPoints.push(`${x.toFixed(1)},${y.toFixed(1)}`);
@@ -1609,7 +1609,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     // Dot markers on net average line
     let netDotsHtml = '';
-    for (let i = 0; i < dayData.length; i++) {
+    for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
       const y = padT + chartH - (netAverage[i] / maxVal) * chartH;
       netDotsHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.0" fill="#26a69a" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
@@ -2166,7 +2166,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     // Corrected Forecast Line (today)
     let points = [];
-    for (let i = 0; i < dayData.length; i++) {
+    for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
       const y = padT + chartH - (forecast[i] / maxVal) * chartH;
       points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
@@ -2175,7 +2175,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     // Dot markers on today forecast line
     let dotsHtml = '';
-    for (let i = 0; i < dayData.length; i++) {
+    for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
       const y = padT + chartH - (forecast[i] / maxVal) * chartH;
       dotsHtml += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="#ffd54f" stroke="rgba(0,0,0,0.5)" stroke-width="1"/>`;
@@ -2183,7 +2183,7 @@ class EmsSchedulerCard extends HTMLElement {
 
     // Tomorrow Forecast Line (dashed cyan)
     let pointsTmr = [];
-    for (let i = 0; i < dayData.length; i++) {
+    for (let i = 0; i < 24; i++) {
       const x = padL + i * barSpacing + barSpacing / 2;
       const y = padT + chartH - (forecastTomorrow[i] / maxVal) * chartH;
       pointsTmr.push(`${x.toFixed(1)},${y.toFixed(1)}`);
