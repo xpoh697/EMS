@@ -42,6 +42,7 @@ from .const import (
     CONF_THERMOSTAT_SET_TEMP,
     CONF_ELEC_BOILER_MAX_TEMP,
     CONF_GAS_BOILER_MAX_TEMP,
+    CONF_BOILER_WARM_DIFF,
     DEFAULT_STATISTICS_DAYS,
     DEFAULT_FALLBACK_CONSUMPTION,
     DEFAULT_DEBUG,
@@ -55,6 +56,7 @@ from .const import (
     DEFAULT_THERMOSTAT_SET_TEMP,
     DEFAULT_ELEC_BOILER_MAX_TEMP,
     DEFAULT_GAS_BOILER_MAX_TEMP,
+    DEFAULT_BOILER_WARM_DIFF,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -469,6 +471,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         thermostat_temp = self._user_input.get(CONF_THERMOSTAT_SET_TEMP, DEFAULT_THERMOSTAT_SET_TEMP)
         elec_max_temp = self._user_input.get(CONF_ELEC_BOILER_MAX_TEMP, DEFAULT_ELEC_BOILER_MAX_TEMP)
         gas_max_temp = self._user_input.get(CONF_GAS_BOILER_MAX_TEMP, DEFAULT_GAS_BOILER_MAX_TEMP)
+        boiler_warm_diff = self._user_input.get(CONF_BOILER_WARM_DIFF, DEFAULT_BOILER_WARM_DIFF)
 
         schema_dict[vol.Required(CONF_THERMOSTAT_SET_TEMP, default=thermostat_temp)] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=30.0, max=60.0, step=0.5, mode=selector.NumberSelectorMode.SLIDER)
@@ -478,6 +481,9 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         )
         schema_dict[vol.Required(CONF_GAS_BOILER_MAX_TEMP, default=gas_max_temp)] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=30.0, max=70.0, step=1.0, mode=selector.NumberSelectorMode.SLIDER)
+        )
+        schema_dict[vol.Required(CONF_BOILER_WARM_DIFF, default=boiler_warm_diff)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=1.0, max=15.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
         )
         schema_dict[vol.Required("gas_boiler_capacity", default=gas_cap)] = selector.NumberSelector(
             selector.NumberSelectorConfig(min=0, step=1, mode=selector.NumberSelectorMode.BOX)

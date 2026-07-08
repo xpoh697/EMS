@@ -96,7 +96,8 @@
           "elec_boiler_capacity": "Electric Boiler Capacity (L)",
           "gas_cost_m3": "Cost per 1 m³ of gas",
           "calibration_type": "Standby loss calibration mode",
-          "water_flow_sensor": "Instantaneous water flow sensor"
+          "water_flow_sensor": "Instantaneous water flow sensor",
+          "boiler_warm_diff": "Warm Boiler Override Temperature Difference (°C)"
         }
       }
     }

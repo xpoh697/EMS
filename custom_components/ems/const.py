@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.52"
+VERSION = "0.3.60"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -29,6 +29,7 @@ CONF_HW_CIRCULATION_RETURN_TEMP = "hw_circulation_return_temp"
 CONF_THERMOSTAT_SET_TEMP = "thermostat_set_temp"
 CONF_ELEC_BOILER_MAX_TEMP = "elec_boiler_max_temp"
 CONF_GAS_BOILER_MAX_TEMP = "gas_boiler_max_temp"
+CONF_BOILER_WARM_DIFF = "boiler_warm_diff"
 
 # Financial configuration keys
 CONF_PRICE_BUY_SENSOR = "price_buy_sensor"
@@ -67,6 +68,7 @@ DEFAULT_BAT_SOC_EMERGENCY = 10.0
 DEFAULT_THERMOSTAT_SET_TEMP = 45.0
 DEFAULT_ELEC_BOILER_MAX_TEMP = 70.0
 DEFAULT_GAS_BOILER_MAX_TEMP = 50.0
+DEFAULT_BOILER_WARM_DIFF = 6.0
 
 # Hysteresis configuration
 SOC_HYSTERESIS = 2.0

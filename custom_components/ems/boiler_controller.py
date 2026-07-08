@@ -12,7 +12,7 @@ from homeassistant.components.climate import DOMAIN as CLIMATE_DOMAIN
 from homeassistant.const import ATTR_ENTITY_ID, ATTR_TEMPERATURE, SERVICE_TURN_OFF, SERVICE_TURN_ON, STATE_ON, STATE_OFF
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
-from .const import CONF_CALIBRATION_TYPE, CONF_WATER_FLOW_SENSOR, CONF_PEOPLE_HOME_SENSOR
+from .const import CONF_CALIBRATION_TYPE, CONF_WATER_FLOW_SENSOR, CONF_PEOPLE_HOME_SENSOR, CONF_BOILER_WARM_DIFF, DEFAULT_BOILER_WARM_DIFF
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ class BoilerController:
         self._manual_heating_mode = "GAS"
         self._manual_heating_setpoint = 50.0
         self._manual_pump_dump_active = False
+        self._warm_boiler_bypass_active = False
         
         # Capacity and cost settings
         self.gas_capacity = config.get("gas_boiler_capacity", 100)
@@ -274,6 +275,15 @@ class BoilerController:
             await self._async_apply_current_dp_plan()
         elif self.current_mode.lower() == "manual" and self._manual_heating_active:
             await self._async_apply_manual_heating()
+        elif self.current_mode.lower() == "manual" and not self._manual_heating_active:
+            # Manual mode, no active heating cycle — still manage bypass by T_elec.
+            # Without this, the bypass stays locked in its last Auto-mode state
+            # (e.g., OFF from a NO PATH fallback), isolating a hot electric boiler.
+            t_elec_idle = self._get_elec_temp()
+            t_min_idle = float(self.config.get("thermostat_set_temp", 40.0))
+            warm_diff_idle = float(self.config.get(CONF_BOILER_WARM_DIFF, DEFAULT_BOILER_WARM_DIFF))
+            idle_bypass = "ON" if (t_elec_idle is not None and t_elec_idle >= (t_min_idle - warm_diff_idle)) else "OFF"
+            await self._async_set_boiler_mode("IDLE", idle_bypass)
 
     async def async_start_manual_heating(self, mode: str, setpoint: float):
         """Запуск ручного цикла нагрева с жесткой валидацией на бэкенде."""
@@ -1770,41 +1780,48 @@ class BoilerController:
         mode = dp_state.state.upper()
         recommended_bypass = dp_state.attributes.get("recommended_bypass", "OFF").upper()
 
-        # 1. First, check if we should delay gas heating because the electric boiler is warm.
-        # This applies regardless of presence (if it's warm, we delay gas heating and keep bypass ON).
-        if mode == "GAS":
-            t_min = float(self.config.get("thermostat_set_temp", 45.0))
-            t_elec = self._get_elec_temp()
-            if t_elec is not None:
-                threshold = t_min - 6.0
+        # 1. Update self._warm_boiler_bypass_active status with hysteresis using configured difference
+        t_min = float(self.config.get("thermostat_set_temp", 45.0))
+        t_elec = self._get_elec_temp()
+        warm_diff = float(self.config.get(CONF_BOILER_WARM_DIFF, DEFAULT_BOILER_WARM_DIFF))
+
+        if t_elec is not None:
+            try:
+                t_elec_val = float(t_elec)
+                threshold_on = max(20.0, t_min - warm_diff)
+                threshold_off = max(20.0, t_min - (warm_diff + 1.0))
                 
-                # Gas heating delay hysteresis:
-                # Enter delay when t_elec > threshold + 1.0
-                # Exit delay when t_elec <= threshold
-                if self._gas_heating_delayed:
-                    if t_elec <= threshold:
+                if getattr(self, "_warm_boiler_bypass_active", False):
+                    if t_elec_val < threshold_off:
+                        self._warm_boiler_bypass_active = False
                         _LOGGER.info(
-                            "EMS Boiler Controller: Electric boiler temperature (%.1f°C) dropped to/below threshold (%.1f°C). "
-                            "Terminating delay and activating GAS mode.",
-                            t_elec, threshold
+                            "EMS Boiler Controller: Electric boiler temperature (%.1f°C) dropped below override threshold (%.1f°C). "
+                            "Disabling warm boiler bypass override.",
+                            t_elec_val, threshold_off
                         )
-                        self._gas_heating_delayed = False
                 else:
-                    if t_elec > threshold + 1.0:
+                    if t_elec_val >= threshold_on:
+                        self._warm_boiler_bypass_active = True
                         _LOGGER.info(
-                            "EMS Boiler Controller: DP recommends GAS, but electric boiler is warm (%.1f°C > %.1f°C). "
-                            "Delaying gas activation and keeping bypass ON to consume electric heat.",
-                            t_elec, threshold
+                            "EMS Boiler Controller: Electric boiler temperature (%.1f°C) reached warm override threshold (%.1f°C). "
+                            "Enabling warm boiler bypass override.",
+                            t_elec_val, threshold_on
                         )
-                        self._gas_heating_delayed = True
-                        
-                if self._gas_heating_delayed:
-                    await self._async_set_boiler_mode("IDLE", "ON")
-                    return
-            else:
-                self._gas_heating_delayed = False
+            except (ValueError, TypeError):
+                self._warm_boiler_bypass_active = False
+        else:
+            self._warm_boiler_bypass_active = False
+
+        # Gas heating and bypass are synchronized: if the electric boiler is warm,
+        # we keep the bypass ON and delay the gas boiler.
+        if mode in ("GAS", "IDLE"):
+            self._gas_heating_delayed = self._warm_boiler_bypass_active
         else:
             self._gas_heating_delayed = False
+
+        if self._gas_heating_delayed:
+            await self._async_set_boiler_mode("IDLE", "ON")
+            return
 
         # 2. If gas heating is NOT delayed, apply occupancy override:
         # If the mode is GAS (or GAS_PUMP) and no one is home, override mode to IDLE to save energy.
@@ -1830,32 +1847,17 @@ class BoilerController:
                 current_valve = self.hass.states.get(self.bypass_valve)
                 
                 # Determine target bypass:
-                # 1. If gas heating is delayed, force bypass ON to consume electric heat
-                if getattr(self, "_gas_heating_delayed", False):
+                # 1. Override: if electric boiler is warm, keep bypass ON (connected)
+                if getattr(self, "_warm_boiler_bypass_active", False):
                     target_bypass = "ON"
-                    bypass_source = "Gas Heating Delay"
+                    bypass_source = "Warm Electric Boiler Override"
                 # 2. If recommended_bypass is provided by DP sensor and is valid, use it directly
                 elif recommended_bypass and recommended_bypass.upper() in ("ON", "OFF"):
                     target_bypass = recommended_bypass.upper()
                     bypass_source = "DP solver recommendation"
-                # 3. Fallback logic when recommended_bypass is missing or invalid (e.g. error/idle states)
+                # 3. Fallback logic
                 else:
-                    try:
-                        t_elec = self._get_elec_temp()
-                        t_min = float(self.config.get("thermostat_set_temp", 40.0))
-                        
-                        if self.current_mode.lower() == "auto" and t_elec is not None:
-                            t_elec_val = float(t_elec)
-                            if t_elec_val >= (t_min - 6.0):
-                                target_bypass = "ON"
-                            elif t_elec_val < (t_min - 7.0):
-                                target_bypass = "OFF"
-                            else:
-                                target_bypass = current_valve.state.upper() if current_valve else "OFF"
-                        else:
-                            target_bypass = current_valve.state.upper() if current_valve else "OFF"
-                    except (ValueError, TypeError):
-                        target_bypass = "OFF"
+                    target_bypass = current_valve.state.upper() if current_valve else "OFF"
                     bypass_source = "Local Fallback Logic"
 
                 if target_bypass in ("ON", "OFF"):
@@ -1904,7 +1906,7 @@ class BoilerController:
                         if storage and self.current_mode.lower() == "auto":
                             t_max_elec = min(t_max_elec, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
                         
-                    if t_elec is None:
+                    if t_elec is None or not heater_on:
                         target_pump_state_logical = False
                     else:
                         if t_elec >= (t_max_elec - 5.0):
@@ -1986,12 +1988,25 @@ class BoilerController:
         # покупка из сети является намеренным действием DP, отсечка неприменима
         try:
             from .const import INVERTER_MODES
-            dp_state = self.hass.states.get("sensor.dp")
             current_physical_mode = None
-            if dp_state:
-                schedule = dp_state.attributes.get("schedule", [])
-                if schedule and isinstance(schedule, list) and len(schedule) > 0:
-                    current_physical_mode = schedule[0].get("physical_mode")
+            
+            # Сначала пытаемся получить физический режим из активного селектора инвертора (после маппинга)
+            inverter_modes_list = self.config.get("inverter_modes_list")
+            if inverter_modes_list:
+                mode_state = self.hass.states.get(inverter_modes_list)
+                if mode_state and mode_state.state not in (None, "unknown", "unavailable"):
+                    current_physical_mode = mode_state.state.lower()
+
+            # Фолбэк: если селектор не настроен или недоступен — берем из первого слота расписания DP
+            if not current_physical_mode:
+                dp_state = self.hass.states.get("sensor.dp")
+                if dp_state:
+                    schedule = dp_state.attributes.get("schedule", [])
+                    if schedule and isinstance(schedule, list) and len(schedule) > 0:
+                        current_physical_mode = schedule[0].get("physical_mode")
+                        if current_physical_mode:
+                            current_physical_mode = current_physical_mode.lower()
+
             mode_cfg = INVERTER_MODES.get(current_physical_mode) if current_physical_mode else None
             grid_is_intentional = getattr(mode_cfg, "is_grid_bypass", False) if mode_cfg else False
         except Exception:
@@ -2008,6 +2023,41 @@ class BoilerController:
                 self._solar_deficit_cutoff = False
                 await self._async_apply_current_dp_plan()
             return
+
+        # Определяем пороговый SOC для отмены отсечки
+        # (в режиме curtail_pv используем лимит режима, иначе 95.0% для любого режима)
+        active_limit = 95.0
+        if mode_cfg and getattr(mode_cfg, "curtail_pv", False):
+            active_limit = getattr(mode_cfg, "calibration_limit_soc", 90.0) or 90.0
+
+        bat_soc_sensor = self.config.get("battery_soc_sensor")
+        bat_soc = None
+        if bat_soc_sensor:
+            soc_state = self.hass.states.get(bat_soc_sensor)
+            if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    bat_soc = float(soc_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+        if bat_soc is not None:
+            # Вводим гистерезис 1.0% по уровню SOC для предотвращения дребезга
+            if self._solar_deficit_cutoff:
+                should_bypass = bat_soc >= active_limit
+            else:
+                should_bypass = bat_soc >= (active_limit - 1.0)
+
+            if should_bypass:
+                if self._solar_deficit_cutoff:
+                    _LOGGER.info(
+                        "EMS Boiler Controller: Battery SOC %.1f%% >= limit %.1f%%. "
+                        "Deactivating solar deficit cutoff to allow heating.",
+                        bat_soc,
+                        active_limit
+                    )
+                    self._solar_deficit_cutoff = False
+                    await self._async_apply_current_dp_plan()
+                return
 
         try:
             # Получаем текущие значения в Вт

@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.9.3";
+const CARD_VERSION = "1.9.4";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -291,7 +291,7 @@ const STYLES = `
     font-size: 13px; font-weight: 500; transition: background .3s, color .3s;
   }
   .valve-bar.open   { background: rgba(76,175,80,.15);  color: var(--success-color, #4caf50); }
-  .valve-bar.closed { background: rgba(244,67,54,.15);  color: var(--error-color,   #f44336); }
+  .valve-bar.closed { background: rgba(255,255,255,.08);  color: var(--secondary-text-color); }
   .valve-bar ha-icon { --mdc-icon-size: 20px; }
   .valve-bar .vb-label { flex: 1; }
   .valve-bar .vb-state { font-weight: 700; text-transform: uppercase; font-size: 12px; letter-spacing: .5px; }
@@ -938,7 +938,7 @@ class BoilerCard extends HTMLElement {
     this._valveBar = document.createElement("div");
     this._valveBar.className = "valve-bar closed";
     this._valveBar.innerHTML = `
-      <ha-icon id="vb-icon" icon="mdi:alert-circle-outline"></ha-icon>
+      <ha-icon id="vb-icon" icon="mdi:circle-off-outline"></ha-icon>
       <span class="vb-label">Электробойлер</span>
       <span class="vb-state" id="vb-state">Изолирован</span>`;
     this._statusContent.appendChild(this._valveBar);
@@ -1402,8 +1402,8 @@ class BoilerCard extends HTMLElement {
         this._lineBottom.className.baseVal = "flow-line";
       }
     } else {
-      this._schemaValve.className = "valve-node warn";
-      this._schemaValve.querySelector("ha-icon").setAttribute("icon", "mdi:alert-circle-outline");
+      this._schemaValve.className = "valve-node";
+      this._schemaValve.querySelector("ha-icon").setAttribute("icon", "mdi:pipe-valve");
       this._lineBottom.className.baseVal = "flow-line";
     }
 
@@ -1440,7 +1440,7 @@ class BoilerCard extends HTMLElement {
     // ── Valve bar ─────────────────────────────────────────────────────────
     this._valveBar.className = "valve-bar " + (elecConn ? "open" : "closed");
     this._valveBar.querySelector("#vb-icon").setAttribute("icon",
-      elecConn ? "mdi:lightning-bolt-circle" : "mdi:alert-circle-outline");
+      elecConn ? "mdi:lightning-bolt-circle" : "mdi:circle-off-outline");
     this._valveBar.querySelector("#vb-state").textContent =
       elecConn ? "Подключён" : "Изолирован";
 

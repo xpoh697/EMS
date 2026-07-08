@@ -1740,8 +1740,6 @@ class EmsDpSensor(SensorEntity):
             has_prices_now = any(buy_prices_today)
             
             force = (was_invalid and is_valid) or (has_no_prices_in_plan and has_prices_now)
-            if entity_id == "sensor.boiler_dp":
-                force = True
             
             ems_log(
                 self.hass,
@@ -2499,6 +2497,7 @@ class EmsSchedulerSensor(SensorEntity):
         self._pv_buffer: deque = deque()
         self._load_buffer: deque = deque()
         self._dynamic_sale_pv_active: bool = False
+        self._pv_export_soc_override_active: bool = False
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -2546,6 +2545,31 @@ class EmsSchedulerSensor(SensorEntity):
 
     def _update_dynamic_switching(self) -> None:
         """Update the dynamic override state based on rolling buffers."""
+        # Calculate PV Export SOC override (SOC > 90% and time >= 12)
+        config = self._entry.data
+        options = self._entry.options
+        bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
+
+        soc = None
+        if bat_soc_entity_id:
+            soc_state = self.hass.states.get(bat_soc_entity_id)
+            if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    soc = float(soc_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+        now = dt_util.now()
+        if now.hour < 12 or soc is None:
+            self._pv_export_soc_override_active = False
+        else:
+            if self._pv_export_soc_override_active:
+                if soc < 88.0:
+                    self._pv_export_soc_override_active = False
+            else:
+                if soc > 90.0:
+                    self._pv_export_soc_override_active = True
+
         dp_state = self.hass.states.get("sensor.dp")
         if dp_state is None or dp_state.state in ("unknown", "unavailable"):
             self._dynamic_sale_pv_active = False
@@ -2651,6 +2675,10 @@ class EmsSchedulerSensor(SensorEntity):
             return None
 
         base_mode = schedule[0].get("physical_mode", dp_state.state)
+
+        # Apply battery SOC > 90% and time >= 12 override for pv export (sale_pv_no_bat)
+        if active_override is None and base_mode == "sale_pv_no_bat" and self._pv_export_soc_override_active:
+            return "sale_pv"
 
         # Apply precalculated dynamic switching
         if base_mode == "sale_pv_no_bat" and self._dynamic_sale_pv_active:
@@ -2829,6 +2857,7 @@ class EmsSchedulerSensor(SensorEntity):
             end_soc = (end_usable / safe_capacity) * 100 + min_bat_soc
             end_soc = max(min_bat_soc, min(100.0, end_soc))
 
+            slot_soc = soc if (slot_idx == 0 and soc is not None) else end_soc
             slot_data = {
                 **slot,
                 "soc": round(soc if (slot_idx == 0 and soc is not None and soc <= bat_soc_emergency_val) else end_soc, 1),
@@ -2838,6 +2867,23 @@ class EmsSchedulerSensor(SensorEntity):
             if slot_idx == 0 and soc is not None and soc <= bat_soc_emergency_val:
                 slot_data["action"] = "bat_emergency"
                 slot_data["physical_mode"] = "bat_emergency"
+            else:
+                try:
+                    slot_hour = int(slot.get("hour", current_hour))
+                except (ValueError, TypeError):
+                    slot_hour = current_hour
+
+                slot_date = slot.get("date", today_str)
+                slot_override = overrides.get(slot_date, {}).get(str(slot_hour))
+
+                if slot_idx == 0:
+                    is_high_soc_override = (self._pv_export_soc_override_active and slot_override is None)
+                else:
+                    is_high_soc_override = (slot_hour >= 12 and slot_soc > 90.0 and slot_override is None)
+
+                if is_high_soc_override and slot_data.get("physical_mode") == "sale_pv_no_bat":
+                    slot_data["physical_mode"] = "sale_pv"
+
             dispatched_plan.append(slot_data)
             usable_energy = end_usable
 
@@ -2887,6 +2933,13 @@ class EmsSchedulerSensor(SensorEntity):
                 mapping_reason = f"idle_pv_surplus_override: {overridden_mode} (PV {current_pv:.1f}W > Load {current_load:.1f}W + 50W, Sell Price {sell_price:.4f} vs Min {min_sell_price:.4f})"
                 if dispatched_plan:
                     dispatched_plan[0]["physical_mode"] = overridden_mode
+
+        # Apply battery SOC > 90% and time >= 12 override for pv export mapping reason
+        if active_override is None and base_mode == "sale_pv_no_bat" and self._pv_export_soc_override_active:
+            if soc is not None:
+                mapping_reason = f"soc_high_noon_override: sale_pv (SOC {soc:.1f}% > 90% (hysteresis >= 88%), hour {current_hour} >= 12)"
+            else:
+                mapping_reason = f"soc_high_noon_override: sale_pv (hour {current_hour} >= 12)"
 
         if active_override is not None:
             raw_mode = active_override.split(":", 1)[0]
@@ -4244,7 +4297,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         is_valid = new_state and new_state.state not in (None, "unknown", "unavailable")
 
         force = False
-        if entity_id not in (self._gas_sensor, self._elec_sensor):
+        if entity_id not in (self._gas_sensor, self._elec_sensor, "sensor.dp"):
             force = True
         elif was_invalid and is_valid:
             force = True
@@ -4254,6 +4307,19 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         """Calculate the Boiler DP schedule inside executor."""
         self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = True
         now = dt_util.now()
+
+        # Debounce/cooldown check
+        if not force and self._last_calc_time is not None:
+            cooldown_rem = (now - self._last_calc_time).total_seconds()
+            if cooldown_rem < 60:
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.DEBUG,
+                    f"EMS Boiler DP: update debounced (cooldown: {60 - cooldown_rem:.1f}s remaining)"
+                )
+                self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
+                return
         config = self._entry.data
         options = self._entry.options
 
@@ -4365,6 +4431,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._calc_duration = 0.0
             self.async_write_ha_state()
             ems_log(self.hass, _LOGGER, logging.INFO, "EMS Boiler DP: Vacation mode is ENABLED. Boiler schedule set to IDLE.")
+            self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
             return
 
         # 2. Check debounce and cooldown conditions
@@ -4379,6 +4446,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                         "EMS Boiler DP: update debounced (cooldown: %.1fs remaining)",
                         60.0 - cooldown_rem
                     )
+                    self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
                     return
 
             if self._last_calc_time is not None and self._last_calc_temp is not None:
@@ -4429,12 +4497,14 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                         reason,
                         time_delta,
                     )
+                    self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
                     return
 
         # 3. Retrieve schedule slots from sensor.dp
         dp_state = self.hass.states.get("sensor.dp")
         if not dp_state or dp_state.state in ("unknown", "unavailable"):
             ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.dp is not available yet.")
+            self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
             self._state = "IDLE"
             self.async_write_ha_state()
             return
@@ -4443,6 +4513,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS Boiler DP: retrieved dp_schedule length=%d", len(dp_schedule))
         if not dp_schedule:
             ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.dp has no schedule attribute.")
+            self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
             self._state = "IDLE"
             self.async_write_ha_state()
             return
@@ -4526,6 +4597,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         cal_state = self.hass.states.get("sensor.boiler_calibration")
         if not cal_state or cal_state.state in ("unknown", "unavailable"):
             ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.boiler_calibration is not available.")
+            self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
             self._state = "NO CALIB DATA"
             self.async_write_ha_state()
             return
@@ -4659,11 +4731,15 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 current_action,
                 len(schedule_list)
             )
+            old_bypass = self._recommended_bypass
             if schedule_list:
                 first_bypass = schedule_list[0].get("bypass", False)
                 self._recommended_bypass = "ON" if first_bypass else "OFF"
             else:
                 self._recommended_bypass = "OFF"
+            
+            if old_bypass == self._recommended_bypass:
+                self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
             self._heating_start_hour = heating_start_hour
             self._heating_end_hour = heating_end_hour
             self._boiler_auto_temp_limit = boiler_auto_temp_limit
@@ -4673,6 +4749,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             self._schedule = []
             self._stats = {"error": str(err)}
             self._recommended_bypass = "OFF"
+            self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
 
         self._t_start = round(t_curr, 2)
         self._t_gas = round(t_gas_val, 2)

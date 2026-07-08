@@ -97,7 +97,8 @@
           "gas_cost_m3": "Cost per 1 m³ of gas",
           "calibration_type": "Standby loss calibration mode",
           "water_flow_sensor": "Instantaneous water flow sensor",
-          "people_home_sensor": "Occupancy Sensor (Number of people/Presence)"
+          "people_home_sensor": "Occupancy Sensor (Number of people/Presence)",
+          "boiler_warm_diff": "Warm Boiler Override Temperature Difference (°C)"
         }
       }
     }

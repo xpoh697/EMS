@@ -183,8 +183,13 @@ def run_boiler_dp(
                 curtailed_pv_tomorrow += wasted
 
     # 2.3 Sum 1 and 2 to get total budget (with a 10% safety margin)
-    total_pv_budget_today = (boiler_average_budget_today + curtailed_pv_today) * 0.9
-    total_pv_budget_tomorrow = (boiler_average_budget_tomorrow + curtailed_pv_tomorrow) * 0.9
+    # If solar export is paid (max_sell > 0), the historical average budget is not free
+    # (it has an opportunity cost equal to the export rate). Only actual curtailed PV is free.
+    base_budget_today = 0.0 if max_sell_today > 0.0 else boiler_average_budget_today
+    base_budget_tomorrow = 0.0 if max_sell_tomorrow > 0.0 else boiler_average_budget_tomorrow
+
+    total_pv_budget_today = (base_budget_today + curtailed_pv_today) * 0.9
+    total_pv_budget_tomorrow = (base_budget_tomorrow + curtailed_pv_tomorrow) * 0.9
 
     # 2.4 Subtract battery charging deficit if battery doesn't reach 100% SOC before evening
     # Adjust expected_soc by adding back the planned boiler energy to estimate baseline SOC trajectory
@@ -248,6 +253,9 @@ def run_boiler_dp(
 
     allocated_free_slots = set()
     boiler_hourly_draw = cal_data.get("elec_with_pump", {}).get("heater_power_kw") or 2.5
+    # Uses max heater power (ELEC_PUMP) for budget draw — conservative estimate.
+    # With tariff=0 for budget slots, ELEC_PUMP heats to t_max_elec in 1 slot (~1.6 kWh).
+    # Remaining budget slots serve as a maintenance buffer.
 
     # Calculate daily totals for today and tomorrow to check if average generation covers house + boiler
     total_pv_today = sum(float(s.get("pv_kwh", 0.0) or 0.0) for s in slots if s.get("date") == today_date)
@@ -291,6 +299,9 @@ def run_boiler_dp(
             if rem_today <= 0.0:
                 break
             allocated_free_slots.add(idx)
+            # Subtract the minimum draw per slot to correctly count budget across slots.
+            # Both ELEC (elec_only kW) and ELEC_PUMP (elec_with_pump kW) are accounted for:
+            # the DP chooses which mode, but t_max_elec is the physical stop for both.
             rem_today -= boiler_hourly_draw
 
     # Распределение лимита для завтрашнего дня
@@ -383,10 +394,10 @@ def run_boiler_dp(
         if mode_name == "buy":
             eff_tariff = buy_price
         elif idx in allocated_free_slots:
-            is_curtailed = getattr(mode_config, "curtail_pv", False) if mode_config else False
-            limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
-            is_wasted = is_curtailed and (adjusted_soc >= limit_soc)
-            eff_tariff = 0.0 if (is_wasted or sell_price <= 0.0) else sell_price
+            # Budget hour: solar energy has been pre-allocated for boiler use.
+            # Treat as free regardless of battery state — the budget allocation
+            # already accounted for competition with battery charging.
+            eff_tariff = 0.0
         elif mode_config and mode_config.curtail_pv:
             limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
             if adjusted_soc >= limit_soc:
@@ -530,7 +541,7 @@ def run_boiler_dp(
                         continue
                     if mode in ("PUMP_ONLY", "GAS_PUMP", "ELEC_PUMP") and tariff > 0.0:
                         continue
-                    if mode in ("GAS", "GAS_PUMP") and T_elec_prev >= t_min:
+                    if mode == "GAS" and T_elec_cooled >= t_min:
                         continue
                     if mode in ("GAS", "GAS_PUMP") and vol_gas <= 0.0:
                         continue
@@ -550,7 +561,10 @@ def run_boiler_dp(
                         else:
                             T_active = T_elec_end_val
                             
-                        t_max_mode = t_max
+                        # IDLE is passive cooling — always use t_grid_max as ceiling
+                        # (t_grid_max is already extended to cover actual temps above t_max).
+                        # Only active heating modes respect t_max as their target ceiling.
+                        t_max_mode = t_grid_max
 
                         curr_idx = int(round((T_gas_end_val - GRID_MIN_TEMP) * 2))
                         if 0 <= curr_idx < num_states:
