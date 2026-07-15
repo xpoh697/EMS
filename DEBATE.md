@@ -693,4 +693,85 @@ slot_override = overrides.get(slot_date, {}).get(str(slot_hour))
 1. Внедрить отладочный код в `sensor.py` внутри метода `async_update_boiler_dp`.
 2. Запрос к БД делать через `self.hass.async_add_executor_job` для предотвращения блокировки Event Loop.
 3. Код сработает только один раз (при отсутствии файла `/config/ems_db_query.txt`), запишет результаты и завершится.
-4. После прочтения результатов удалить этот код.
+
+---
+
+## [2026-07-15 21:25] Задача: Предотвратить принудительный переход в IDLE при раннем достижении целевого SOC
+
+### Archi
+
+Когда батарея разряжается до целевого SOC (например, 52% в часе 20:00) раньше конца часа, DP-алгоритм на очередном пересчете видит, что цель часа достигнута, и переключает первый слот расписания в `idle`. Это принудительно выключает разряд батареи и заставляет дом импортировать из сети по пиковому тарифу, хотя на следующий час запланирован дальнейший разряд (например, до 32%).
+Решение:
+В `native_value` класса `EmsSchedulerSensor` в [sensor.py](file:///e:/HA_INTEGRATIONS/EMS/custom_components/ems/sensor.py) добавить логику упреждения (lookahead):
+Если текущий рекомендованный режим — `idle`, но батарея не пуста (`soc > min_bat_soc + 1.0`), а на следующий час (`schedule[1]`) запланирован режим, допускающий разряд на дом (`discharge_to_house` = True), мы переходим на режим следующего часа досрочно.
+
+### Skeptic
+
+Три замечания к реализации:
+1. **Проверка границ массива:**
+   Необходимо строго проверять `len(schedule) > 1` перед обращением к `schedule[1]`, чтобы избежать ошибок `IndexError`.
+2. **Импорт констант:**
+   Импортировать реестр `INVERTER_MODES` внутри метода `native_value` для предотвращения циклического импорта или использовать существующий импорт, если он есть.
+3. **Версионирование:**
+   Повысить версию интеграции до `0.3.64` в `const.py` и `manifest.json`.
+
+### Заключение
+
+1. В [sensor.py](file:///e:/HA_INTEGRATIONS/EMS/custom_components/ems/sensor.py):
+   - Инициализировать переменные `self._last_active_power_w = 0.0`, `self._last_active_amps = 0.0` и `self._last_active_hour = -1` в `__init__` класса `EmsSchedulerSensor`.
+   - В методе `native_value` добавить проверку упреждения:
+     ```python
+     # Apply next-hour lookahead to prevent idle state during transition hours
+     if active_override is None and base_mode == "idle" and len(schedule) > 1:
+         next_mode = schedule[1].get("physical_mode")
+         if next_mode:
+             from .const import INVERTER_MODES
+             next_cfg = INVERTER_MODES.get(next_mode)
+             if next_cfg and next_cfg.discharge_to_house and soc is not None and soc > min_bat_soc + 1.0:
+                 return next_mode
+     ```
+   - В методе `extra_state_attributes` добавить сохранение последней активной мощности часа и применение её при упреждении:
+     ```python
+         # Track the last active power/amps for the current hour
+         if now.hour != self._last_active_hour:
+             self._last_active_power_w = 0.0
+             self._last_active_amps = 0.0
+             self._last_active_hour = now.hour
+
+         # Check next-hour lookahead to align extra attributes
+         lookahead_active = False
+         base_mode = schedule[0].get("physical_mode", dp_state.state) if schedule else None
+         if active_override is None and base_mode == "idle" and len(schedule) > 1:
+             next_mode = schedule[1].get("physical_mode")
+             if next_mode:
+                 from .const import INVERTER_MODES
+                 next_cfg = INVERTER_MODES.get(next_mode)
+                 if next_cfg and next_cfg.discharge_to_house and soc is not None and soc > min_bat_soc + 1.0:
+                     lookahead_active = True
+
+         current_power = 0.0
+         current_amps = 0.0
+         current_target_soc = soc
+
+         if dispatched_plan:
+             current_slot = dispatched_plan[0]
+             slot_power = current_slot.get("power_w", 0.0)
+             slot_amps = current_slot.get("current_a", 0.0)
+
+             if slot_power > 0.0:
+                 self._last_active_power_w = slot_power
+                 self._last_active_amps = slot_amps
+
+             if lookahead_active and len(dispatched_plan) > 1:
+                 next_slot = dispatched_plan[1]
+                 current_power = max(self._last_active_power_w, next_slot.get("power_w", 0.0))
+                 current_amps = max(self._last_active_amps, next_slot.get("current_a", 0.0))
+                 current_target_soc = next_slot.get("soc", soc)
+             else:
+                 current_power = slot_power
+                 current_amps = slot_amps
+                 current_target_soc = current_slot.get("soc", soc)
+     ```
+2. Повысить версию до `0.3.64` в `const.py` и `manifest.json`.
+3. Скомпилировать, проверить синтаксис и выполнить деплой.
+4. Предложить финальный код пользователю.

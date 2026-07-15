@@ -2493,11 +2493,13 @@ class EmsSchedulerSensor(SensorEntity):
         self._attr_unique_id = f"{entry_id}_scheduler"
         self.entity_id = "sensor.scheduler"
 
-        # Rolling 3-minute buffers for dynamic PV/load switching: (timestamp, watts)
         self._pv_buffer: deque = deque()
         self._load_buffer: deque = deque()
         self._dynamic_sale_pv_active: bool = False
         self._pv_export_soc_override_active: bool = False
+        self._last_active_power_w: float = 0.0
+        self._last_active_amps: float = 0.0
+        self._last_active_hour: int = -1
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -2683,6 +2685,16 @@ class EmsSchedulerSensor(SensorEntity):
         # Apply precalculated dynamic switching
         if base_mode == "sale_pv_no_bat" and self._dynamic_sale_pv_active:
             return "sale_pv"
+
+        # Apply next-hour lookahead to prevent idle state during transition hours
+        if active_override is None and base_mode == "idle" and len(schedule) > 1:
+            next_mode = schedule[1].get("physical_mode")
+            if next_mode:
+                from .const import INVERTER_MODES
+                next_cfg = INVERTER_MODES.get(next_mode)
+                min_b_soc = float(storage.min_bat_soc) if hasattr(storage, "min_bat_soc") else 15.0
+                if next_cfg and next_cfg.discharge_to_house and soc is not None and soc > min_b_soc + 1.0:
+                    return next_mode
 
         # Apply PV surplus override for IDLE mode
         if active_override is None and base_mode == "idle":
@@ -2970,15 +2982,49 @@ class EmsSchedulerSensor(SensorEntity):
             raw_mode = "bat_emergency"
             mapping_reason = "battery_emergency"
 
+        # Track the last active power/amps for the current hour
+        if now.hour != self._last_active_hour:
+            self._last_active_power_w = 0.0
+            self._last_active_amps = 0.0
+            self._last_active_hour = now.hour
+
+        # Check next-hour lookahead to align extra attributes
+        lookahead_active = False
+        if active_override is None and base_mode == "idle" and len(schedule) > 1:
+            next_mode = schedule[1].get("physical_mode")
+            if next_mode:
+                from .const import INVERTER_MODES
+                next_cfg = INVERTER_MODES.get(next_mode)
+                min_b_soc = float(storage.min_bat_soc) if hasattr(storage, "min_bat_soc") else 15.0
+                if next_cfg and next_cfg.discharge_to_house and soc is not None and soc > min_b_soc + 1.0:
+                    lookahead_active = True
+                    raw_mode = next_mode
+                    mapping_reason = f"idle_lookahead_transition: {next_mode}"
+                    if dispatched_plan:
+                        dispatched_plan[0]["physical_mode"] = next_mode
+
         current_power = 0.0
         current_amps = 0.0
         current_target_soc = soc
 
         if dispatched_plan:
             current_slot = dispatched_plan[0]
-            current_power = current_slot.get("power_w", 0.0)
-            current_amps = current_slot.get("current_a", 0.0)
-            current_target_soc = current_slot.get("soc", soc)
+            slot_power = current_slot.get("power_w", 0.0)
+            slot_amps = current_slot.get("current_a", 0.0)
+
+            if slot_power > 0.0:
+                self._last_active_power_w = slot_power
+                self._last_active_amps = slot_amps
+
+            if lookahead_active and len(dispatched_plan) > 1:
+                next_slot = dispatched_plan[1]
+                current_power = max(self._last_active_power_w, next_slot.get("power_w", 0.0))
+                current_amps = max(self._last_active_amps, next_slot.get("current_a", 0.0))
+                current_target_soc = next_slot.get("soc", soc)
+            else:
+                current_power = slot_power
+                current_amps = slot_amps
+                current_target_soc = current_slot.get("soc", soc)
 
         avg_pv = self._avg_buffer(self._pv_buffer)
         avg_load = self._avg_buffer(self._load_buffer)
