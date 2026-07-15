@@ -1,22 +1,18 @@
 import json
 import os
 
-debug_slots_path = r"\\192.168.100.5\config\ems_debug_slots.json"
-if os.path.exists(debug_slots_path):
-    with open(debug_slots_path, "r", encoding="utf-8") as f:
+path = r'\\192.168.100.5\config\ems_debug_slots.json'
+if os.path.exists(path):
+    with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    print("Type of ems_debug_slots:", type(data))
-    if isinstance(data, dict):
-        for k, v in data.items():
-            if isinstance(v, list):
-                print(f"Key: {k} (list of length {len(v)})")
-                if len(v) > 0:
-                    print(f"  First item: {v[0]}")
-            else:
-                print(f"Key: {k} = {v}")
-    elif isinstance(data, list):
-        print(f"List of length {len(data)}")
-        for idx, item in enumerate(data[:10]):
-            print(f"  Item {idx}: Hour {item.get('hour')} Action {item.get('action')} PhysMode {item.get('physical_mode')} SOC {item.get('soc')}%")
+    print("Timestamp:", data.get("timestamp"))
+    print("Boiler DP State:", data.get("boiler_dp_state"))
+    
+    slots = data.get("slots_passed", [])
+    print(f"Total slots: {len(slots)}")
+    for s in slots:
+        # Check today's slots
+        if s.get("date") == "2026-07-08":
+            print(f"H{s.get('hour')}: Mode={s.get('physical_mode')}, Action={s.get('action')}, Buy={s.get('buy_price')}, Sell={s.get('sell_price')}, PV={s.get('pv_kwh')}, Cons={s.get('consumption_kwh')}, SOC={s.get('expected_soc')}, Energy={s.get('energy_kwh')}")
 else:
-    print("Debug slots file not found.")
+    print("ems_debug_slots.json not found")

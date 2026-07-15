@@ -2543,8 +2543,14 @@ class EmsSchedulerCard extends HTMLElement {
     const buyEl = this.shadowRoot.getElementById('info-buy');
     const sellEl = this.shadowRoot.getElementById('info-sell');
     const currEl = this.shadowRoot.getElementById('info-currency');
-    if (buyEl) buyEl.innerText = slot.buy_price !== undefined ? slot.buy_price.toFixed(2) : '0.00';
-    if (sellEl) sellEl.innerText = slot.sell_price !== undefined ? slot.sell_price.toFixed(2) : '0.00';
+    if (buyEl) {
+      const buyPrice = slot.buy_price !== undefined ? parseFloat(slot.buy_price) : 0;
+      buyEl.innerText = !isNaN(buyPrice) ? buyPrice.toFixed(4) : '0.0000';
+    }
+    if (sellEl) {
+      const sellPrice = slot.sell_price !== undefined ? parseFloat(slot.sell_price) : 0;
+      sellEl.innerText = !isNaN(sellPrice) ? sellPrice.toFixed(4) : '0.0000';
+    }
     if (currEl) currEl.innerText = ` ${currency}`;
 
     const genEl = this.shadowRoot.getElementById('info-gen');
