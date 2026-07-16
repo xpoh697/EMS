@@ -56,6 +56,8 @@ from .const import (
     CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
     CONF_MIN_BAT_SOC,
+    CONF_MIN_BAT_SOC_EVENING,
+    CONF_MIN_BAT_SOC_MORNING,
     DEFAULT_STATISTICS_DAYS,
     DEFAULT_FALLBACK_CONSUMPTION,
     DEFAULT_DEBUG,
@@ -65,6 +67,8 @@ from .const import (
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
+    DEFAULT_MIN_BAT_SOC_EVENING,
+    DEFAULT_MIN_BAT_SOC_MORNING,
     SOC_HYSTERESIS,
     CONF_THERMOSTAT_SET_TEMP,
     CONF_ELEC_BOILER_MAX_TEMP,
@@ -350,7 +354,8 @@ async def async_setup_entry(
     bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
     bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
     bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
-    min_bat_soc = options.get(CONF_MIN_BAT_SOC, config.get(CONF_MIN_BAT_SOC, DEFAULT_MIN_BAT_SOC))
+    min_bat_soc_evening = options.get(CONF_MIN_BAT_SOC_EVENING, config.get(CONF_MIN_BAT_SOC_EVENING, DEFAULT_MIN_BAT_SOC_EVENING))
+    min_bat_soc_morning = options.get(CONF_MIN_BAT_SOC_MORNING, config.get(CONF_MIN_BAT_SOC_MORNING, DEFAULT_MIN_BAT_SOC_MORNING))
 
     # Log errors or info for house consumption / basic settings
     if not target_sensor_id:
@@ -423,7 +428,7 @@ async def async_setup_entry(
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Battery voltage entity configured successfully: {bat_voltage_entity_id}")
 
-    ems_log(hass, _LOGGER, logging.INFO, f"Minimum battery SOC configured: {min_bat_soc}%")
+    ems_log(hass, _LOGGER, logging.INFO, f"Minimum battery SOC configured: evening={min_bat_soc_evening}%, morning={min_bat_soc_morning}%")
 
     # Calculate and log battery degradation cost per kWh
     def update_degradation_cost():
@@ -1852,7 +1857,10 @@ class EmsDpSensor(SensorEntity):
             min_sell_price = storage.min_sell_price
             min_discharge_price = storage.min_discharge_price
             bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
-            min_bat_soc = storage.min_bat_soc
+            min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
+            min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
+            current_hour = dt_util.now().hour
+            min_bat_soc = min_bat_soc_evening if 10 <= current_hour < 24 else min_bat_soc_morning
 
             # Parse capacity
             capacity = 5.12
@@ -2095,7 +2103,8 @@ class EmsDpSensor(SensorEntity):
             overrides = storage.get_overrides()
 
             self._reactive_debounce_time = now
-            result = await self.hass.async_add_executor_job(
+            import functools
+            func = functools.partial(
                 self._calculate_strategy_sync,
                 effective_soc,
                 capacity,
@@ -2120,7 +2129,10 @@ class EmsDpSensor(SensorEntity):
                 planned_boiler_tomorrow,
                 self._boiler_average_profile_today,
                 self._boiler_average_profile_tomorrow,
+                min_bat_soc_evening=min_bat_soc_evening,
+                min_bat_soc_morning=min_bat_soc_morning,
             )
+            result = await self.hass.async_add_executor_job(func)
 
             self._state = result.get("current_action", "idle")
             self._charge_hours = result.get("charge_hours", [])
@@ -2193,10 +2205,17 @@ class EmsDpSensor(SensorEntity):
         planned_boiler_tomorrow: list[float] = None,
         boiler_average_today: list[float] = None,
         boiler_average_tomorrow: list[float] = None,
+        min_bat_soc_evening: float | None = None,
+        min_bat_soc_morning: float | None = None,
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
         from .dp_engine import run_unified_dp, DPConfig
         from .const import INVERTER_MODES
+
+        if min_bat_soc_evening is None:
+            min_bat_soc_evening = min_bat_soc
+        if min_bat_soc_morning is None:
+            min_bat_soc_morning = min_bat_soc
 
         if planned_boiler_today is None:
             planned_boiler_today = [0.0] * 24
@@ -2279,6 +2298,8 @@ class EmsDpSensor(SensorEntity):
             battery_capacity=capacity,
             min_energy_to_discharge=min_energy_to_discharge,
             disable_discharge=False,
+            battery_min_soc_evening=min_bat_soc_evening,
+            battery_min_soc_morning=min_bat_soc_morning,
         )
 
         if boiler_average_today is None:
@@ -2692,7 +2713,10 @@ class EmsSchedulerSensor(SensorEntity):
             if next_mode:
                 from .const import INVERTER_MODES
                 next_cfg = INVERTER_MODES.get(next_mode)
-                min_b_soc = float(storage.min_bat_soc) if hasattr(storage, "min_bat_soc") else 15.0
+                next_hour = (now.hour + 1) % 24
+                min_b_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
+                min_b_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
+                min_b_soc = min_b_soc_evening if 10 <= next_hour < 24 else min_b_soc_morning
                 if next_cfg and next_cfg.discharge_to_house and soc is not None and soc > min_b_soc + 1.0:
                     return next_mode
 
@@ -2759,7 +2783,9 @@ class EmsSchedulerSensor(SensorEntity):
         bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
         bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
         bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
-        min_bat_soc = storage.min_bat_soc
+        min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
+        min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
+        min_bat_soc = min_bat_soc_evening if 10 <= now.hour < 24 else min_bat_soc_morning
         bat_soc_emergency_val = options.get(CONF_BAT_SOC_EMERGENCY, config.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY))
         try:
             bat_soc_emergency_val = float(bat_soc_emergency_val)
@@ -2865,9 +2891,15 @@ class EmsSchedulerSensor(SensorEntity):
             else:
                 end_usable = usable_energy
 
+            try:
+                slot_hour = int(slot.get("hour", current_hour))
+            except (ValueError, TypeError):
+                slot_hour = current_hour
+            slot_min_bat_soc = min_bat_soc_evening if 10 <= slot_hour < 24 else min_bat_soc_morning
+
             # Calculate SOC at the end of the hour
-            end_soc = (end_usable / safe_capacity) * 100 + min_bat_soc
-            end_soc = max(min_bat_soc, min(100.0, end_soc))
+            end_soc = (end_usable / safe_capacity) * 100 + slot_min_bat_soc
+            end_soc = max(slot_min_bat_soc, min(100.0, end_soc))
 
             slot_soc = soc if (slot_idx == 0 and soc is not None) else end_soc
             slot_data = {
@@ -2880,10 +2912,6 @@ class EmsSchedulerSensor(SensorEntity):
                 slot_data["action"] = "bat_emergency"
                 slot_data["physical_mode"] = "bat_emergency"
             else:
-                try:
-                    slot_hour = int(slot.get("hour", current_hour))
-                except (ValueError, TypeError):
-                    slot_hour = current_hour
 
                 slot_date = slot.get("date", today_str)
                 slot_override = overrides.get(slot_date, {}).get(str(slot_hour))
@@ -2995,7 +3023,10 @@ class EmsSchedulerSensor(SensorEntity):
             if next_mode:
                 from .const import INVERTER_MODES
                 next_cfg = INVERTER_MODES.get(next_mode)
-                min_b_soc = float(storage.min_bat_soc) if hasattr(storage, "min_bat_soc") else 15.0
+                next_hour = (now.hour + 1) % 24
+                min_b_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
+                min_b_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
+                min_b_soc = min_b_soc_evening if 10 <= next_hour < 24 else min_b_soc_morning
                 if next_cfg and next_cfg.discharge_to_house and soc is not None and soc > min_b_soc + 1.0:
                     lookahead_active = True
                     raw_mode = next_mode
@@ -4726,10 +4757,14 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             except (ValueError, TypeError):
                 min_bat_soc = 20.0
 
+            min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", min_bat_soc))
+            min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", min_bat_soc))
+
             battery_cycle_cost = float(self.hass.data.get(DOMAIN, {}).get("bat_degradation_per_kwh", 0.0))
 
             from .boiler_dp_engine import run_boiler_dp
-            current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(
+            import functools
+            func = functools.partial(
                 run_boiler_dp,
                 slots,
                 t_gas_val,
@@ -4750,7 +4785,10 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 min_bat_soc,
                 vacation_mode,
                 battery_cycle_cost,
+                min_bat_soc_evening=min_bat_soc_evening,
+                min_bat_soc_morning=min_bat_soc_morning,
             )
+            current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(func)
 
             # Apply occupancy override for gas heating
             if not self._are_people_home():

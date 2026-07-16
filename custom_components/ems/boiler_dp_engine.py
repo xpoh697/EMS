@@ -94,12 +94,18 @@ def run_boiler_dp(
     min_bat_soc: float = 20.0,
     vacation_mode: bool = False,
     battery_cycle_cost: float = 0.0,
+    min_bat_soc_evening: float | None = None,
+    min_bat_soc_morning: float | None = None,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run Dynamic Programming strategy optimizer for hot water boiler.
 
     Returns (status, schedule_list, stats_dict).
     """
     # 1. Validation
+    if min_bat_soc_evening is None:
+        min_bat_soc_evening = min_bat_soc
+    if min_bat_soc_morning is None:
+        min_bat_soc_morning = min_bat_soc
     eff_gas_only = cal_data.get("gas_only", {}).get("efficiency_c_per_m3", 0.0)
     eff_gas_pump = cal_data.get("gas_with_pump", {}).get("efficiency_c_per_m3", 0.0)
     eff_elec_only = cal_data.get("elec_only", {}).get("efficiency_c_per_kwh", 0.0)
@@ -376,6 +382,9 @@ def run_boiler_dp(
         is_tomorrow = slot.get("date") != today_date
         max_solar_sell = max_sell_tomorrow if is_tomorrow else max_sell_today
         
+        slot_hour = int(slot.get("hour", 0))
+        slot_min_bat_soc = min_bat_soc_evening if 10 <= slot_hour < 24 else min_bat_soc_morning
+        
         # Reconstruct baseline SOC trajectory by adding back planned boiler energy (decouples feedback loop)
         actual_planned = float(slot.get("actual_planned_boiler_kwh", 0.0))
         safe_capacity = bat_capacity if bat_capacity > 0.0 else 5.12
@@ -412,7 +421,7 @@ def run_boiler_dp(
                 consumption_kwh = float(slot.get("consumption_kwh", 0.0))
                 pv_surplus = max(0.0, pv_kwh - consumption_kwh)
                 discharge_allowed = getattr(mode_config, "discharge_to_house", False)
-                bat_avail = max(0.0, (adjusted_soc - min_bat_soc) / 100.0 * safe_capacity) if discharge_allowed else 0.0
+                bat_avail = max(0.0, (adjusted_soc - slot_min_bat_soc) / 100.0 * safe_capacity) if discharge_allowed else 0.0
                 available_local = pv_surplus + bat_avail
                 boiler_power = max(0.1, float(boiler_hourly_draw))
                 if available_local <= 0.0:
@@ -438,7 +447,7 @@ def run_boiler_dp(
             # Battery energy stored above min_bat_soc using adjusted_soc, only if discharge to house is allowed
             discharge_allowed = getattr(mode_config, "discharge_to_house", False) if mode_config else False
             if discharge_allowed:
-                battery_energy_above_min = max(0.0, (adjusted_soc - min_bat_soc) / 100.0 * safe_capacity)
+                battery_energy_above_min = max(0.0, (adjusted_soc - slot_min_bat_soc) / 100.0 * safe_capacity)
             else:
                 battery_energy_above_min = 0.0
 

@@ -24,7 +24,8 @@ class EmsScheduleStorage:
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY.format(entry_id=entry_id))
         self._overrides: dict[str, dict[str, str]] = {}  # date -> hour -> action
         self.last_override_change: str | None = None
-        self.min_bat_soc: float = 20.0
+        self.min_bat_soc_evening: float = 15.0
+        self.min_bat_soc_morning: float = 15.0
         self.min_sell_price: float = 0.0
         self.min_discharge_price: float = 0.0
         self.min_energy_to_discharge: float = 0.0
@@ -32,28 +33,50 @@ class EmsScheduleStorage:
         self.boiler_heating_end_hour: float = 23.0
         self.boiler_auto_temp_limit: float = 60.0
 
+    @property
+    def min_bat_soc(self) -> float:
+        """Get minimum battery SOC based on current hour."""
+        hour = dt_util.now().hour
+        if 10 <= hour < 24:
+            return self.min_bat_soc_evening
+        return self.min_bat_soc_morning
+
+    @min_bat_soc.setter
+    def min_bat_soc(self, value: float) -> None:
+        """Legacy setter for min_bat_soc."""
+        self.min_bat_soc_evening = value
+        self.min_bat_soc_morning = value
+
     async def async_load(self, entry: ConfigEntry | None = None) -> None:
         """Load data from JSON storage."""
         data = await self._store.async_load()
         
         # Fallbacks from config entry if available (migration of settings)
-        fallback_min_bat_soc = 20.0
+        fallback_min_bat_soc_evening = 15.0
+        fallback_min_bat_soc_morning = 15.0
         fallback_min_sell_price = 0.0
         fallback_min_discharge_price = 0.0
         fallback_min_energy_to_discharge = 0.0
         if entry is not None:
             from .const import (
                 CONF_MIN_BAT_SOC,
+                CONF_MIN_BAT_SOC_EVENING,
+                CONF_MIN_BAT_SOC_MORNING,
                 CONF_MIN_SELL_PRICE,
                 CONF_MIN_DISCHARGE_PRICE,
                 CONF_MIN_ENERGY_TO_DISCHARGE,
-                DEFAULT_MIN_BAT_SOC,
+                DEFAULT_MIN_BAT_SOC_EVENING,
+                DEFAULT_MIN_BAT_SOC_MORNING,
                 DEFAULT_MIN_SELL_PRICE,
                 DEFAULT_MIN_DISCHARGE_PRICE,
                 DEFAULT_MIN_ENERGY_TO_DISCHARGE,
             )
-            fallback_min_bat_soc = entry.options.get(
-                CONF_MIN_BAT_SOC, entry.data.get(CONF_MIN_BAT_SOC, DEFAULT_MIN_BAT_SOC)
+            old_soc = entry.options.get(CONF_MIN_BAT_SOC, entry.data.get(CONF_MIN_BAT_SOC, 15.0))
+            fallback_min_bat_soc_evening = entry.options.get(
+                CONF_MIN_BAT_SOC_EVENING, entry.data.get(CONF_MIN_BAT_SOC_EVENING, old_soc)
+            )
+            fallback_min_bat_soc_morning = entry.options.get(
+                CONF_MIN_BAT_SOC_MORNING, entry.data.get(CONF_MIN_BAT_SOC_MORNING, old_soc)
             )
             fallback_min_sell_price = entry.options.get(
                 CONF_MIN_SELL_PRICE, entry.data.get(CONF_MIN_SELL_PRICE, DEFAULT_MIN_SELL_PRICE)
@@ -68,7 +91,8 @@ class EmsScheduleStorage:
         if data is None:
             self._overrides = {}
             self.last_override_change = None
-            self.min_bat_soc = fallback_min_bat_soc
+            self.min_bat_soc_evening = fallback_min_bat_soc_evening
+            self.min_bat_soc_morning = fallback_min_bat_soc_morning
             self.min_sell_price = fallback_min_sell_price
             self.min_discharge_price = fallback_min_discharge_price
             self.min_energy_to_discharge = fallback_min_energy_to_discharge
@@ -78,7 +102,13 @@ class EmsScheduleStorage:
         else:
             self._overrides = data.get("overrides", {})
             self.last_override_change = data.get("last_override_change")
-            self.min_bat_soc = data.get("min_bat_soc", fallback_min_bat_soc)
+            
+            old_soc_in_json = data.get("min_bat_soc")
+            fallback_evening_from_json = old_soc_in_json if old_soc_in_json is not None else fallback_min_bat_soc_evening
+            fallback_morning_from_json = old_soc_in_json if old_soc_in_json is not None else fallback_min_bat_soc_morning
+            
+            self.min_bat_soc_evening = data.get("min_bat_soc_evening", fallback_evening_from_json)
+            self.min_bat_soc_morning = data.get("min_bat_soc_morning", fallback_morning_from_json)
             self.min_sell_price = data.get("min_sell_price", fallback_min_sell_price)
             try:
                 self.min_discharge_price = float(data.get("min_discharge_price", fallback_min_discharge_price))
@@ -100,6 +130,8 @@ class EmsScheduleStorage:
             "overrides": self._overrides,
             "last_override_change": self.last_override_change,
             "min_bat_soc": self.min_bat_soc,
+            "min_bat_soc_evening": self.min_bat_soc_evening,
+            "min_bat_soc_morning": self.min_bat_soc_morning,
             "min_sell_price": self.min_sell_price,
             "min_discharge_price": self.min_discharge_price,
             "min_energy_to_discharge": self.min_energy_to_discharge,

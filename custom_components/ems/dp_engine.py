@@ -33,6 +33,16 @@ class DPConfig:
     battery_capacity: float
     min_energy_to_discharge: float = 0.0
     disable_discharge: bool = False
+    battery_min_soc_evening: float | None = None
+    battery_min_soc_morning: float | None = None
+
+    def get_min_soc(self, hour: int) -> float:
+        """Get the hourly minimum battery SOC."""
+        min_ev = self.battery_min_soc_evening if self.battery_min_soc_evening is not None else float(self.battery_min_soc)
+        min_mo = self.battery_min_soc_morning if self.battery_min_soc_morning is not None else float(self.battery_min_soc)
+        if 10 <= hour < 24:
+            return min_ev
+        return min_mo
 
 
 def hours_from_now(price_entry: dict) -> float:
@@ -124,10 +134,12 @@ def run_unified_dp(
     neg_inf = float("-inf")
 
     # Pre-calculate CVCC charge multipliers for all states to optimize loop performance
+    current_hour = scaled_slots[0]["hour"] if scaled_slots else 0
+    current_min_soc = config.get_min_soc(current_hour)
     cvcc_multipliers = []
     for s_idx in range(max_energy_idx + 1):
         usable_energy = s_idx * energy_step
-        soc_val = config.battery_min_soc + (usable_energy / config.battery_capacity * 100.0)
+        soc_val = current_min_soc + (usable_energy / config.battery_capacity * 100.0)
         clamped_soc = min(100.0, max(0.0, soc_val))
         cvcc_multipliers.append(get_cvcc_charge_multiplier(clamped_soc))
 
@@ -339,10 +351,10 @@ def run_unified_dp(
                 if override_action == "grid_charge":
                     override_target_soc = 100.0
                 elif override_action == "discharge":
-                    override_target_soc = float(config.battery_min_soc)
+                    override_target_soc = float(config.get_min_soc(slot.get("hour", 0)))
 
             if override_target_soc is not None and config.battery_capacity > 0.0 and energy_step > 0.0:
-                target_usable = config.battery_capacity * (override_target_soc - config.battery_min_soc) / 100.0
+                target_usable = config.battery_capacity * (override_target_soc - config.get_min_soc(slot.get("hour", 0))) / 100.0
                 target_nsi = max(0, min(max_energy_idx, int(round(target_usable / energy_step))))
 
         # Resolve override to physical mode config
@@ -586,7 +598,7 @@ def run_unified_dp(
         _traj_usable = current_usable
         _traj_lines: list[str] = []
         for _t_slot, _t_act, _t_amt in zip(scaled_slots, types_by_slot, amounts_by_slot, strict=False):
-            _t_soc = max(0.0, min(100.0, config.battery_min_soc + (_traj_usable / config.battery_capacity * 100.0)))
+            _t_soc = max(0.0, min(100.0, config.get_min_soc(_t_slot.get('hour', 0)) + (_traj_usable / config.battery_capacity * 100.0)))
             _traj_lines.append(
                 f"  {_t_slot.get('date')} {_t_slot.get('hour'):02d}h  "
                 f"act={_ACT_NAMES.get(_t_act, str(_t_act)):<8}  "
@@ -626,7 +638,7 @@ def run_unified_dp(
             "EMS DP trajectory (best_value=%.4f, end_SOC=%.1f%%):\n%s\n"
             "GRID_CHARGE slots:\n%s",
             best_total_value,
-            max(0.0, min(100.0, config.battery_min_soc + (best_final_idx * energy_step / config.battery_capacity * 100.0))),
+            max(0.0, min(100.0, config.get_min_soc(scaled_slots[-1].get('hour', 0) if scaled_slots else 0) + (best_final_idx * energy_step / config.battery_capacity * 100.0))),
             "\n".join(_traj_lines),
             _gc_summary,
         )
@@ -647,7 +659,7 @@ def run_unified_dp(
 
     for slot, act, amount in zip(scaled_slots, types_by_slot, amounts_by_slot, strict=False):
         start_usable = usable_energy
-        soc_val = max(0.0, min(100.0, config.battery_min_soc + (start_usable / config.battery_capacity * 100.0)))
+        soc_val = max(0.0, min(100.0, config.get_min_soc(slot.get('hour', 0)) + (start_usable / config.battery_capacity * 100.0)))
         expected_trajectory.append(round(soc_val, 2))
 
         # Apply post-processing filter for small grid discharges (exporters)
@@ -700,9 +712,10 @@ def run_unified_dp(
             battery_to_grid = max(0.0, amount - battery_to_home)
             grid_import = max(0.0, home_deficit - amount)
             total_export += battery_to_grid
+            slot_min_soc = config.get_min_soc(slot.get('hour', 0))
             soc_limit = max(
-                config.battery_min_soc,
-                config.battery_min_soc + (max(0.0, end_usable) / config.battery_capacity * 100),
+                slot_min_soc,
+                slot_min_soc + (max(0.0, end_usable) / config.battery_capacity * 100),
             )
             discharge_hours.append({
                 "date": slot["date"],

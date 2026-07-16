@@ -22,7 +22,8 @@ async def async_setup_entry(
     """Set up the EMS number entities from config entry."""
     storage = hass.data[DOMAIN][entry.entry_id]["storage"]
     async_add_entities([
-        EmsMinBatSocNumber(entry.entry_id, entry.title, storage),
+        EmsMinBatSocEveningNumber(entry.entry_id, entry.title, storage),
+        EmsMinBatSocMorningNumber(entry.entry_id, entry.title, storage),
         EmsMinSellPriceNumber(entry.entry_id, entry.title, storage),
         EmsMinDischargePriceNumber(entry.entry_id, entry.title, storage),
         EmsMinEnergyToDischargeNumber(entry.entry_id, entry.title, storage),
@@ -32,8 +33,8 @@ async def async_setup_entry(
     ])
 
 
-class EmsMinBatSocNumber(NumberEntity):
-    """EMS Minimum Battery SOC number entity."""
+class EmsMinBatSocEveningNumber(NumberEntity):
+    """EMS Minimum Battery SOC Evening number entity."""
 
     _attr_has_entity_name = True
     _attr_native_min_value = 0.0
@@ -48,9 +49,9 @@ class EmsMinBatSocNumber(NumberEntity):
         self._entry_id = entry_id
         self._device_name = device_name
         self._storage = storage
-        self._attr_name = "Minimum Battery SOC"
-        self._attr_unique_id = f"{entry_id}_min_bat_soc"
-        self.entity_id = "number.ems_min_bat_soc"
+        self._attr_name = "Min bat SOC evening"
+        self._attr_unique_id = f"{entry_id}_min_bat_soc_evening"
+        self.entity_id = "number.ems_min_bat_soc_evening"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -65,13 +66,59 @@ class EmsMinBatSocNumber(NumberEntity):
 
     @property
     def native_value(self) -> float:
-        """Return the current minimum battery SOC."""
-        return self._storage.min_bat_soc
+        """Return the current minimum battery SOC for evening."""
+        return self._storage.min_bat_soc_evening
 
     async def async_set_native_value(self, value: float) -> None:
-        """Update the minimum battery SOC value."""
+        """Update the minimum battery SOC evening value."""
         clamped_value = float(max(self.native_min_value, min(value, self.native_max_value)))
-        self._storage.min_bat_soc = clamped_value
+        self._storage.min_bat_soc_evening = clamped_value
+        await self._storage.async_save()
+        self.async_write_ha_state()
+        # Fire event to trigger immediate DP recalculation
+        self.hass.bus.async_fire("ems_schedule_updated")
+
+
+class EmsMinBatSocMorningNumber(NumberEntity):
+    """EMS Minimum Battery SOC Morning number entity."""
+
+    _attr_has_entity_name = True
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 100.0
+    _attr_native_step = 1.0
+    _attr_mode = NumberMode.BOX
+    _attr_icon = "mdi:battery-arrow-down-outline"
+    _attr_native_unit_of_measurement = "%"
+
+    def __init__(self, entry_id: str, device_name: str, storage: Any) -> None:
+        """Initialize the number entity."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._storage = storage
+        self._attr_name = "Min bat SOC morning"
+        self._attr_unique_id = f"{entry_id}_min_bat_soc_morning"
+        self.entity_id = "number.ems_min_bat_soc_morning"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        """Return the current minimum battery SOC for morning."""
+        return self._storage.min_bat_soc_morning
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the minimum battery SOC morning value."""
+        clamped_value = float(max(self.native_min_value, min(value, self.native_max_value)))
+        self._storage.min_bat_soc_morning = clamped_value
         await self._storage.async_save()
         self.async_write_ha_state()
         # Fire event to trigger immediate DP recalculation

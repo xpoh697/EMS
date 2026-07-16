@@ -156,8 +156,11 @@
       }
     },
     "number": {
-      "min_bat_soc": {
-        "name": "Минимальный заряд АКБ"
+      "min_bat_soc_evening": {
+        "name": "Min bat SOC evening"
+      },
+      "min_bat_soc_morning": {
+        "name": "Min bat SOC morning"
       },
       "min_sell_price": {
         "name": "Минимальная цена продажи"

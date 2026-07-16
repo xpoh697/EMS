@@ -72,6 +72,8 @@
           "bat_soc_entity": "Battery State of Charge (SOC) sensor (entity)",
           "bat_voltage": "Battery voltage sensor (entity)",
           "min_bat_soc": "Minimum battery SOC (%)",
+          "min_bat_soc_evening": "Min bat SOC evening (%)",
+          "min_bat_soc_morning": "Min bat SOC morning (%)",
           "bat_soc_emergency": "Emergency battery SOC threshold (%)"
         }
       },
@@ -155,8 +157,11 @@
       }
     },
     "number": {
-      "min_bat_soc": {
-        "name": "Minimum battery SOC"
+      "min_bat_soc_evening": {
+        "name": "Min bat SOC evening"
+      },
+      "min_bat_soc_morning": {
+        "name": "Min bat SOC morning"
       },
       "min_sell_price": {
         "name": "Minimum sell price"

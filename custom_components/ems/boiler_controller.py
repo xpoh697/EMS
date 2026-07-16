@@ -1785,6 +1785,14 @@ class BoilerController:
         t_elec = self._get_elec_temp()
         warm_diff = float(self.config.get(CONF_BOILER_WARM_DIFF, DEFAULT_BOILER_WARM_DIFF))
 
+        # Инициализация флага при первом запуске: если оверрайд еще не был взведен,
+        # но клапан байпаса в HA уже открыт, считаем его активным
+        if not hasattr(self, "_warm_boiler_bypass_initialized"):
+            self._warm_boiler_bypass_initialized = True
+            current_valve = self.hass.states.get(self.bypass_valve) if self.bypass_valve else None
+            if current_valve and current_valve.state == STATE_ON:
+                self._warm_boiler_bypass_active = True
+
         if t_elec is not None:
             try:
                 t_elec_val = float(t_elec)
@@ -1800,7 +1808,13 @@ class BoilerController:
                             t_elec_val, threshold_off
                         )
                 else:
-                    if t_elec_val >= threshold_on:
+                    is_heater_on = False
+                    if self.elec_heater:
+                        heater_state = self.hass.states.get(self.elec_heater)
+                        is_heater_on = heater_state and heater_state.state == STATE_ON
+
+                    is_heating_active = is_heater_on or ("ELEC" in mode)
+                    if t_elec_val >= threshold_on and is_heating_active:
                         self._warm_boiler_bypass_active = True
                         _LOGGER.info(
                             "EMS Boiler Controller: Electric boiler temperature (%.1f°C) reached warm override threshold (%.1f°C). "

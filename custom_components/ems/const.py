@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.64"
+VERSION = "0.3.65"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -48,6 +48,8 @@ CONF_BAT_CUR_POWER_ENTITY = "bat_cur_power_entity"
 CONF_BAT_SOC_ENTITY = "bat_soc_entity"
 CONF_BAT_VOLTAGE = "bat_voltage"
 CONF_MIN_BAT_SOC = "min_bat_soc"
+CONF_MIN_BAT_SOC_EVENING = "min_bat_soc_evening"
+CONF_MIN_BAT_SOC_MORNING = "min_bat_soc_morning"
 CONF_BAT_SOC_EMERGENCY = "bat_soc_emergency"
 
 # Default values
@@ -63,6 +65,8 @@ DEFAULT_BAT_PRICE = 0.0
 DEFAULT_BAT_CYCLES = 6000
 DEFAULT_BAT_MAX_POWER = 3000.0
 DEFAULT_MIN_BAT_SOC = 20.0
+DEFAULT_MIN_BAT_SOC_EVENING = 15.0
+DEFAULT_MIN_BAT_SOC_MORNING = 15.0
 DEFAULT_BAT_SOC_EMERGENCY = 10.0
 
 DEFAULT_THERMOSTAT_SET_TEMP = 45.0

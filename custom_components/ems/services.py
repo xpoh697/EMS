@@ -84,7 +84,9 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
             bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
             bat_max_power_w = float(options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)))
-            min_bat_soc = float(storage.min_bat_soc) if hasattr(storage, "min_bat_soc") else DEFAULT_MIN_BAT_SOC
+            min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
+            min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
+            min_bat_soc = min_bat_soc_evening if 10 <= hour < 24 else min_bat_soc_morning
 
             # Parse battery capacity (kWh)
             capacity_kwh = 5.12
