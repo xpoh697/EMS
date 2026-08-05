@@ -435,18 +435,32 @@ async def async_setup_entry(
     # Calculate and log battery degradation cost per kWh
     def update_degradation_cost():
         """Fetch capacity and calculate battery degradation cost per kWh."""
-        capacity = 0.0
+        from .const import CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK
+        bat_capacity_fallback = float(entry.options.get(CONF_BAT_CAPACITY_FALLBACK, entry.data.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
+        
+        # Start with cached capacity or config fallback
+        capacity = hass.data.get(DOMAIN, {}).get("last_known_capacity", bat_capacity_fallback)
+
         if bat_capacity_entity_id:
             cap_state = hass.states.get(bat_capacity_entity_id)
             if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
                 try:
-                    capacity = float(cap_state.state)
-                    # Convert to kWh if unit is Wh or capacity value seems to be in Wh
-                    unit = cap_state.attributes.get("unit_of_measurement")
-                    if unit == "Wh" or capacity > 100.0:
-                        capacity = capacity / 1000.0
+                    val = float(cap_state.state)
+                    if val > 0.0:
+                        unit = cap_state.attributes.get("unit_of_measurement")
+                        if unit == "Wh" or val > 100.0:
+                            val = val / 1000.0
+                        capacity = val
+                        
+                        # Cache the valid capacity globally
+                        if DOMAIN not in hass.data:
+                            hass.data[DOMAIN] = {}
+                        hass.data[DOMAIN]["last_known_capacity"] = val
                 except (ValueError, TypeError):
                     pass
+
+        if capacity <= 0.0:
+            capacity = bat_capacity_fallback
 
         # Calculate degradation
         degradation = calculate_battery_degradation(bat_price, bat_cycles, capacity)
