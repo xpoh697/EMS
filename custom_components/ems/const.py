@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.65"
+VERSION = "0.3.120"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -20,10 +20,13 @@ CONF_DEBUG = "debug"
 CONF_VACATION_MODE_ENTITY = "vacation_mode_entity"
 CONF_CALIBRATION_TYPE = "calibration_type"
 CONF_WATER_FLOW_SENSOR = "water_flow_sensor"
+CONF_TOTAL_WATER_METER_SENSOR = "total_water_meter_sensor"
 CONF_PEOPLE_HOME_SENSOR = "people_home_sensor"
 
 CONF_HW_CIRCULATION_PUMP = "hw_circulation_pump"
 CONF_HW_CIRCULATION_RETURN_TEMP = "hw_circulation_return_temp"
+CONF_CWU_REQUEST_ENTITY = "cwu_request_entity"
+CONF_CWU_SETPOINT_ENTITY = "cwu_setpoint_entity"
 
 # Thermostat/Boiler settings
 CONF_THERMOSTAT_SET_TEMP = "thermostat_set_temp"
@@ -43,6 +46,7 @@ CONF_MIN_ENERGY_TO_DISCHARGE = "min_energy_to_discharge"
 CONF_BAT_PRICE = "bat_price"
 CONF_BAT_CYCLES = "bat_cycles"
 CONF_BAT_CAPACITY_ENTITY = "bat_capacity_entity"
+CONF_BAT_CAPACITY_FALLBACK = "bat_capacity_fallback"
 CONF_BAT_MAX_POWER = "bat_max_power"
 CONF_BAT_CUR_POWER_ENTITY = "bat_cur_power_entity"
 CONF_BAT_SOC_ENTITY = "bat_soc_entity"
@@ -63,6 +67,7 @@ DEFAULT_MIN_DISCHARGE_PRICE = 0.0
 DEFAULT_MIN_ENERGY_TO_DISCHARGE = 0.0
 DEFAULT_BAT_PRICE = 0.0
 DEFAULT_BAT_CYCLES = 6000
+DEFAULT_BAT_CAPACITY_FALLBACK = 15.0
 DEFAULT_BAT_MAX_POWER = 3000.0
 DEFAULT_MIN_BAT_SOC = 20.0
 DEFAULT_MIN_BAT_SOC_EVENING = 15.0

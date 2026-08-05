@@ -67,6 +67,7 @@
           "bat_price": "Battery price",
           "bat_cycles": "Battery cycles",
           "bat_capacity_entity": "Battery capacity sensor (entity)",
+          "bat_capacity_fallback": "Battery capacity fallback (kWh)",
           "bat_max_power": "Battery max power (W)",
           "bat_cur_power_entity": "Battery current power sensor (entity)",
           "bat_soc_entity": "Battery State of Charge (SOC) sensor (entity)",
@@ -91,6 +92,8 @@
           "bypass_valve": "Bypass Valve Switch (On=Open, Off=Closed)",
           "hw_circulation_pump": "Hot Water Circulation Pump Switch",
           "hw_circulation_return_temp": "HW Circulation Return Temperature Sensor",
+          "cwu_request_entity": "CWU Request (input_boolean)",
+          "cwu_setpoint_entity": "CWU Setpoint (input_number)",
           "thermostat_set_temp": "Thermostat Target Temperature (HW mix)",
           "elec_boiler_max_temp": "Electric Boiler Maximum Temp",
           "gas_boiler_max_temp": "Gas Boiler Maximum Temp",
@@ -98,7 +101,8 @@
           "elec_boiler_capacity": "Electric Boiler Capacity (L)",
           "gas_cost_m3": "Cost per 1 m³ of gas",
           "calibration_type": "Standby loss calibration mode",
-          "water_flow_sensor": "Instantaneous water flow sensor",
+          "total_water_meter_sensor": "Total Cold Water Meter Sensor (m³ or L)",
+          "water_flow_sensor": "Instantaneous water flow rate sensor (L/min, optional)",
           "boiler_warm_diff": "Warm Boiler Override Temperature Difference (°C)"
         }
       }

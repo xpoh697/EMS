@@ -23,6 +23,7 @@ from .const import (
     CONF_VACATION_MODE_ENTITY,
     CONF_CALIBRATION_TYPE,
     CONF_WATER_FLOW_SENSOR,
+    CONF_TOTAL_WATER_METER_SENSOR,
     CONF_PEOPLE_HOME_SENSOR,
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
@@ -31,6 +32,7 @@ from .const import (
     CONF_BAT_PRICE,
     CONF_BAT_CYCLES,
     CONF_BAT_CAPACITY_ENTITY,
+    CONF_BAT_CAPACITY_FALLBACK,
     CONF_BAT_MAX_POWER,
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_SOC_ENTITY,
@@ -39,6 +41,8 @@ from .const import (
     CONF_BAT_SOC_EMERGENCY,
     CONF_HW_CIRCULATION_PUMP,
     CONF_HW_CIRCULATION_RETURN_TEMP,
+    CONF_CWU_REQUEST_ENTITY,
+    CONF_CWU_SETPOINT_ENTITY,
     CONF_THERMOSTAT_SET_TEMP,
     CONF_ELEC_BOILER_MAX_TEMP,
     CONF_GAS_BOILER_MAX_TEMP,
@@ -50,6 +54,7 @@ from .const import (
     DEFAULT_MIN_SELL_PRICE,
     DEFAULT_BAT_PRICE,
     DEFAULT_BAT_CYCLES,
+    DEFAULT_BAT_CAPACITY_FALLBACK,
     DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
     DEFAULT_BAT_SOC_EMERGENCY,
@@ -337,6 +342,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
         bat_price = self._user_input.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE)
         bat_cycles = self._user_input.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES)
+        bat_capacity_fallback = self._user_input.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)
         bat_max_power = self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)
         bat_soc_emergency = self._user_input.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY)
 
@@ -369,6 +375,14 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             schema_dict[vol.Required(CONF_BAT_CAPACITY_ENTITY)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
+
+        schema_dict[vol.Required(CONF_BAT_CAPACITY_FALLBACK, default=bat_capacity_fallback)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.1,
+                step=0.1,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
 
         schema_dict[vol.Required(CONF_BAT_MAX_POWER, default=bat_max_power)] = selector.NumberSelector(
             selector.NumberSelectorConfig(
@@ -464,6 +478,27 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                     selector.EntitySelectorConfig(domain=domain)
                 )
 
+        # Optional CWU Request and Setpoint entities
+        val_cwu_req = get_value(CONF_CWU_REQUEST_ENTITY)
+        if val_cwu_req:
+            schema_dict[vol.Optional(CONF_CWU_REQUEST_ENTITY, default=val_cwu_req)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["input_boolean", "binary_sensor", "switch"])
+            )
+        else:
+            schema_dict[vol.Optional(CONF_CWU_REQUEST_ENTITY)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["input_boolean", "binary_sensor", "switch"])
+            )
+
+        val_cwu_sp = get_value(CONF_CWU_SETPOINT_ENTITY)
+        if val_cwu_sp:
+            schema_dict[vol.Optional(CONF_CWU_SETPOINT_ENTITY, default=val_cwu_sp)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["input_number", "number", "sensor"])
+            )
+        else:
+            schema_dict[vol.Optional(CONF_CWU_SETPOINT_ENTITY)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["input_number", "number", "sensor"])
+            )
+
         # Безопасное получение числовых значений
         gas_cap = self._user_input.get("gas_boiler_capacity", 100)
         elec_cap = self._user_input.get("elec_boiler_capacity", 100)
@@ -507,6 +542,17 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 translation_key="calibration_type"
             )
         )
+
+        # Optional: CONF_TOTAL_WATER_METER_SENSOR (Total Water Meter in m³ or Liters)
+        val_meter = get_value(CONF_TOTAL_WATER_METER_SENSOR)
+        if val_meter:
+            schema_dict[vol.Optional(CONF_TOTAL_WATER_METER_SENSOR, default=val_meter)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_TOTAL_WATER_METER_SENSOR)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
 
         # Optional: CONF_WATER_FLOW_SENSOR
         val_flow = get_value(CONF_WATER_FLOW_SENSOR)

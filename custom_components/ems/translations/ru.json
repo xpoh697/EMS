@@ -67,11 +67,14 @@
           "bat_price": "Стоимость АКБ",
           "bat_cycles": "Количество циклов АКБ",
           "bat_capacity_entity": "Сенсор емкости АКБ",
+          "bat_capacity_fallback": "Резервная емкость АКБ (кВтч)",
           "bat_max_power": "Максимальная мощность АКБ (Вт)",
           "bat_cur_power_entity": "Сенсор текущей мощности АКБ",
           "bat_soc_entity": "Сенсор уровня заряда АКБ (SOC)",
           "bat_voltage": "Сенсор напряжения АКБ",
           "min_bat_soc": "Минимальный заряд АКБ (%)",
+          "min_bat_soc_evening": "Min bat SOC evening (%)",
+          "min_bat_soc_morning": "Min bat SOC morning (%)",
           "bat_soc_emergency": "Аварийный порог заряда АКБ (%)"
         }
       },
@@ -89,6 +92,8 @@
           "bypass_valve": "Переключатель байпасного клапана (On=Открыт, Off=Закрыт)",
           "hw_circulation_pump": "Переключатель циркуляционного насоса ГВС",
           "hw_circulation_return_temp": "Сенсор температуры обратки циркуляции ГВС",
+          "cwu_request_entity": "Запрос CWU (input_boolean)",
+          "cwu_setpoint_entity": "CWU setpoint (input_number)",
           "thermostat_set_temp": "Целевая температура термостата дома",
           "elec_boiler_max_temp": "Максимальная температура электробойлера",
           "gas_boiler_max_temp": "Максимальная температура газового бойлера",
@@ -96,7 +101,8 @@
           "elec_boiler_capacity": "Емкость электробойлера (л)",
           "gas_cost_m3": "Стоимость за 1 м³ газа",
           "calibration_type": "Режим калибровки остывания",
-          "water_flow_sensor": "Датчик моментального расхода воды",
+          "total_water_meter_sensor": "Общий накопительный счетчик холодной воды на вводе (м³ или L)",
+          "water_flow_sensor": "Датчик моментального протока воды (л/мин, необязательно)",
           "people_home_sensor": "Сенсор присутствия (Кол-во людей/Присутствие)",
           "boiler_warm_diff": "Разница температур оверрайда теплого бойлера (°C)"
         }

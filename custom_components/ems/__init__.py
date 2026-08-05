@@ -151,6 +151,8 @@ async def ws_get_boiler_config(hass: HomeAssistant, connection: websocket_api.Ac
         "valve":        config.get("bypass_valve"),
         "hw_pump":      config.get("hw_circulation_pump"),
         "hw_return_temp": config.get("hw_circulation_return_temp"),
+        "cwu_request_entity": config.get("cwu_request_entity"),
+        "cwu_setpoint_entity": config.get("cwu_setpoint_entity"),
         "mode_select":  f"select.ems_boiler_mode",
         "consumption_entity": consumption_entity or "sensor.load_consumption_2",
         "heating_start_hour": "number.ems_boiler_heating_start_hour",
@@ -197,6 +199,8 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
         CONF_PRICE_BUY_SENSOR,
         CONF_PRICE_SELL_SENSOR,
         CONF_BAT_CAPACITY_ENTITY,
+        CONF_BAT_CAPACITY_FALLBACK,
+        DEFAULT_BAT_CAPACITY_FALLBACK,
     )
 
     load_entity = config.get(CONF_TOTAL_LOAD_CONSUMPTION)
@@ -213,15 +217,18 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
         load_entity, pv_entity, import_entity, export_entity, soc_entity, buy_entity, sell_entity, cap_entity
     )
 
-    capacity = 5.12
+    bat_capacity_fallback = float(config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK))
+    capacity = hass.data[DOMAIN].get("last_known_capacity", bat_capacity_fallback)
     if cap_entity:
         state = hass.states.get(cap_entity)
         if state and state.state not in (None, "unknown", "unavailable"):
             try:
-                capacity = float(state.state)
-                unit = state.attributes.get("unit_of_measurement")
-                if unit == "Wh" or capacity > 100.0:
-                    capacity /= 1000.0
+                val = float(state.state)
+                if val > 0.0:
+                    unit = state.attributes.get("unit_of_measurement")
+                    if unit == "Wh" or val > 100.0:
+                        val /= 1000.0
+                    capacity = val
             except (ValueError, TypeError):
                 pass
     _LOGGER.debug("ws_get_history_30_days: battery capacity=%s", capacity)
@@ -514,6 +521,9 @@ class CardStaticView(HomeAssistantView):
             return web.Response(status=404)
 
         try:
-            return web.FileResponse(file_path)
+            return web.FileResponse(
+                file_path,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate, max-age=0"}
+            )
         except Exception:
             return web.Response(status=500)

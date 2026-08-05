@@ -51,6 +51,7 @@ from .const import (
     CONF_BAT_PRICE,
     CONF_BAT_CYCLES,
     CONF_BAT_CAPACITY_ENTITY,
+    CONF_BAT_CAPACITY_FALLBACK,
     CONF_BAT_MAX_POWER,
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_SOC_ENTITY,
@@ -65,6 +66,7 @@ from .const import (
     DEFAULT_MIN_SELL_PRICE,
     DEFAULT_BAT_PRICE,
     DEFAULT_BAT_CYCLES,
+    DEFAULT_BAT_CAPACITY_FALLBACK,
     DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
     DEFAULT_MIN_BAT_SOC_EVENING,
@@ -1518,6 +1520,7 @@ class EmsDpSensor(SensorEntity):
         self._schedule: list[dict] = []
         self._stats: dict = {}
         self._error_msg: str | None = None
+        self._last_known_capacity: float = 15.0
 
         # Throttling/hysteresis helpers
         self._last_calc_time: datetime | None = None
@@ -1837,7 +1840,6 @@ class EmsDpSensor(SensorEntity):
             # 2. Check states of required entities
             for entity_id in [
                 total_load_consumption_id,
-                bat_capacity_entity_id,
                 bat_soc_entity_id,
             ]:
                 state_obj = self.hass.states.get(entity_id)
@@ -1862,26 +1864,29 @@ class EmsDpSensor(SensorEntity):
             current_hour = dt_util.now().hour
             min_bat_soc = min_bat_soc_evening if 10 <= current_hour < 24 else min_bat_soc_morning
 
-            # Parse capacity
-            capacity = 5.12
-            cap_state = self.hass.states.get(bat_capacity_entity_id)
+            # Parse capacity with fallback
+            bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
+            capacity = self._last_known_capacity if self._last_known_capacity != 15.0 else bat_capacity_fallback
+            cap_state = self.hass.states.get(bat_capacity_entity_id) if bat_capacity_entity_id else None
             if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
                 try:
-                    capacity = float(cap_state.state)
-                    unit = cap_state.attributes.get("unit_of_measurement")
-                    if unit == "Wh" or capacity > 100.0:
-                        capacity = capacity / 1000.0
+                    val = float(cap_state.state)
+                    if val > 0.0:
+                        unit = cap_state.attributes.get("unit_of_measurement")
+                        if unit == "Wh" or val > 100.0:
+                            val = val / 1000.0
+                        capacity = val
+                        self._last_known_capacity = val
+                        self.hass.data[DOMAIN]["last_known_capacity"] = val
                 except (ValueError, TypeError):
                     ems_log(
                         self.hass,
                         _LOGGER,
-                        logging.ERROR,
-                        f"Battery capacity sensor '{bat_capacity_entity_id}' has non-numeric state '{cap_state.state}'. Skipping strategy update."
+                        logging.WARNING,
+                        f"Battery capacity sensor '{bat_capacity_entity_id}' has non-numeric state '{cap_state.state}'. Using fallback: {capacity} kWh."
                     )
-                    self._state = "unavailable"
-                    self._error_msg = "Invalid capacity value"
-                    self.async_write_ha_state()
-                    return
+            else:
+                capacity = self.hass.data[DOMAIN].get("last_known_capacity", capacity)
 
             # Parse current SOC
             soc = 50.0
@@ -2799,16 +2804,19 @@ class EmsSchedulerSensor(SensorEntity):
         except (ValueError, TypeError):
             bat_max_power = DEFAULT_BAT_MAX_POWER
 
-        # Parse capacity
-        capacity = 5.12
+        # Parse capacity with fallback
+        bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
+        capacity = self.hass.data[DOMAIN].get("last_known_capacity", bat_capacity_fallback)
         if bat_capacity_entity_id:
             cap_state = self.hass.states.get(bat_capacity_entity_id)
             if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
                 try:
-                    capacity = float(cap_state.state)
-                    unit = cap_state.attributes.get("unit_of_measurement")
-                    if unit == "Wh" or capacity > 100.0:
-                        capacity = capacity / 1000.0
+                    val = float(cap_state.state)
+                    if val > 0.0:
+                        unit = cap_state.attributes.get("unit_of_measurement")
+                        if unit == "Wh" or val > 100.0:
+                            val = val / 1000.0
+                        capacity = val
                 except (ValueError, TypeError):
                     pass
 
@@ -4199,6 +4207,12 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             "heating_end_hour": self._heating_end_hour,
             "vacation_mode": self._vacation_mode,
             "boiler_auto_temp_limit": self._boiler_auto_temp_limit,
+            "today_cold_water": controller.get_today_cold_water_liters() if controller else 0.0,
+            "today_hot_water": controller.get_today_hot_water_liters() if controller else 0.0,
+            "today_expected_hot_water": controller.get_today_expected_hot_water_liters() if controller else 0.0,
+            "dhw_hourly_profile": controller.get_dhw_hourly_profile() if controller else [0.0] * 24,
+            "dhw_forecast_profile": controller.get_dhw_today_forecast_profile() if controller else [0.0] * 24,
+            "cold_hourly_profile": controller.get_cold_hourly_profile() if controller else [0.0] * 24,
         }
 
     def _are_people_home(self) -> bool:
@@ -4437,10 +4451,11 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         vol_gas = gas_cap if gas_ok else 0.0
         vol_elec = elec_cap if elec_ok else 0.0
 
-        # Weighted temperature calculation
-        total_vol = vol_gas + vol_elec
-        if total_vol > 0.0:
-            t_curr = (t_gas * vol_gas + t_elec * vol_elec) / total_vol
+        # Primary active DHW temperature calculation (electric boiler when available)
+        if elec_ok:
+            t_curr = t_elec
+        elif gas_ok:
+            t_curr = t_gas
         else:
             t_curr = 20.0  # Safe default if no sensor is available/configured
 
@@ -4579,21 +4594,62 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
 
         # 3. Retrieve schedule slots from sensor.dp
         dp_state = self.hass.states.get("sensor.dp")
-        if not dp_state or dp_state.state in ("unknown", "unavailable"):
-            ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.dp is not available yet.")
-            self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
-            self._state = "IDLE"
-            self.async_write_ha_state()
-            return
+        dp_schedule = []
+        if dp_state and dp_state.state not in ("unknown", "unavailable"):
+            dp_schedule = dp_state.attributes.get("schedule", [])
 
-        dp_schedule = dp_state.attributes.get("schedule", [])
-        ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS Boiler DP: retrieved dp_schedule length=%d", len(dp_schedule))
         if not dp_schedule:
-            ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: sensor.dp has no schedule attribute.")
-            self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
-            self._state = "IDLE"
-            self.async_write_ha_state()
-            return
+            ems_log(self.hass, _LOGGER, logging.INFO, "EMS Boiler DP: sensor.dp is unavailable or has no schedule. Constructing fallback schedule from grid tariffs.")
+            
+            buy_today = self.hass.data.get(DOMAIN, {}).get("price_buy_today", [])
+            buy_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_buy_tomorrow", [])
+            sell_today = self.hass.data.get(DOMAIN, {}).get("price_sell_today", [])
+            sell_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_sell_tomorrow", [])
+            
+            # If we don't have prices, we cannot optimize. Default to safe IDLE mode.
+            if not buy_today or len(buy_today) < 24:
+                ems_log(self.hass, _LOGGER, logging.WARNING, "EMS Boiler DP: Grid tariff buy prices are unavailable or incomplete. Defaulting to safe IDLE mode.")
+                self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
+                self._state = "IDLE"
+                self._schedule = []
+                self._recommended_bypass = "OFF"
+                self.async_write_ha_state()
+                return
+                
+            today_str = now.strftime("%Y-%m-%d")
+            tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+            
+            # Ensure sell prices are present, fallback to buy prices or 0.0
+            if not sell_today or len(sell_today) < 24:
+                sell_today = [0.0] * 24
+            if not sell_tomorrow or len(sell_tomorrow) < 24:
+                sell_tomorrow = [0.0] * 24
+            if not buy_tomorrow or len(buy_tomorrow) < 24:
+                buy_tomorrow = [0.0] * 24
+                
+            dp_schedule = []
+            for h in range(now.hour, 24):
+                dp_schedule.append({
+                    "date": today_str,
+                    "hour": h,
+                    "buy_price": buy_today[h],
+                    "sell_price": sell_today[h],
+                    "pv_kwh": 0.0,
+                    "expected_soc": 50.0,
+                    "physical_mode": "buy",
+                    "planned_boiler_kwh": 0.0,
+                })
+            for h in range(24):
+                dp_schedule.append({
+                    "date": tomorrow_str,
+                    "hour": h,
+                    "buy_price": buy_tomorrow[h],
+                    "sell_price": sell_tomorrow[h],
+                    "pv_kwh": 0.0,
+                    "expected_soc": 50.0,
+                    "physical_mode": "buy",
+                    "planned_boiler_kwh": 0.0,
+                })
 
         # Get historical average boiler profile
         boiler_today_profile = [0.0] * 24
@@ -4761,6 +4817,8 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", min_bat_soc))
 
             battery_cycle_cost = float(self.hass.data.get(DOMAIN, {}).get("bat_degradation_per_kwh", 0.0))
+            b_controller = self.hass.data[DOMAIN][self._entry_id].get("boiler_controller")
+            dhw_forecast = b_controller.get_dhw_today_forecast_profile() if b_controller else [0.0] * 24
 
             from .boiler_dp_engine import run_boiler_dp
             import functools
@@ -4787,6 +4845,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 battery_cycle_cost,
                 min_bat_soc_evening=min_bat_soc_evening,
                 min_bat_soc_morning=min_bat_soc_morning,
+                dhw_forecast_profile=dhw_forecast,
             )
             current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(func)
 
