@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.121"
+VERSION = "0.3.131"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -51,6 +51,9 @@ CONF_BAT_MAX_POWER = "bat_max_power"
 CONF_BAT_CUR_POWER_ENTITY = "bat_cur_power_entity"
 CONF_BAT_SOC_ENTITY = "bat_soc_entity"
 CONF_BAT_VOLTAGE = "bat_voltage"
+CONF_BAT_CHARGE_TODAY_ENTITY = "bat_charge_today_entity"
+CONF_BAT_DISCHARGE_TODAY_ENTITY = "bat_discharge_today_entity"
+CONF_INVERTER_LOSSES_TODAY_ENTITY = "inverter_losses_today_entity"
 CONF_MIN_BAT_SOC = "min_bat_soc"
 CONF_MIN_BAT_SOC_EVENING = "min_bat_soc_evening"
 CONF_MIN_BAT_SOC_MORNING = "min_bat_soc_morning"

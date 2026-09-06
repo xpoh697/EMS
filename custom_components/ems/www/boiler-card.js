@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "1.9.4";
+const CARD_VERSION = "2.2.4";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -843,6 +843,7 @@ class BoilerCard extends HTMLElement {
     tabsContainer.innerHTML = `
       <div class="card-tab active" id="tab-status">Состояние</div>
       <div class="card-tab" id="tab-schedule">Расписание</div>
+      <div class="card-tab" id="tab-stats">Статистика</div>
     `;
     card.appendChild(tabsContainer);
 
@@ -1263,6 +1264,38 @@ class BoilerCard extends HTMLElement {
 
     card.appendChild(this._scheduleContent);
 
+    // Statistics Tab Content
+    this._statsContent = document.createElement("div");
+    this._statsContent.className = "tab-content-stats hidden";
+    this._statsContent.innerHTML = `
+      <div style="padding:16px;">
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:16px;">
+          <div style="background:rgba(255,255,255,0.04); border-radius:10px; padding:10px; text-align:center;">
+            <div style="font-size:11px; color:var(--secondary-text-color);">План нагрева (DP)</div>
+            <div id="stats-planned-cost" style="font-size:14px; font-weight:700; color:#2196f3; margin-top:4px;">0.00 PLN</div>
+            <div id="stats-planned-kwh" style="font-size:10px; color:var(--secondary-text-color);">0.00 kWh</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.04); border-radius:10px; padding:10px; text-align:center;">
+            <div style="font-size:11px; color:var(--secondary-text-color);">План ГВС (Прогноз)</div>
+            <div id="stats-exp-hot-water" style="font-size:14px; font-weight:700; color:#e91e63; margin-top:4px;">0.0 L</div>
+            <div id="stats-exp-hot-kwh" style="font-size:10px; color:var(--secondary-text-color);">0.00 kWh</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.04); border-radius:10px; padding:10px; text-align:center;">
+            <div style="font-size:11px; color:var(--secondary-text-color);">Факт ГВС (Сегодня)</div>
+            <div id="stats-hot-water" style="font-size:14px; font-weight:700; color:#ff9800; margin-top:4px;">0.0 L</div>
+            <div id="stats-hot-kwh" style="font-size:10px; color:var(--secondary-text-color);">0.00 kWh</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.04); border-radius:10px; padding:10px; text-align:center;">
+            <div style="font-size:11px; color:var(--secondary-text-color);">Факт ХВС (Сегодня)</div>
+            <div id="stats-cold-water" style="font-size:14px; font-weight:700; color:#03a9f4; margin-top:4px;">0.0 L</div>
+          </div>
+        </div>
+        <div style="font-size:12px; font-weight:600; color:var(--secondary-text-color); margin-bottom:8px;">График нагрева и водоразбора по часам</div>
+        <div id="stats-chart-grid" style="display:flex; align-items:flex-end; gap:3px; height:120px; background:rgba(0,0,0,0.2); border-radius:8px; padding:8px 6px;"></div>
+      </div>
+    `;
+    card.appendChild(this._statsContent);
+
     // Modal Dialog overlay
     this._modalOverlay = document.createElement("div");
     this._modalOverlay.className = "modal-overlay";
@@ -1292,26 +1325,162 @@ class BoilerCard extends HTMLElement {
     // Tab switching event listeners
     const tabStatus = tabsContainer.querySelector("#tab-status");
     const tabSchedule = tabsContainer.querySelector("#tab-schedule");
+    const tabStats = tabsContainer.querySelector("#tab-stats");
 
     tabStatus.addEventListener("click", () => {
       tabStatus.classList.add("active");
       tabSchedule.classList.remove("active");
+      tabStats.classList.remove("active");
       this._statusContent.classList.remove("hidden");
       this._scheduleContent.classList.add("hidden");
+      this._statsContent.classList.add("hidden");
     });
 
     tabSchedule.addEventListener("click", () => {
       tabSchedule.classList.add("active");
       tabStatus.classList.remove("active");
+      tabStats.classList.remove("active");
       this._statusContent.classList.add("hidden");
       this._scheduleContent.classList.remove("hidden");
+      this._statsContent.classList.add("hidden");
       if (this._scheduleNeedsUpdate) {
         this._updateSchedule();
       }
     });
 
+    tabStats.addEventListener("click", () => {
+      tabStats.classList.add("active");
+      tabStatus.classList.remove("active");
+      tabSchedule.classList.remove("active");
+      this._statusContent.classList.add("hidden");
+      this._scheduleContent.classList.add("hidden");
+      this._statsContent.classList.remove("hidden");
+      this._updateStatsTab();
+    });
+
     sr.appendChild(card);
     this._skeletonBuilt = true;
+  }
+
+  _updateStatsTab() {
+    if (!this._hass) return;
+    const dpS = this._hass.states["sensor.boiler_dp"];
+    const coldProfSum = (dpS?.attributes?.cold_hourly_profile || []).reduce((acc, v) => acc + (parseFloat(v) || 0), 0);
+    const dhwProfKwhSum = (dpS?.attributes?.dhw_hourly_profile || []).reduce((acc, v) => acc + (parseFloat(v) || 0), 0);
+    const dhwProfLSum = dhwProfKwhSum / 0.035;
+
+    const attrColdL = dpS?.attributes?.today_cold_water_liters != null ? parseFloat(dpS.attributes.today_cold_water_liters) : parseFloat(dpS?.attributes?.today_cold_water || 0);
+    const attrHotL = dpS?.attributes?.today_hot_water_liters != null ? parseFloat(dpS.attributes.today_hot_water_liters) : parseFloat(dpS?.attributes?.today_hot_water || 0);
+
+    const coldL = attrColdL > 0 ? attrColdL : Math.round(coldProfSum * 10) / 10;
+    const hotL = attrHotL > 0 ? attrHotL : Math.round(dhwProfLSum * 10) / 10;
+    const expHotL = dpS?.attributes?.today_expected_hot_water_liters != null ? dpS.attributes.today_expected_hot_water_liters : (dpS?.attributes?.today_expected_hot_water || 0.0);
+    const sched = dpS?.attributes?.schedule || [];
+
+    const plannedCost = sched.reduce((acc, s) => acc + (parseFloat(s.cost) || 0), 0).toFixed(2);
+    const plannedKwh = sched.reduce((acc, s) => acc + (parseFloat(s.energy != null ? s.energy : s.actual_planned_boiler_kwh) || 0), 0).toFixed(2);
+
+    const pcEl = this._statsContent.querySelector("#stats-planned-cost");
+    const pkEl = this._statsContent.querySelector("#stats-planned-kwh");
+    const expL_El = this._statsContent.querySelector("#stats-exp-hot-water");
+    const expK_El = this._statsContent.querySelector("#stats-exp-hot-kwh");
+    const cwEl = this._statsContent.querySelector("#stats-cold-water");
+    const hwEl = this._statsContent.querySelector("#stats-hot-water");
+    const hkEl = this._statsContent.querySelector("#stats-hot-kwh");
+
+    const hotKwh = (hotL * 0.035).toFixed(2);
+    const expHotKwh = (expHotL * 0.035).toFixed(2);
+
+    if (pcEl) pcEl.textContent = `${plannedCost} PLN`;
+    if (pkEl) pkEl.textContent = `${plannedKwh} kWh`;
+    if (expL_El) expL_El.textContent = `${expHotL} L`;
+    if (expK_El) expK_El.textContent = `${expHotKwh} kWh`;
+    if (cwEl) cwEl.textContent = `${coldL} L`;
+    if (hwEl) hwEl.textContent = `${hotL} L`;
+    if (hkEl) hkEl.textContent = `${hotKwh} kWh`;
+
+    const chartGrid = this._statsContent.querySelector("#stats-chart-grid");
+    if (!chartGrid) return;
+
+    chartGrid.style.position = "relative";
+    chartGrid.innerHTML = "";
+
+    const dhwForecastL = dpS?.attributes?.dhw_forecast_profile || Array(24).fill(0);
+    const dhwActualKwh = dpS?.attributes?.dhw_hourly_profile || Array(24).fill(0);
+    const coldActualL = dpS?.attributes?.cold_hourly_profile || Array(24).fill(0);
+
+    const dhwForecastKwh = dhwForecastL.map(l => (parseFloat(l) || 0) * 0.035);
+    const coldActualKwh = coldActualL.map(l => (parseFloat(l) || 0) * 0.035);
+    const maxKwh = Math.max(0.05, ...dhwForecastKwh, ...dhwActualKwh, ...coldActualKwh);
+
+    // SVG Line overlay container for forecast plan line
+    const svgOverlay = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svgOverlay.setAttribute("style", "position:absolute; top:8px; left:6px; width:calc(100% - 12px); height:calc(100% - 24px); pointer-events:none; z-index:3; overflow:visible;");
+    svgOverlay.setAttribute("viewBox", "0 0 240 100");
+    svgOverlay.setAttribute("preserveAspectRatio", "none");
+
+    let pointsStr = "";
+    const pointsArr = [];
+
+    for (let h = 0; h < 24; h++) {
+      const forecastL = parseFloat(dhwForecastL[h]) || 0;
+      const forecastKwh = forecastL * 0.035;
+      const actualDhwKwh = parseFloat(dhwActualKwh[h]) || 0;
+      const actualDhwL = actualDhwKwh / 0.035;
+      const actualColdL = parseFloat(coldActualL[h]) || 0;
+      const actualColdKwh = actualColdL * 0.035;
+
+      const dhwH = actualDhwKwh > 0 ? Math.max(4, Math.round((actualDhwKwh / maxKwh) * 100)) : 0;
+      const coldH = actualColdKwh > 0 ? Math.max(4, Math.round((actualColdKwh / maxKwh) * 100)) : 0;
+
+      // SVG coordinates for forecast line
+      const cx = (h + 0.5) * (240 / 24);
+      const cy = 100 - Math.min(100, Math.max(0, Math.round((forecastKwh / maxKwh) * 100)));
+      pointsArr.push({ x: cx, y: cy });
+      pointsStr += `${cx},${cy} `;
+
+      const col = document.createElement("div");
+      col.style.cssText = "flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; height:100%; position:relative; cursor:pointer;";
+      
+      const tooltipText = `Час ${String(h).padStart(2, '0')}:00\n` +
+        `🌸 План ГВС (Прогноз): ${forecastL.toFixed(1)} L (${forecastKwh.toFixed(2)} kWh)\n` +
+        `🟧 Факт ГВС: ${actualDhwL.toFixed(1)} L (${actualDhwKwh.toFixed(2)} kWh)\n` +
+        `🟦 Факт ХВС: ${actualColdL.toFixed(1)} L`;
+      
+      col.title = tooltipText;
+
+      col.innerHTML = `
+        <div style="width:100%; display:flex; gap:1px; align-items:flex-end; height:100%;">
+          <div style="flex:1; background:#ff9800; height:${dhwH}%; border-radius:2px 2px 0 0; opacity:0.9;"></div>
+          <div style="flex:1; background:#03a9f4; height:${coldH}%; border-radius:2px 2px 0 0; opacity:0.85;"></div>
+        </div>
+        <div style="font-size:8px; color:var(--secondary-text-color); margin-top:2px;">${h}</div>
+      `;
+      chartGrid.appendChild(col);
+    }
+
+    if (pointsStr) {
+      const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      polyline.setAttribute("fill", "none");
+      polyline.setAttribute("stroke", "#e91e63");
+      polyline.setAttribute("stroke-width", "2.5");
+      polyline.setAttribute("stroke-linecap", "round");
+      polyline.setAttribute("stroke-linejoin", "round");
+      polyline.setAttribute("points", pointsStr.trim());
+      svgOverlay.appendChild(polyline);
+
+      pointsArr.forEach(pt => {
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circle.setAttribute("cx", pt.x);
+        circle.setAttribute("cy", pt.y);
+        circle.setAttribute("r", "3");
+        circle.setAttribute("fill", "#e91e63");
+        circle.setAttribute("stroke", "#ffffff");
+        circle.setAttribute("stroke-width", "1");
+        svgOverlay.appendChild(circle);
+      });
+    }
+    chartGrid.appendChild(svgOverlay);
   }
 
   // ── Update only changed values (NO innerHTML rebuilds) ────────────────────
@@ -1895,6 +2064,10 @@ class BoilerCard extends HTMLElement {
         <span class="m-label">Энергия</span>
         <span class="m-val">${slot.energy != null ? slot.energy.toFixed(2) + " кВтч/м³" : "0.0 кВтч/м³"}</span>
       </div>
+      <div class="modal-row-detail">
+        <span class="m-label">Планируемый расход ГВС</span>
+        <span class="m-val" style="color:#e91e63; font-weight:700;">${(parseFloat(slot.expected_dhw_liters != null ? slot.expected_dhw_liters : (slot.dhw_forecast_liters || 0)) || 0).toFixed(1)} L (${((parseFloat(slot.expected_dhw_liters != null ? slot.expected_dhw_liters : (slot.dhw_forecast_liters || 0)) || 0) * 0.035).toFixed(2)} кВтч)</span>
+      </div>
       
       <div class="modal-section-title">Планируемые температуры</div>
       <div class="modal-row-detail">
@@ -2108,12 +2281,23 @@ class BoilerCard extends HTMLElement {
 }
 
 // ── Registration ─────────────────────────────────────────────────────────────
-customElements.define("boiler-card", BoilerCard);
+if (!customElements.get("boiler-card")) {
+  customElements.define("boiler-card", BoilerCard);
+}
+if (!customElements.get("water-heater-card")) {
+  customElements.define("water-heater-card", BoilerCard);
+}
 
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "boiler-card",
   name: "EMS Boiler Card",
+  description: "Plug-and-play карточка бойлера — entity_id загружаются из интеграции EMS автоматически.",
+  preview: true,
+});
+window.customCards.push({
+  type: "water-heater-card",
+  name: "EMS Water Heater Card",
   description: "Plug-and-play карточка бойлера — entity_id загружаются из интеграции EMS автоматически.",
   preview: true,
 });

@@ -28,6 +28,7 @@ SERVICE_CLEAR_OVERRIDE = "clear_manual_override"
 SERVICE_CLEAR_ALL_OVERRIDES = "clear_all_overrides"
 SERVICE_START_CALIBRATION = "start_calibration"
 SERVICE_RESET_CALIBRATION = "reset_calibration"
+SERVICE_RESET_PV_FACTOR = "reset_pv_factor"
 
 SET_OVERRIDE_SCHEMA = vol.Schema({
     vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{4}-\d{2}-\d{2}$")),
@@ -84,9 +85,7 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
             bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
             bat_max_power_w = float(options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)))
-            min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
-            min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
-            min_bat_soc = min_bat_soc_evening if 10 <= hour < 24 else min_bat_soc_morning
+            min_bat_soc = 10.0
 
             # Parse battery capacity (kWh)
             capacity_kwh = 5.12
@@ -261,6 +260,15 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
     hass.services.async_register(
         DOMAIN, SERVICE_RESET_CALIBRATION, handle_reset_calibration, schema=RESET_CALIBRATION_SCHEMA
     )
+
+    async def handle_reset_pv_factor(call: ServiceCall) -> None:
+        """Handle resetting PV forecast Layer 2 factor and history."""
+        hass.bus.async_fire("ems_reset_pv_factor")
+        _LOGGER.info("PV forecast reset event fired via service")
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_RESET_PV_FACTOR, handle_reset_pv_factor
+    )
     _LOGGER.debug("EMS services successfully registered")
 
 
@@ -272,6 +280,7 @@ def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_CLEAR_ALL_OVERRIDES,
         SERVICE_START_CALIBRATION,
         SERVICE_RESET_CALIBRATION,
+        SERVICE_RESET_PV_FACTOR,
         "start_manual_heating",
         "stop_manual_heating",
     ]:

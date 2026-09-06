@@ -37,6 +37,9 @@ from .const import (
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
+    CONF_BAT_CHARGE_TODAY_ENTITY,
+    CONF_BAT_DISCHARGE_TODAY_ENTITY,
+    CONF_INVERTER_LOSSES_TODAY_ENTITY,
     CONF_MIN_BAT_SOC,
     CONF_BAT_SOC_EMERGENCY,
     CONF_HW_CIRCULATION_PUMP,
@@ -422,6 +425,43 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             )
         else:
             schema_dict[vol.Optional(CONF_BAT_VOLTAGE)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        # 6. Bat Charge Today (entity) - Optional
+        val_chg_today = get_value(CONF_BAT_CHARGE_TODAY_ENTITY)
+        if not val_chg_today and self.hass.states.get("sensor.inverter_today_battery_charge"):
+            val_chg_today = "sensor.inverter_today_battery_charge"
+        if val_chg_today:
+            schema_dict[vol.Optional(CONF_BAT_CHARGE_TODAY_ENTITY, default=val_chg_today)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_BAT_CHARGE_TODAY_ENTITY)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        # 7. Bat Discharge Today (entity) - Optional
+        val_dis_today = get_value(CONF_BAT_DISCHARGE_TODAY_ENTITY)
+        if not val_dis_today and self.hass.states.get("sensor.inverter_today_battery_discharge"):
+            val_dis_today = "sensor.inverter_today_battery_discharge"
+        if val_dis_today:
+            schema_dict[vol.Optional(CONF_BAT_DISCHARGE_TODAY_ENTITY, default=val_dis_today)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_BAT_DISCHARGE_TODAY_ENTITY)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        # 8. Inverter Losses Today (entity) - Optional
+        val_inv_losses = get_value(CONF_INVERTER_LOSSES_TODAY_ENTITY)
+        if val_inv_losses:
+            schema_dict[vol.Optional(CONF_INVERTER_LOSSES_TODAY_ENTITY, default=val_inv_losses)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_INVERTER_LOSSES_TODAY_ENTITY)] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             )
 

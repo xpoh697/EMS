@@ -685,11 +685,11 @@ class EmsSchedulerCard extends HTMLElement {
         <div id="plan-view">
           <div class="stats-panel">
             <div class="hero-row">
-              <div id="soc-hero" class="hero-badge" onclick="this.getRootNode().host._handleMoreInfo()">
+              <div id="soc-hero" class="hero-badge" onclick="this.getRootNode().host._handleSocClick()">
                 <span id="soc-val" class="hero-val">--</span>
                 <span class="hero-label">Battery SOC</span>
               </div>
-              <div id="profit-hero" class="hero-badge" onclick="this.getRootNode().host._handleMoreInfo(this.getAttribute('data-entity'))">
+              <div id="profit-hero" class="hero-badge" onclick="this.getRootNode().host._handleProfitClick()">
                 <span id="profit-val" class="hero-val">--</span>
                 <span id="profit-label" class="hero-label">Est. Value</span>
               </div>
@@ -922,7 +922,7 @@ class EmsSchedulerCard extends HTMLElement {
                     <span class="form-label" style="margin:0">Target SOC</span>
                     <span class="soc-slider-val" id="soc-slider-val">80%</span>
                   </div>
-                  <input type="range" id="soc-slider" min="20" max="100" step="0.5" value="80"
+                  <input type="range" id="soc-slider" min="10" max="100" step="0.5" value="80"
                     oninput="this.getRootNode().host._onSocSliderInput(this.value)">
                 </div>
               </div>
@@ -994,6 +994,16 @@ class EmsSchedulerCard extends HTMLElement {
     
     // Get battery SOC
     const soc = attrs.battery_soc !== undefined ? attrs.battery_soc : 0;
+    const socEntity = this._resolveConfigValue(
+      'battery_soc_entity',
+      this._resolveConfigValue(
+        'battery_entity',
+        this._resolveConfigValue(
+          'soc_entity',
+          attrs.battery_soc_entity || attrs.bat_soc_entity || null
+        )
+      )
+    );
 
     // Update Battery SOC Hero
     const socColor = this._getBatteryColor(soc);
@@ -1001,6 +1011,9 @@ class EmsSchedulerCard extends HTMLElement {
     if (socHero) {
       socHero.style.borderColor = socColor;
       socHero.style.boxShadow = `0 6px 20px ${socColor}22`;
+      if (socEntity) {
+        socHero.setAttribute('data-entity', socEntity);
+      }
     }
     const socVal = this.shadowRoot.getElementById('soc-val');
     if (socVal) {
@@ -1009,14 +1022,17 @@ class EmsSchedulerCard extends HTMLElement {
     }
 
     // Profit / Estimated Value Hero
-    const profitEntity = this._resolveConfigValue('profit_entity', null);
     const profitHero = this.shadowRoot.getElementById('profit-hero');
+    let profitEntity = this._resolveConfigValue(
+      'profit_entity',
+      attrs.profit_entity || (this._hass.states['sensor.today_profit'] ? 'sensor.today_profit' : null)
+    );
     
     let pValRaw = null;
     let pUnit = ' PLN';
     let pLabelText = this._config.profit_label || 'Est. Value';
     
-    if (profitEntity && this._hass.states[profitEntity]) {
+    if (profitEntity && this._hass.states[profitEntity] && profitEntity !== 'sensor.dp') {
       const pState = this._hass.states[profitEntity];
       pValRaw = parseFloat(pState.state) || 0;
       pUnit = pState.attributes.unit_of_measurement || '';
@@ -1025,6 +1041,11 @@ class EmsSchedulerCard extends HTMLElement {
       if (dpState && dpState.attributes && dpState.attributes.stats) {
         pValRaw = dpState.attributes.stats.best_value;
       }
+      if (!profitEntity && this._hass.states['sensor.today_profit']) {
+        profitEntity = 'sensor.today_profit';
+      } else if (!profitEntity && this._hass.states['sensor.dp']) {
+        profitEntity = 'sensor.dp';
+      }
     }
     
     if (pValRaw !== null && pValRaw !== undefined) {
@@ -1032,7 +1053,11 @@ class EmsSchedulerCard extends HTMLElement {
       if (socHero) socHero.style.gridColumn = 'span 1';
       if (profitHero) {
         profitHero.style.display = 'flex';
-        if (profitEntity) profitHero.setAttribute('data-entity', profitEntity);
+        if (profitEntity) {
+          profitHero.setAttribute('data-entity', profitEntity);
+        } else {
+          profitHero.removeAttribute('data-entity');
+        }
         profitHero.style.borderColor = pColor;
         profitHero.style.boxShadow = `0 6px 20px ${pColor}22`;
       }
@@ -2514,9 +2539,8 @@ class EmsSchedulerCard extends HTMLElement {
 
     this.shadowRoot.getElementById('modal-mode').value = activeOverrideAction;
 
-    // Get min SOC from number.ems_min_bat_soc entity
-    const minSocEntity = this._hass.states['number.ems_min_bat_soc'];
-    const minSocVal = minSocEntity ? (parseFloat(minSocEntity.state) || 20.0) : 20.0;
+    // Target SOC min limit set to 10.0%
+    const minSocVal = 10.0;
 
     // Pre-set slider
     const slider = this.shadowRoot.getElementById('soc-slider');
@@ -2653,6 +2677,57 @@ class EmsSchedulerCard extends HTMLElement {
   _onSocSliderInput(value) {
     const sliderVal = this.shadowRoot.getElementById('soc-slider-val');
     if (sliderVal) sliderVal.innerText = parseFloat(value).toFixed(1) + '%';
+  }
+
+  _handleSocClick() {
+    const socHero = this.shadowRoot ? this.shadowRoot.getElementById('soc-hero') : null;
+    const dataEntity = socHero ? socHero.getAttribute('data-entity') : null;
+    const entityId = this._resolveConfigValue('entity', 'sensor.scheduler');
+    const stateObj = this._hass && this._hass.states ? this._hass.states[entityId] : null;
+    const attrs = stateObj ? stateObj.attributes : {};
+
+    let target = dataEntity || this._resolveConfigValue(
+      'battery_soc_entity',
+      this._resolveConfigValue(
+        'battery_entity',
+        this._resolveConfigValue(
+          'soc_entity',
+          attrs.battery_soc_entity || attrs.bat_soc_entity || null
+        )
+      )
+    );
+
+    if ((!target || !this._hass.states[target]) && this._hass && this._hass.states) {
+      const found = Object.keys(this._hass.states).find(e =>
+        e.startsWith('sensor.') && (e.includes('battery_soc') || e.includes('battery_level') || e.endsWith('_battery') || e === 'sensor.battery')
+      );
+      if (found) target = found;
+    }
+
+    this._handleMoreInfo(target || entityId || 'sensor.scheduler');
+  }
+
+  _handleProfitClick() {
+    const profitHero = this.shadowRoot ? this.shadowRoot.getElementById('profit-hero') : null;
+    const dataEntity = profitHero ? profitHero.getAttribute('data-entity') : null;
+    const entityId = this._resolveConfigValue('entity', 'sensor.scheduler');
+    const stateObj = this._hass && this._hass.states ? this._hass.states[entityId] : null;
+    const attrs = stateObj ? stateObj.attributes : {};
+
+    let target = dataEntity || this._resolveConfigValue(
+      'profit_entity',
+      attrs.profit_entity || (this._hass && this._hass.states && this._hass.states['sensor.today_profit'] ? 'sensor.today_profit' : (this._hass && this._hass.states && this._hass.states['sensor.dp'] ? 'sensor.dp' : null))
+    );
+
+    if ((!target || !this._hass.states[target]) && this._hass && this._hass.states) {
+      if (this._hass.states['sensor.today_profit']) {
+        target = 'sensor.today_profit';
+      } else if (this._hass.states['sensor.dp']) {
+        target = 'sensor.dp';
+      }
+    }
+
+    this._handleMoreInfo(target || entityId || 'sensor.scheduler');
   }
 
   _handleMoreInfo(entityId) {

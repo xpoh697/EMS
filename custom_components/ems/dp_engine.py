@@ -8,7 +8,8 @@ from typing import Any
 
 from homeassistant.util import dt as dt_util
 from .const import INVERTER_MODES
-from .utils import map_dp_to_physical, map_override_to_physical
+from .utils import map_dp_to_physical
+from .utils import map_override_to_physical
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ class DPConfig:
     disable_discharge: bool = False
     battery_min_soc_evening: float | None = None
     battery_min_soc_morning: float | None = None
+    min_arbitrage_profit: float = 0.0
+    eta_charge: float = 1.0
+    eta_discharge: float = 1.0
 
     def get_min_soc(self, hour: int) -> float:
         """Get the hourly minimum battery SOC."""
@@ -209,8 +213,9 @@ def run_unified_dp(
                     for ei in range(min_ei, max_ei + 1):
                         exp = ei * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy - exp) / energy_step))))
-                        to_grid = max(0.0, exp + pv_kwh - consumption_kwh)
-                        grid_imp = max(0.0, consumption_kwh - exp - pv_kwh)
+                        ac_exp = exp * config.eta_discharge
+                        to_grid = max(0.0, ac_exp + pv_kwh - consumption_kwh)
+                        grid_imp = max(0.0, consumption_kwh - ac_exp - pv_kwh)
                         if to_grid > 0.0 and to_grid < config.min_energy_to_discharge:
                             continue
                         _update_n(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
@@ -225,7 +230,8 @@ def run_unified_dp(
                     for ci in range(1, int(max_pvc / energy_step) + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                        reward = effective_sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
+                        req_chg = chg / config.eta_charge if config.eta_charge > 0.0 else chg
+                        reward = effective_sell_price * max(0.0, pv_surplus - req_chg) - buy_price * pv_deficit
                         reward += 1e-6 * chg
                         _update_n(nsi, reward, ACT_PV_CHARGE, chg)
 
@@ -235,20 +241,47 @@ def run_unified_dp(
                     if slot_idx == 1 and remaining_hour_fraction < 1.0:
                         max_charge_power *= remaining_hour_fraction
                     max_gc = min(max_charge_power, avail_cap)
+
+                    if config.min_arbitrage_profit > 0.0:
+                        pre_solar_slots = [s for s in scaled_slots[slot_idx - 1:] if s.get("pv_kwh", 0.0) <= 0.5]
+                        sum_pv_ahead = sum(s.get("pv_kwh", 0.0) for s in scaled_slots[slot_idx - 1:])
+                        eval_slots = pre_solar_slots if sum_pv_ahead >= usable_capacity else scaled_slots[slot_idx - 1:]
+
+                        max_future_sell = max((s.get("sell_price", 0.0) for s in eval_slots), default=0.0)
+                        effective_future_sell = max_future_sell * config.eta_discharge
+                        effective_buy_cost = buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price
+                        arbitrage_margin = effective_future_sell - effective_buy_cost - 2 * cycle_cost
+                        if arbitrage_margin < config.min_arbitrage_profit:
+                            eta_rt = (config.eta_charge * config.eta_discharge) if (config.eta_charge > 0.0 and config.eta_discharge > 0.0) else 1.0
+                            eff_stored_cost = (buy_price / eta_rt) + 2 * cycle_cost
+
+                            home_deficit_until_solar = 0.0
+                            for f_slot in pre_solar_slots:
+                                if f_slot.get("buy_price", 0.0) > eff_stored_cost:
+                                    f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
+                                    net_def = max(0.0, f_cons - f_slot.get("pv_kwh", 0.0))
+                                    home_deficit_until_solar += (net_def / config.eta_discharge if config.eta_discharge > 0.0 else net_def)
+                            allowed_capacity = max(0.0, home_deficit_until_solar - usable_energy)
+                            max_gc = min(max_gc, allowed_capacity)
+
                     for ci in range(1, int(max_gc / energy_step) + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                        net_chg = (chg - pv_surplus) if chg > pv_surplus else 0.0
+                        req_chg = chg / config.eta_charge if config.eta_charge > 0.0 else chg
+                        net_chg = (req_chg - pv_surplus) if req_chg > pv_surplus else 0.0
                         reward = - buy_price * (net_chg + pv_deficit) - cycle_cost * chg
                         _update_n(nsi, reward, ACT_GRID_CHARGE, chg)
 
                 # === SELF_CONSUME ===
-                if pv_deficit >= energy_step and usable_energy >= energy_step:
-                    max_sc = min(usable_energy, pv_deficit)
-                    for sci in range(1, int(round(max_sc / energy_step)) + 1):
+                if pv_deficit > 0.001 and usable_energy >= energy_step:
+                    needed_dc = pv_deficit / config.eta_discharge if config.eta_discharge > 0.0 else pv_deficit
+                    max_sc = min(usable_energy, needed_dc)
+                    max_sci = max(1, int(round(max_sc / energy_step)))
+                    for sci in range(1, max_sci + 1):
                         sc = sci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy - sc) / energy_step))))
-                        remaining_deficit = max(0.0, pv_deficit - sc)
+                        ac_sc = sc * config.eta_discharge
+                        remaining_deficit = max(0.0, pv_deficit - ac_sc)
                         _update_n(nsi, -buy_price * remaining_deficit, ACT_SELF_CONSUME, sc)
 
                 # === PAID_IMPORT ===
@@ -427,7 +460,7 @@ def run_unified_dp(
                 if mode_config:
                     if mode_config.charge_from_pv and pv_surplus > 0 and avail_cap >= energy_step:
                         is_sol_allowed = False
-                    elif mode_config.discharge_to_house and pv_deficit >= energy_step and usable_energy >= energy_step:
+                    elif mode_config.discharge_to_house and pv_deficit > 0.001 and usable_energy >= energy_step:
                         is_sol_allowed = False
                 if is_sol_allowed:
                     _update(state_idx, effective_sell_price * pv_surplus - buy_price * pv_deficit, ACT_SOL, 0.0)
@@ -490,6 +523,28 @@ def run_unified_dp(
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_charge_power *= remaining_hour_fraction
                 max_gc = min(max_charge_power, avail_cap)
+
+                if not override and config.min_arbitrage_profit > 0.0:
+                    pre_solar_slots = [s for s in scaled_slots[slot_idx - 1:] if s.get("pv_kwh", 0.0) <= 0.5]
+                    sum_pv_ahead = sum(s.get("pv_kwh", 0.0) for s in scaled_slots[slot_idx - 1:])
+                    eval_slots = pre_solar_slots if sum_pv_ahead >= usable_capacity else scaled_slots[slot_idx - 1:]
+
+                    max_future_sell = max((s.get("sell_price", 0.0) for s in eval_slots), default=0.0)
+                    effective_future_sell = max_future_sell * config.eta_discharge
+                    effective_buy_cost = buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price
+                    arbitrage_margin = effective_future_sell - effective_buy_cost - 2 * cycle_cost
+                    if arbitrage_margin < config.min_arbitrage_profit:
+                        eta_rt = (config.eta_charge * config.eta_discharge) if (config.eta_charge > 0.0 and config.eta_discharge > 0.0) else 1.0
+                        eff_stored_cost = (buy_price / eta_rt) + 2 * cycle_cost
+
+                        home_deficit_until_solar = 0.0
+                        for f_slot in pre_solar_slots:
+                            if f_slot.get("buy_price", 0.0) > eff_stored_cost:
+                                f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
+                                net_def = max(0.0, f_cons - f_slot.get("pv_kwh", 0.0))
+                                home_deficit_until_solar += (net_def / config.eta_discharge if config.eta_discharge > 0.0 else net_def)
+                        allowed_capacity = max(0.0, home_deficit_until_solar - usable_energy)
+                        max_gc = min(max_gc, allowed_capacity)
                 
                 if target_nsi is not None:
                     max_possible_chg_steps = int(max_gc / energy_step)
@@ -509,22 +564,26 @@ def run_unified_dp(
                         _update(nsi, reward, ACT_GRID_CHARGE, chg)
 
             # === SELF_CONSUME: battery covers consumption deficit ===
-            if (not override_action or (mode_config and mode_config.discharge_to_house)) and pv_deficit >= energy_step and usable_energy >= energy_step and (target_nsi is None or target_nsi < state_idx):
-                max_sc = min(usable_energy, pv_deficit)
+            if (not override_action or (mode_config and mode_config.discharge_to_house)) and pv_deficit > 0.001 and usable_energy >= energy_step and (target_nsi is None or target_nsi < state_idx):
+                needed_dc = pv_deficit / config.eta_discharge if config.eta_discharge > 0.0 else pv_deficit
+                max_sc = min(usable_energy, needed_dc)
                 
                 if target_nsi is not None:
-                    max_possible_sc_steps = int(max_sc / energy_step)
+                    max_possible_sc_steps = max(1, int(round(max_sc / energy_step)))
                     desired_sc_steps = min(state_idx - target_nsi, max_possible_sc_steps)
                     if desired_sc_steps >= 1:
                         sc = desired_sc_steps * energy_step
                         nsi = max(0, min(max_energy_idx, state_idx - desired_sc_steps))
-                        remaining_deficit = max(0.0, pv_deficit - sc)
+                        ac_sc = sc * config.eta_discharge
+                        remaining_deficit = max(0.0, pv_deficit - ac_sc)
                         _update(nsi, -buy_price * remaining_deficit, ACT_SELF_CONSUME, sc)
                 else:
-                    for sci in range(1, int(round(max_sc / energy_step)) + 1):
+                    max_sci = max(1, int(round(max_sc / energy_step)))
+                    for sci in range(1, max_sci + 1):
                         sc = sci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy - sc) / energy_step))))
-                        remaining_deficit = max(0.0, pv_deficit - sc)
+                        ac_sc = sc * config.eta_discharge
+                        remaining_deficit = max(0.0, pv_deficit - ac_sc)
                         _update(nsi, -buy_price * remaining_deficit, ACT_SELF_CONSUME, sc)
 
             # === PAID_IMPORT: home from grid, PV curtailed, battery untouched ===
@@ -669,10 +728,11 @@ def run_unified_dp(
             battery_to_home = min(amount, home_deficit)
             battery_to_grid = max(0.0, amount - battery_to_home)
 
-            if battery_to_grid > 0.0 and battery_to_grid < config.min_energy_to_discharge:
+            min_grid_export = max(0.15, config.min_energy_to_discharge)
+            if battery_to_grid < min_grid_export:
                 # If grid export portion is below limit, switch to self-consumption or idle
-                amount = round(battery_to_home, 2)
-                if amount > 0.0:
+                amount = round(amount, 2)
+                if home_deficit > 0.0:
                     act = ACT_SELF_CONSUME
                 else:
                     act = ACT_SOL

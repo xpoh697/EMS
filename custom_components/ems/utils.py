@@ -185,7 +185,7 @@ def map_dp_to_physical(
 
     # Actions: pv_charge, self_consume, solar_export
     if sell_price > min_sell_price:
-        if action == "solar_export" and pv_kwh > 0.01 and sell_price >= min_discharge_price:
+        if action == "solar_export" and pv_kwh > 0.01 and sell_price > min_sell_price:
             return "sale_pv_no_bat", reason
         return "sale_pv", reason
 
@@ -230,7 +230,7 @@ def map_override_to_physical(
         return "buy", reason
 
     if sell_price > min_sell_price:
-        if action == "solar_export" and pv_kwh > 0.01 and sell_price >= min_discharge_price:
+        if action == "solar_export" and pv_kwh > 0.01 and sell_price > min_sell_price:
             return "sale_pv_no_bat", reason
         return "sale_pv", reason
 

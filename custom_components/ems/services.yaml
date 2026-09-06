@@ -186,3 +186,7 @@ reset_calibration:
               value: heating
             - label: Standby losses (standby)
               value: standby
+
+reset_pv_factor:
+  name: Reset PV Forecast Factor
+  description: Resets the PV forecast Layer 2 corrective factor and its 7-day history back to 1.0.

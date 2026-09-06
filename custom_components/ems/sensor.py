@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections import deque
 from datetime import date, datetime, timedelta
@@ -16,7 +17,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
@@ -56,6 +57,9 @@ from .const import (
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
+    CONF_BAT_CHARGE_TODAY_ENTITY,
+    CONF_BAT_DISCHARGE_TODAY_ENTITY,
+    CONF_INVERTER_LOSSES_TODAY_ENTITY,
     CONF_MIN_BAT_SOC,
     CONF_MIN_BAT_SOC_EVENING,
     CONF_MIN_BAT_SOC_MORNING,
@@ -356,6 +360,9 @@ async def async_setup_entry(
     bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
     bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
     bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
+    bat_charge_today_entity_id = options.get(CONF_BAT_CHARGE_TODAY_ENTITY, config.get(CONF_BAT_CHARGE_TODAY_ENTITY))
+    bat_discharge_today_entity_id = options.get(CONF_BAT_DISCHARGE_TODAY_ENTITY, config.get(CONF_BAT_DISCHARGE_TODAY_ENTITY))
+    inverter_losses_today_entity_id = options.get(CONF_INVERTER_LOSSES_TODAY_ENTITY, config.get(CONF_INVERTER_LOSSES_TODAY_ENTITY))
     min_bat_soc_evening = options.get(CONF_MIN_BAT_SOC_EVENING, config.get(CONF_MIN_BAT_SOC_EVENING, DEFAULT_MIN_BAT_SOC_EVENING))
     min_bat_soc_morning = options.get(CONF_MIN_BAT_SOC_MORNING, config.get(CONF_MIN_BAT_SOC_MORNING, DEFAULT_MIN_BAT_SOC_MORNING))
 
@@ -697,6 +704,41 @@ async def async_setup_entry(
             )
         )
 
+    conversion_loss_sensor = EmsConversionLossesTodaySensor(
+        entry.entry_id,
+        entry.title,
+        bat_soc_entity_id,
+        bat_capacity_entity_id,
+        fallback_capacity=float(entry.options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK))),
+        price_buy_sensor_id=price_buy_sensor_id,
+        charge_sensor_id=bat_charge_today_entity_id,
+        discharge_sensor_id=bat_discharge_today_entity_id,
+        inverter_losses_sensor_id=inverter_losses_today_entity_id,
+        fallback_min_soc=float(min_bat_soc_morning if min_bat_soc_morning is not None else 17.0),
+    )
+    entities.append(conversion_loss_sensor)
+    entities.append(
+        EmsRoundTripEfficiencySensor(
+            entry.entry_id,
+            entry.title,
+            conversion_loss_sensor,
+        )
+    )
+    entities.append(
+        EmsConversionLossCostTodaySensor(
+            entry.entry_id,
+            entry.title,
+            conversion_loss_sensor,
+        )
+    )
+    weekly_loss_sensor = EmsWeeklyLossRateSensor(
+        entry.entry_id,
+        entry.title,
+        conversion_loss_sensor,
+    )
+    conversion_loss_sensor.set_weekly_sensor(weekly_loss_sensor)
+    entities.append(weekly_loss_sensor)
+
     if entities:
         async_add_entities(entities)
 
@@ -803,6 +845,9 @@ class EmsLoadConsumptionSensor(RestoreSensor, SensorEntity):
     async def async_added_to_hass(self) -> None:
         """Handle entity registry addition and restore historical states."""
         await super().async_added_to_hass()
+
+        if DOMAIN in self.hass.data and self._entry_id in self.hass.data[DOMAIN]:
+            self.hass.data[DOMAIN][self._entry_id]["load_sensor"] = self
 
         last_state = await self.async_get_last_state()
         if last_state:
@@ -1172,6 +1217,21 @@ class EmsPvForecastTodaySensor(RestoreSensor, SensorEntity):
                 self.hass, self._async_hourly_trigger, minute=0, second=0
             )
         )
+
+        # Listen for reset event
+        self.async_on_remove(
+            self.hass.bus.async_listen("ems_reset_pv_factor", self._handle_reset_pv_factor)
+        )
+
+    @callback
+    def _handle_reset_pv_factor(self, event) -> None:
+        """Reset PV forecast Layer 2 factor and history back to 1.0."""
+        self._factor = 1.0
+        self._factor_history = [1.0] * 7
+        self._factor_type = "history_avg"
+        _LOGGER.info("PV Forecast Today: PV factor reset requested. History and today's factor set to 1.0")
+        self._update_forecast()
+        self.async_write_ha_state()
 
     def _handle_midnight_transition(self, now) -> None:
         """Handle transitioning internal trackers at midnight."""
@@ -2150,6 +2210,7 @@ class EmsDpSensor(SensorEntity):
                 self._boiler_average_profile_tomorrow,
                 min_bat_soc_evening=min_bat_soc_evening,
                 min_bat_soc_morning=min_bat_soc_morning,
+                min_arbitrage_profit=storage.min_arbitrage_profit,
             )
             result = await self.hass.async_add_executor_job(func)
 
@@ -2226,6 +2287,7 @@ class EmsDpSensor(SensorEntity):
         boiler_average_tomorrow: list[float] = None,
         min_bat_soc_evening: float | None = None,
         min_bat_soc_morning: float | None = None,
+        min_arbitrage_profit: float = 0.0,
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
         from .dp_engine import run_unified_dp, DPConfig
@@ -2308,6 +2370,24 @@ class EmsDpSensor(SensorEntity):
         global_min_buy = min(horizon_buy) if horizon_buy else 0.0
         terminal_value = max(min_sell_price, global_min_buy + cycle_cost)
 
+        # Dynamically obtain live weekly round-trip efficiency from sensor/bus
+        weekly_state = self.hass.states.get("sensor.ems_battery_weekly_loss_rate")
+        if weekly_state and weekly_state.state not in ("unknown", "unavailable"):
+            try:
+                weekly_loss_pct = float(weekly_state.state)
+                weekly_rte = max(0.50, min(1.0, (100.0 - weekly_loss_pct) / 100.0))
+            except (ValueError, TypeError):
+                weekly_rte = 0.865
+        else:
+            weekly_rte = self.hass.data.get(DOMAIN, {}).get("weekly_round_trip_efficiency", 0.865)
+
+        try:
+            live_eta_charge = round(math.sqrt(max(0.50, min(1.0, weekly_rte))), 4)
+            live_eta_discharge = round(math.sqrt(max(0.50, min(1.0, weekly_rte))), 4)
+        except Exception:
+            live_eta_charge = 0.930
+            live_eta_discharge = 0.930
+
         dp_config = DPConfig(
             min_sell_price=min_sell_price,
             min_discharge_price=min_discharge_price,
@@ -2319,6 +2399,9 @@ class EmsDpSensor(SensorEntity):
             disable_discharge=False,
             battery_min_soc_evening=min_bat_soc_evening,
             battery_min_soc_morning=min_bat_soc_morning,
+            min_arbitrage_profit=min_arbitrage_profit,
+            eta_charge=live_eta_charge,
+            eta_discharge=live_eta_discharge,
         )
 
         if boiler_average_today is None:
@@ -2513,6 +2596,9 @@ class EmsDpSensor(SensorEntity):
             "error": None,
             "curtailed_pv_today": round(sum_curtailed_today, 2),
             "curtailed_pv_tomorrow": round(sum_curtailed_tomorrow, 2),
+            "applied_weekly_rte_pct": round(weekly_rte * 100.0, 1),
+            "applied_charge_efficiency_pct": round(live_eta_charge * 100.0, 1),
+            "applied_discharge_efficiency_pct": round(live_eta_discharge * 100.0, 1),
         }
 
 
@@ -2871,6 +2957,7 @@ class EmsSchedulerSensor(SensorEntity):
 
         usable_energy = current_usable
         safe_capacity = capacity if capacity > 0.0 else 5.12
+        current_physical_kwh = safe_capacity * (soc / 100.0) if soc is not None else safe_capacity * 0.5
 
         dispatched_plan = []
 
@@ -2904,10 +2991,12 @@ class EmsSchedulerSensor(SensorEntity):
 
             if action in ("grid_charge", "pv_charge"):
                 end_usable = min(usable_capacity, usable_energy + energy)
+                current_physical_kwh = min(safe_capacity, current_physical_kwh + energy)
                 power_w = energy_for_power * 1000.0
                 current_a = power_w / safe_voltage
             elif action in ("discharge", "self_consume"):
                 end_usable = max(0.0, usable_energy - energy)
+                current_physical_kwh = max(0.0, current_physical_kwh - energy)
                 power_w = energy_for_power * 1000.0
                 current_a = power_w / safe_voltage
             else:
@@ -2919,8 +3008,8 @@ class EmsSchedulerSensor(SensorEntity):
                 slot_hour = current_hour
             slot_min_bat_soc = min_bat_soc_evening if 10 <= slot_hour < 24 else min_bat_soc_morning
 
-            # Calculate SOC at the end of the hour
-            end_soc = (end_usable / safe_capacity) * 100 + slot_min_bat_soc
+            # Calculate SOC at the end of the hour based on continuous physical battery energy
+            end_soc = (current_physical_kwh / safe_capacity) * 100.0
             end_soc = max(slot_min_bat_soc, min(100.0, end_soc))
 
             slot_soc = soc if (slot_idx == 0 and soc is not None) else end_soc
@@ -3091,6 +3180,8 @@ class EmsSchedulerSensor(SensorEntity):
             "raw_mode": raw_mode,
             "mapping_reason": mapping_reason,
             "battery_soc": soc,
+            "battery_soc_entity": bat_soc_entity_id,
+            "profit_entity": "sensor.dp",
             "power": current_power,
             "target_soc": current_target_soc,
             "amps": current_amps,
@@ -4805,18 +4896,19 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             # Calculate actual boiler consumption today
             actual_boiler_today = 0.0
             try:
-                from homeassistant.helpers import entity_registry as _er_mod
-                _load_registry = _er_mod.async_get(self.hass)
-                _load_entity_id = _load_registry.async_get_entity_id(
-                    "sensor", DOMAIN, f"{self._entry_id}_load_consumption"
-                ) or "sensor.load_consumption"
-                load_state = self.hass.states.get(_load_entity_id)
-                if load_state:
-                    boiler_today = load_state.attributes.get("boiler_today")
-                    if isinstance(boiler_today, list):
-                        actual_boiler_today = sum(
-                            float(x) for x in boiler_today if x is not None
-                        )
+                load_sensor = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {}).get("load_sensor")
+                if load_sensor and hasattr(load_sensor, "_boiler_today_consumption"):
+                    actual_boiler_today = sum(float(x) for x in load_sensor._boiler_today_consumption if x is not None)
+
+                if actual_boiler_today <= 0.0:
+                    for st in self.hass.states.async_all():
+                        if "load_consumption" in st.entity_id:
+                            boiler_today = st.attributes.get("boiler_today")
+                            if isinstance(boiler_today, list):
+                                s = sum(float(x) for x in boiler_today if x is not None)
+                                if s > 0:
+                                    actual_boiler_today = s
+                                    break
             except Exception as ex:
                 _LOGGER.warning("EMS Boiler DP: failed to calculate actual boiler today: %s", ex)
 
@@ -4923,3 +5015,490 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         self._calc_duration = round(time.perf_counter() - start_time, 3)
 
         self.async_write_ha_state()
+
+class EmsConversionLossesTodaySensor(RestoreSensor, SensorEntity):
+    """EMS sensor tracking today's AC-DC-AC conversion losses and cycle efficiency."""
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:lightning-bolt"
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        bat_soc_entity_id: str | None,
+        bat_capacity_entity_id: str | None,
+        fallback_capacity: float,
+        price_buy_sensor_id: str | None,
+        charge_sensor_id: str | None = None,
+        discharge_sensor_id: str | None = None,
+        inverter_losses_sensor_id: str | None = None,
+        fallback_min_soc: float = 17.0,
+    ) -> None:
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._bat_soc_entity_id = bat_soc_entity_id
+        self._bat_capacity_entity_id = bat_capacity_entity_id
+        self._fallback_capacity = fallback_capacity
+        self._price_buy_sensor_id = price_buy_sensor_id
+        self._fallback_min_soc = fallback_min_soc
+
+        self._attr_name = "Conversion Losses Today"
+        self._attr_unique_id = f"{entry_id}_conversion_losses_today"
+        self.entity_id = "sensor.ems_conversion_losses_today"
+
+        self._midnight_soc: float | None = None
+        self._last_reset_day: int = dt_util.now().day
+        self._current_soc: float | None = None
+        self._current_energy_kwh: float = 0.0
+        self._midnight_energy_kwh: float = 0.0
+        self._charge_today_kwh: float = 0.0
+        self._discharge_today_kwh: float = 0.0
+        self._stored_delta_kwh: float = 0.0
+        self._battery_losses_kwh: float = 0.0
+        self._raw_battery_losses_kwh: float = 0.0
+        self._inverter_losses_kwh: float = 0.0
+        self._inverter_standby_losses_kwh: float | None = None
+        self._total_losses_kwh: float = 0.0
+        self._rte_pct: float = 90.0
+        self._total_losses_pct: float = 10.0
+        self._battery_losses_pct: float = 6.0
+        self._inverter_losses_pct: float = 4.0
+        self._cost_loss_pln: float = 0.0
+
+        self._charge_sensor_id: str | None = charge_sensor_id
+        self._discharge_sensor_id: str | None = discharge_sensor_id
+        self._inverter_losses_sensor_id: str | None = inverter_losses_sensor_id
+
+        self._listeners: list = []
+
+    def register_child_listener(self, cb) -> None:
+        self._listeners.append(cb)
+
+    def _notify_children(self) -> None:
+        for cb in self._listeners:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        return round(self._total_losses_kwh, 3)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = {
+            "battery_charge_today_kwh": round(self._charge_today_kwh, 3),
+            "battery_discharge_today_kwh": round(self._discharge_today_kwh, 3),
+            "battery_current_energy_kwh": round(self._current_energy_kwh, 3),
+            "battery_midnight_energy_kwh": round(self._midnight_energy_kwh, 3),
+            "battery_stored_delta_kwh": round(self._stored_delta_kwh, 3),
+            "battery_losses_today_kwh": round(self._battery_losses_kwh, 3),
+            "inverter_ac_losses_today_kwh": round(self._inverter_losses_kwh, 3),
+            "throughput_today_kwh": round(self._charge_today_kwh + self._discharge_today_kwh, 3),
+            "round_trip_efficiency_pct": self._rte_pct,
+            "total_losses_pct": self._total_losses_pct,
+            "battery_losses_pct": self._battery_losses_pct,
+            "inverter_ac_losses_pct": self._inverter_losses_pct,
+            "loss_cost_today_pln": self._cost_loss_pln,
+            "current_soc": round(self._current_soc, 1) if self._current_soc is not None else None,
+            "midnight_soc": round(self._midnight_soc, 1) if self._midnight_soc is not None else None,
+            "last_reset_day": self._last_reset_day,
+        }
+        if self._inverter_standby_losses_kwh is not None:
+            attrs["inverter_standby_losses_today_kwh"] = round(self._inverter_standby_losses_kwh, 3)
+        return attrs
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.attributes:
+            restored_midnight = last_state.attributes.get("midnight_soc")
+            if restored_midnight is not None and restored_midnight < 90.0:
+                self._midnight_soc = restored_midnight
+            self._last_reset_day = last_state.attributes.get("last_reset_day", dt_util.now().day)
+            self._rte_pct = float(last_state.attributes.get("round_trip_efficiency_pct", 90.0))
+
+        watch_entities = [e for e in [
+            self._bat_soc_entity_id,
+            self._bat_capacity_entity_id,
+            self._charge_sensor_id,
+            self._discharge_sensor_id,
+            self._inverter_losses_sensor_id,
+            self._price_buy_sensor_id,
+        ] if e]
+
+        if watch_entities:
+            self.async_on_remove(
+                async_track_state_change_event(self.hass, watch_entities, self._handle_update)
+            )
+
+        self.async_on_remove(
+            async_track_time_change(self.hass, self._handle_midnight, hour=0, minute=0, second=0)
+        )
+        self._calculate_losses()
+
+    def set_weekly_sensor(self, weekly_sensor: Any) -> None:
+        """Link the weekly loss sensor to receive completed daily stats."""
+        self._weekly_sensor = weekly_sensor
+
+    @callback
+    def _handle_midnight(self, now) -> None:
+        # Commit yesterday's completed stats to weekly history before reset
+        if getattr(self, "_weekly_sensor", None) is not None:
+            try:
+                yesterday_dt = now - timedelta(days=1)
+                yesterday_str = yesterday_dt.strftime("%Y-%m-%d")
+                throughput = self._charge_today_kwh + self._discharge_today_kwh
+                effective_input = max(self._charge_today_kwh, throughput * 0.5)
+                self._weekly_sensor.record_day(yesterday_str, effective_input, self._total_losses_kwh)
+            except Exception as err:
+                _LOGGER.warning("Failed to record daily stats to weekly loss sensor: %s", err)
+
+        self._last_reset_day = now.day
+        soc = self._get_float(self._bat_soc_entity_id)
+        if soc is not None:
+            self._midnight_soc = soc
+        self._calculate_losses()
+        self.async_write_ha_state()
+        self._notify_children()
+
+    @callback
+    def _handle_update(self, event) -> None:
+        self._calculate_losses()
+        self.async_write_ha_state()
+        self._notify_children()
+
+    def _get_float(self, eid: str | None) -> float | None:
+        if not eid:
+            return None
+        st = self.hass.states.get(eid)
+        if st and st.state not in ("unknown", "unavailable"):
+            try:
+                return float(st.state)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def _calculate_losses(self) -> None:
+        now = dt_util.now()
+        if now.day != self._last_reset_day:
+            self._handle_midnight(now)
+            return
+
+        soc = self._get_float(self._bat_soc_entity_id)
+        cap = self._get_float(self._bat_capacity_entity_id) or self._fallback_capacity
+
+        self._charge_today_kwh = self._get_float(self._charge_sensor_id) or 0.0
+        self._discharge_today_kwh = self._get_float(self._discharge_sensor_id) or 0.0
+        raw_inv_standby = self._get_float(self._inverter_losses_sensor_id)
+        self._inverter_standby_losses_kwh = raw_inv_standby
+
+        # GUARD CLAUSE: If charge and discharge sensors are not configured,
+        # never calculate conversion losses!
+        if not self._charge_sensor_id or not self._discharge_sensor_id:
+            self._total_losses_kwh = 0.0
+            self._battery_losses_kwh = 0.0
+            self._inverter_losses_kwh = 0.0
+            self._cost_loss_pln = 0.0
+            return
+
+        self._current_soc = soc
+
+        # Current remaining energy in battery (kWh)
+        if soc is not None and cap > 0.0:
+            self._current_energy_kwh = (soc / 100.0) * cap
+        else:
+            self._current_energy_kwh = 0.0
+
+        # Midnight SOC determination
+        if self._midnight_soc is None or (self._midnight_soc >= 90.0 and self._charge_today_kwh > 5.0):
+            if cap > 0.0 and soc is not None:
+                net_kwh = self._charge_today_kwh - self._discharge_today_kwh
+                inferred = soc - (net_kwh / cap) * 100.0
+                if 5.0 <= inferred <= 90.0:
+                    self._midnight_soc = inferred
+                else:
+                    self._midnight_soc = float(self._fallback_min_soc)
+            else:
+                self._midnight_soc = float(self._fallback_min_soc)
+
+        # Midnight energy in battery (kWh)
+        if self._midnight_soc is not None and cap > 0.0:
+            self._midnight_energy_kwh = (self._midnight_soc / 100.0) * cap
+        else:
+            self._midnight_energy_kwh = (self._fallback_min_soc / 100.0) * cap
+
+        # Net change in stored battery energy over today (kWh)
+        self._stored_delta_kwh = self._current_energy_kwh - self._midnight_energy_kwh
+
+        # Physical battery cell loss:
+        # 1. Guaranteed dynamic internal resistance loss (I^2*R) ~2.5% of throughput
+        min_bat_loss = (self._charge_today_kwh + self._discharge_today_kwh) * 0.025
+        # 2. Integral energy balance: Energy in - Energy out - Change in stored energy
+        raw_bat_loss = self._charge_today_kwh - self._discharge_today_kwh - self._stored_delta_kwh
+        self._raw_battery_losses_kwh = raw_bat_loss
+        # Combined: never drop below physical cell resistance loss due to BMS quantization jitter
+        self._battery_losses_kwh = max(min_bat_loss, raw_bat_loss)
+
+        # Inverter AC-DC-AC dynamic conversion loss:
+        # 4.0% loss per conversion during power transfer (excludes 24h idle standby consumption)
+        self._inverter_losses_kwh = (self._charge_today_kwh + self._discharge_today_kwh) * 0.04
+
+        self._total_losses_kwh = self._battery_losses_kwh + self._inverter_losses_kwh
+
+        throughput_kwh = self._charge_today_kwh + self._discharge_today_kwh
+        effective_base_kwh = max(0.5, throughput_kwh * 0.5)
+
+        buy_price = self._get_float(self._price_buy_sensor_id) or 0.85
+        self._cost_loss_pln = round(self._total_losses_kwh * buy_price, 2)
+
+        # Fallback RTE from weekly rolling sensor or domain data to avoid morning startup spikes
+        fallback_rte = 90.0
+        weekly_sensor = getattr(self, "_weekly_sensor", None)
+        if weekly_sensor and getattr(weekly_sensor, "_weekly_rte_pct", None):
+            fallback_rte = weekly_sensor._weekly_rte_pct
+        elif self.hass and DOMAIN in self.hass.data:
+            domain_rte = self.hass.data[DOMAIN].get("weekly_round_trip_efficiency")
+            if domain_rte and domain_rte > 0:
+                fallback_rte = round(domain_rte * 100.0, 1)
+
+        # Require at least 1.0 kWh throughput before calculating dynamic percentage losses.
+        # Eliminates morning dip artifacts caused by dividing night discharge losses by tenths of kWh charge.
+        if throughput_kwh >= 1.0:
+            self._battery_losses_pct = round(
+                max(0.0, min(100.0, (self._battery_losses_kwh / effective_base_kwh) * 100.0)), 1
+            )
+            self._inverter_losses_pct = round(
+                max(0.0, min(100.0, (self._inverter_losses_kwh / effective_base_kwh) * 100.0)), 1
+            )
+            self._total_losses_pct = round(self._battery_losses_pct + self._inverter_losses_pct, 1)
+            self._rte_pct = round(max(50.0, min(100.0, 100.0 - self._total_losses_pct)), 1)
+        else:
+            self._battery_losses_pct = 0.0
+            self._inverter_losses_pct = 0.0
+            self._total_losses_pct = 0.0
+            self._rte_pct = round(fallback_rte, 1)
+
+
+class EmsRoundTripEfficiencySensor(SensorEntity):
+    """EMS sensor reporting current battery round-trip efficiency."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "%"
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:battery-sync"
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        parent: EmsConversionLossesTodaySensor,
+    ) -> None:
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._parent = parent
+        self._attr_name = "Battery Round Trip Efficiency"
+        self._attr_unique_id = f"{entry_id}_battery_round_trip_efficiency"
+        self.entity_id = "sensor.ems_battery_round_trip_efficiency"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        return self._parent._rte_pct
+
+    async def async_added_to_hass(self) -> None:
+        self._parent.register_child_listener(self.async_write_ha_state)
+
+
+class EmsConversionLossCostTodaySensor(SensorEntity):
+    """EMS sensor reporting monetary cost of AC-DC-AC conversion losses today."""
+
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = "PLN"
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:cash-minus"
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        parent: EmsConversionLossesTodaySensor,
+    ) -> None:
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._parent = parent
+        self._attr_name = "Conversion Loss Cost Today"
+        self._attr_unique_id = f"{entry_id}_conversion_loss_cost_today"
+        self.entity_id = "sensor.ems_conversion_loss_cost_today"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        return self._parent._cost_loss_pln
+
+    async def async_added_to_hass(self) -> None:
+        self._parent.register_child_listener(self.async_write_ha_state)
+
+class EmsWeeklyLossRateSensor(RestoreSensor, SensorEntity):
+    """EMS sensor reporting rolling 7-day average loss rate (%)."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "%"
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:chart-bell-curve-cumulative"
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        conversion_sensor: EmsConversionLossesTodaySensor,
+    ) -> None:
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._conversion_sensor = conversion_sensor
+
+        self._attr_name = "Battery Weekly Loss Rate"
+        self._attr_unique_id = f"{entry_id}_battery_weekly_loss_rate"
+        self.entity_id = "sensor.ems_battery_weekly_loss_rate"
+
+        self._history_7d: list[dict[str, Any]] = []
+        self._weekly_loss_pct: float = 13.5
+        self._weekly_rte_pct: float = 86.5
+        self._total_input_7d_kwh: float = 0.0
+        self._total_losses_7d_kwh: float = 0.0
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        return self._weekly_loss_pct
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        one_way = round(math.sqrt(max(0.5, min(1.0, self._weekly_rte_pct / 100.0))) * 100.0, 1)
+        return {
+            "weekly_efficiency_pct": self._weekly_rte_pct,
+            "weekly_charge_efficiency_pct": one_way,
+            "weekly_discharge_efficiency_pct": one_way,
+            "history_days_count": len(self._history_7d),
+            "total_input_7d_kwh": round(self._total_input_7d_kwh, 3),
+            "total_losses_7d_kwh": round(self._total_losses_7d_kwh, 3),
+            "daily_history": self._history_7d,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.attributes:
+            hist = last_state.attributes.get("daily_history")
+            if isinstance(hist, list):
+                self._history_7d = [d for d in hist if isinstance(d, dict)][:7]
+            self._recalculate_weekly()
+
+        self._conversion_sensor.register_child_listener(self._handle_parent_update)
+        self._publish_to_domain()
+
+    @callback
+    def _handle_parent_update(self) -> None:
+        self._recalculate_weekly()
+        self.async_write_ha_state()
+        self._publish_to_domain()
+
+    def record_day(self, date_str: str, input_kwh: float, losses_kwh: float) -> None:
+        """Called by conversion sensor at midnight with completed day results."""
+        if input_kwh < 1.0:
+            return
+
+        loss_pct = round((losses_kwh / input_kwh) * 100.0, 1) if input_kwh > 0 else 0.0
+        self._history_7d = [d for d in self._history_7d if d.get("date") != date_str]
+        self._history_7d.append({
+            "date": date_str,
+            "input_kwh": round(input_kwh, 3),
+            "losses_kwh": round(losses_kwh, 3),
+            "loss_pct": loss_pct,
+        })
+        if len(self._history_7d) > 7:
+            self._history_7d = self._history_7d[-7:]
+        self._recalculate_weekly()
+        self._publish_to_domain()
+
+    def _recalculate_weekly(self) -> None:
+        if not self._history_7d:
+            if getattr(self._conversion_sensor, "_total_losses_pct", 0.0) > 0.0:
+                self._weekly_loss_pct = self._conversion_sensor._total_losses_pct
+            else:
+                self._weekly_loss_pct = 13.5
+            self._weekly_rte_pct = round(max(50.0, min(100.0, 100.0 - self._weekly_loss_pct)), 1)
+            self._total_input_7d_kwh = 0.0
+            self._total_losses_7d_kwh = 0.0
+            return
+
+        valid_days = [d for d in self._history_7d if float(d.get("input_kwh", 0.0)) >= 1.0]
+        if not valid_days:
+            self._weekly_loss_pct = 13.5
+            self._weekly_rte_pct = 86.5
+            return
+
+        sum_in = sum(float(d.get("input_kwh", 0.0)) for d in valid_days)
+        sum_loss = sum(float(d.get("losses_kwh", 0.0)) for d in valid_days)
+        self._total_input_7d_kwh = sum_in
+        self._total_losses_7d_kwh = sum_loss
+
+        if sum_in >= 1.0:
+            weighted_loss = (sum_loss / sum_in) * 100.0
+            self._weekly_loss_pct = round(max(0.0, min(100.0, weighted_loss)), 1)
+            self._weekly_rte_pct = round(max(50.0, min(100.0, 100.0 - self._weekly_loss_pct)), 1)
+        else:
+            self._weekly_loss_pct = 13.5
+            self._weekly_rte_pct = 86.5
+
+    def _publish_to_domain(self) -> None:
+        if self.hass and DOMAIN in self.hass.data:
+            self.hass.data[DOMAIN]["weekly_loss_rate_pct"] = self._weekly_loss_pct
+            self.hass.data[DOMAIN]["weekly_round_trip_efficiency"] = self._weekly_rte_pct / 100.0
+            one_way = round(math.sqrt(max(0.5, min(1.0, self._weekly_rte_pct / 100.0))), 4)
+            self.hass.data[DOMAIN]["weekly_charge_efficiency"] = one_way
+            self.hass.data[DOMAIN]["weekly_discharge_efficiency"] = one_way
+

@@ -12,7 +12,19 @@ from homeassistant.components.climate import DOMAIN as CLIMATE_DOMAIN
 from homeassistant.const import ATTR_ENTITY_ID, ATTR_TEMPERATURE, SERVICE_TURN_OFF, SERVICE_TURN_ON, STATE_ON, STATE_OFF
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
-from .const import CONF_CALIBRATION_TYPE, CONF_WATER_FLOW_SENSOR, CONF_PEOPLE_HOME_SENSOR, CONF_BOILER_WARM_DIFF, DEFAULT_BOILER_WARM_DIFF
+from homeassistant.helpers.storage import Store
+from .const import (
+    CONF_CALIBRATION_TYPE,
+    CONF_WATER_FLOW_SENSOR,
+    CONF_TOTAL_WATER_METER_SENSOR,
+    CONF_PEOPLE_HOME_SENSOR,
+    CONF_BOILER_WARM_DIFF,
+    DEFAULT_BOILER_WARM_DIFF,
+    CONF_CWU_REQUEST_ENTITY,
+    CONF_CWU_SETPOINT_ENTITY,
+    CONF_HW_CIRCULATION_PUMP,
+    CONF_HW_CIRCULATION_RETURN_TEMP,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,10 +33,24 @@ class BoilerController:
         self.hass = hass
         self.config = config
         self.entry_id = None
+        self._water_store = Store(hass, 1, "ems_water_stats")
+        self._today_cold_water_liters = 0.0
+        self._today_hot_water_liters = 0.0
+        self._dhw_daily_profiles = {}
+        self._dhw_hourly_profile = [0.0] * 24
         
         self.elec_heater = config.get("elec_boiler_heater")
         self.pump = config.get("circulation_pump")
         self.bypass_valve = config.get("bypass_valve")
+        
+        self.cwu_request_entity = config.get(CONF_CWU_REQUEST_ENTITY)
+        self.cwu_setpoint_entity = config.get(CONF_CWU_SETPOINT_ENTITY)
+        self.hw_circulation_pump = config.get(CONF_HW_CIRCULATION_PUMP)
+        self.hw_circulation_return_temp = config.get(CONF_HW_CIRCULATION_RETURN_TEMP)
+        self._cwu_active = False
+        
+        self._turned_on_by_ems = {}
+        self._first_run = True
         
         # Calibration elements
         self.gas_climate = config.get("gas_boiler_climate")
@@ -76,14 +102,10 @@ class BoilerController:
     async def async_setup(self):
         """Регистрация безопасных слушателей событий и таймеров калибровки."""
         self._is_applying_dp_plan = False
+        await self._async_load_water_stats()
+        await self._async_restore_stats_from_history()
 
-        # 2. Защита от ручного включения в режиме Auto (только для электронагревателя)
-        if self.elec_heater:
-            async_track_state_change_event(
-                self.hass,
-                [self.elec_heater],
-                self._async_override_check
-            )
+        # 2. Защита от ручного включения отключена
 
         # 3. Следим за изменениями планировщика DP для автоматического управления
         async_track_state_change_event(
@@ -105,6 +127,22 @@ class BoilerController:
                 self.hass,
                 [self.people_home_sensor],
                 self._async_people_home_changed
+            )
+
+        # 4b. Следим за запросом CWU, уставкой и обраткой ГВС
+        cwu_entities = []
+        if self.cwu_request_entity:
+            cwu_entities.append(self.cwu_request_entity)
+        if self.cwu_setpoint_entity:
+            cwu_entities.append(self.cwu_setpoint_entity)
+        if self.hw_circulation_return_temp:
+            cwu_entities.append(self.hw_circulation_return_temp)
+
+        if cwu_entities:
+            async_track_state_change_event(
+                self.hass,
+                cwu_entities,
+                self._async_cwu_state_changed
             )
 
         # 5. Следим за изменением температуры для работы программного термостата и перекачки
@@ -163,6 +201,12 @@ class BoilerController:
         
     def _update_cutoff_states(self):
         """Обновление флагов отсечки нагрева и перекачки с учетом гистерезиса и режима Fail-Safe."""
+        if self.current_mode.lower() != "auto":
+            self._elec_cutoff_active = False
+            self._gas_cutoff_active = False
+            self._solar_deficit_cutoff = False
+            return
+
         # Получаем плановые целевые температуры из расписания DP для текущего часа
         dp_t_max_elec = None
         dp_t_max_gas = None
@@ -349,6 +393,11 @@ class BoilerController:
                     SERVICE_TURN_OFF,
                     {ATTR_ENTITY_ID: self.pump}
                 )
+            
+            # Reset ownership flags for stopped manual devices
+            for entity_id in [self.elec_heater, self.pump, self.gas_climate]:
+                if entity_id:
+                    self._turned_on_by_ems[entity_id] = False
         except Exception as ex:
             _LOGGER.error("Error shutting down manual heating devices: %s", ex)
         finally:
@@ -388,45 +437,45 @@ class BoilerController:
         self._is_applying_dp_plan = True
         try:
             # 2. Управление байпасом: GAS -> OFF (закрыт), остальные -> ON (открыт)
+            # 2. Управление байпасом: GAS -> OFF (закрыт), остальные -> ON (открыт)
             target_bypass = "OFF" if mode == "GAS" else "ON"
             if self.bypass_valve:
                 valve_domain = self.bypass_valve.split(".")[0]
-                current_valve = self.hass.states.get(self.bypass_valve)
                 target_service = SERVICE_TURN_ON if target_bypass == "ON" else SERVICE_TURN_OFF
                 target_state = STATE_ON if target_bypass == "ON" else STATE_OFF
-                if not current_valve or current_valve.state != target_state:
-                    _LOGGER.info("EMS Boiler Controller (Manual): Setting bypass valve from %s to %s", current_valve.state if current_valve else "unknown", target_state)
-                    await self.hass.services.async_call(
-                        valve_domain,
-                        target_service,
-                        {ATTR_ENTITY_ID: self.bypass_valve}
-                    )
+                await self._async_control_actuator(
+                    self.bypass_valve,
+                    valve_domain,
+                    target_service,
+                    target_state,
+                    "EMS Boiler Controller (Manual Bypass)"
+                )
 
             # 3. Управление ТЭНом: ELEC/ELEC_PUMP -> ON, остальные -> OFF
             target_heater_state = STATE_ON if "ELEC" in mode else STATE_OFF
             target_heater_service = SERVICE_TURN_ON if target_heater_state == STATE_ON else SERVICE_TURN_OFF
             if self.elec_heater:
-                current_heater = self.hass.states.get(self.elec_heater)
-                if not current_heater or current_heater.state != target_heater_state:
-                    _LOGGER.info("EMS Boiler Controller (Manual): Setting electric heater switch from %s to %s", current_heater.state if current_heater else "unknown", target_heater_state)
-                    await self.hass.services.async_call(
-                        SWITCH_DOMAIN,
-                        target_heater_service,
-                        {ATTR_ENTITY_ID: self.elec_heater}
-                    )
+                await self._async_control_actuator(
+                    self.elec_heater,
+                    SWITCH_DOMAIN,
+                    target_heater_service,
+                    target_heater_state,
+                    "EMS Boiler Controller (Manual Electric Heater)"
+                )
 
             # 4. Управление газом: GAS/GAS_PUMP -> heat, остальные -> off
             target_hvac = "heat" if "GAS" in mode else "off"
             if self.gas_climate:
-                current_gas = self.hass.states.get(self.gas_climate)
-                if not current_gas or current_gas.state != target_hvac:
-                    _LOGGER.info("EMS Boiler Controller (Manual): Setting gas climate HVAC mode from %s to %s", current_gas.state if current_gas else "unknown", target_hvac)
-                    await self.hass.services.async_call(
-                        CLIMATE_DOMAIN,
-                        "set_hvac_mode",
-                        {ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": target_hvac}
-                    )
+                await self._async_control_actuator(
+                    self.gas_climate,
+                    CLIMATE_DOMAIN,
+                    "set_hvac_mode",
+                    target_hvac,
+                    "EMS Boiler Controller (Manual Gas Climate)",
+                    service_data={ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": target_hvac}
+                )
                 if target_hvac == "heat":
+                    current_gas = self.hass.states.get(self.gas_climate)
                     current_target_temp = current_gas.attributes.get("temperature") if current_gas else None
                     if current_target_temp != setpoint:
                         await self.hass.services.async_call(
@@ -460,57 +509,17 @@ class BoilerController:
 
                 target_pump_service = SERVICE_TURN_ON if target_pump_state_logical else SERVICE_TURN_OFF
                 target_pump_state = STATE_ON if target_pump_state_logical else STATE_OFF
-                current_pump = self.hass.states.get(self.pump)
-                if not current_pump or current_pump.state != target_pump_state:
-                    _LOGGER.info("EMS Boiler Controller (Manual): Setting circulation pump from %s to %s", current_pump.state if current_pump else "unknown", target_pump_state)
-                    await self.hass.services.async_call(
-                        SWITCH_DOMAIN,
-                        target_pump_service,
-                        {ATTR_ENTITY_ID: self.pump}
-                    )
+                await self._async_control_actuator(
+                    self.pump,
+                    SWITCH_DOMAIN,
+                    target_pump_service,
+                    target_pump_state,
+                    "EMS Boiler Controller (Manual Circulation Pump)"
+                )
         except Exception as ex:
             _LOGGER.error("Error applying manual heating: %s", ex)
         finally:
             self._is_applying_dp_plan = False
-
-    async def _async_override_check(self, event):
-        """Отклоняет ручные изменения в режиме Auto."""
-        # Пропускаем любые проверки, если сейчас выполняется калибровка или применяется DP-план
-        if getattr(self, "_is_applying_dp_plan", False):
-            return
-
-        if self.calibration_sensor and self.calibration_sensor.native_value != "idle":
-            return
-
-        entity_id = event.data.get("entity_id")
-        new_state = event.data.get("new_state")
-        old_state = event.data.get("old_state")
-        
-        # Блокировка 1: Режим Auto запрещает ручное управление
-        if self.current_mode.lower() == "auto":
-            if new_state and old_state and new_state.state != old_state.state:
-                # Определим плановое состояние устройства на основе сенсора DP
-                dp_state = self.hass.states.get("sensor.boiler_dp")
-                if not dp_state or dp_state.state in ("unknown", "unavailable", "error", "idle_bypass", "NO PATH", "NO CALIB DATA"):
-                    expected_state = STATE_OFF
-                else:
-                    mode = dp_state.state.upper()
-                    if entity_id == self.elec_heater:
-                        if "ELEC" in mode:
-                            expected_state = STATE_OFF if self._elec_cutoff_active else STATE_ON
-                        else:
-                            expected_state = STATE_OFF
-                    else:
-                        expected_state = None
-
-                # Если новое состояние совпадает с целевым плановым — пропускаем!
-                if expected_state is not None and new_state.state == expected_state:
-                    return
-
-                # Если не совпадает — откатываем к плановому (или предыдущему)
-                target_state = expected_state if expected_state is not None else old_state.state
-                service = "turn_on" if target_state == STATE_ON else "turn_off"
-                await self.hass.services.async_call(SWITCH_DOMAIN, service, {ATTR_ENTITY_ID: entity_id})
                 
     async def _async_calculate_costs(self, _now):
         """Real-time расчёт стоимости стендбай-потерь через LUT текущего брэкета."""
@@ -559,6 +568,377 @@ class BoilerController:
 
     def _is_water_flowing(self) -> bool:
         return self._get_water_flow_rate() > 0.5
+
+    def _update_water_flow_stats(self):
+        """Track cold and hot water consumption volumes via thermal balance and total meter deltas."""
+        now = dt_util.now()
+        today_date = now.date()
+
+        if getattr(self, "_water_stats_date", None) != today_date:
+            self._water_stats_date = today_date
+            self._today_cold_water_liters = 0.0
+            self._today_hot_water_liters = 0.0
+            self._today_meter_start = None
+
+        water_flow_entity = self.config.get(CONF_TOTAL_WATER_METER_SENSOR) or self.config.get(CONF_WATER_FLOW_SENSOR)
+        if not water_flow_entity:
+            return
+
+        flow_state = self.hass.states.get(water_flow_entity)
+        if not flow_state or flow_state.state in ("unknown", "unavailable", None):
+            return
+
+        try:
+            val = float(flow_state.state)
+        except (ValueError, TypeError):
+            return
+
+        unit = str(flow_state.attributes.get("unit_of_measurement", "")).lower()
+        multiplier = 1000.0 if ("m³" in unit or "m3" in unit) else 1.0
+        state_class = str(flow_state.attributes.get("state_class", "")).lower()
+        is_daily_meter = ("daily" in water_flow_entity.lower() or "today" in water_flow_entity.lower()) and "total" not in water_flow_entity.lower()
+
+        if is_daily_meter:
+            total_today = max(0.0, val * multiplier)
+        else:
+            if getattr(self, "_today_meter_start", None) is None or float(self._today_meter_start) > val:
+                self._today_meter_start = val
+            total_today = max(0.0, (val - float(self._today_meter_start)) * multiplier)
+
+        last_time = getattr(self, "_last_flow_sample_time", None)
+        self._last_flow_sample_time = now
+
+        t_elec_curr = self._get_elec_temp()
+        t_gas_curr = self._get_gas_temp()
+        last_t_elec = getattr(self, "_last_flow_t_elec", t_elec_curr)
+        last_t_gas = getattr(self, "_last_flow_t_gas", t_gas_curr)
+        
+        self._last_flow_t_elec = t_elec_curr
+        self._last_flow_t_gas = t_gas_curr
+
+        # Determine active boiler contour from bypass valve state
+        is_bypass_on = True
+        if self.bypass_valve:
+            vstate = self.hass.states.get(self.bypass_valve)
+            if vstate and vstate.state == STATE_OFF:
+                is_bypass_on = False
+
+        dhw_step_liters = 0.0
+        v_boiler = float(self.config.get("elec_boiler_capacity", self.config.get("boiler_capacity", 75.0))) if is_bypass_on else float(self.config.get("gas_boiler_capacity", 45.0))
+
+        if is_bypass_on:
+            if t_elec_curr is not None and last_t_elec is not None and last_t_elec > t_elec_curr:
+                delta_t = last_t_elec - t_elec_curr
+                t_avg = max(30.0, t_elec_curr)
+                if (t_avg - 10.0) > 5.0:
+                    dhw_step_liters += v_boiler * (delta_t / (t_avg - 10.0))
+        else:
+            if t_gas_curr is not None and last_t_gas is not None and last_t_gas > t_gas_curr:
+                delta_t = last_t_gas - t_gas_curr
+                t_avg = max(30.0, t_gas_curr)
+                if (t_avg - 10.0) > 5.0:
+                    dhw_step_liters += v_boiler * (delta_t / (t_avg - 10.0))
+
+        # Check water meter flow delta between samples to prevent fake heat-loss draw steps
+        last_total = getattr(self, "_last_total_today_water", total_today)
+        self._last_total_today_water = total_today
+        meter_delta_liters = max(0.0, total_today - last_total)
+
+        actual_dhw_step = 0.0
+        if dhw_step_liters > 0.0 and meter_delta_liters > 0.0:
+            actual_dhw_step = min(meter_delta_liters, dhw_step_liters)
+            self._today_hot_water_liters = min(total_today, getattr(self, "_today_hot_water_liters", 0.0) + actual_dhw_step)
+            hour = now.hour
+            weekday_str = str(now.weekday())
+
+            # Real-time update of current hour DHW profile (in kWh)
+            dhw_prof = list(getattr(self, "_dhw_hourly_profile", [0.0] * 24))
+            if len(dhw_prof) == 24:
+                dhw_prof[hour] = round(dhw_prof[hour] + actual_dhw_step * 0.035, 3)
+                self._dhw_hourly_profile = dhw_prof
+
+            profiles = getattr(self, "_dhw_daily_profiles", {})
+            if not isinstance(profiles, dict):
+                profiles = {}
+            if weekday_str not in profiles or not isinstance(profiles[weekday_str], list) or len(profiles[weekday_str]) != 24:
+                profiles[weekday_str] = [0.0] * 24
+
+            day_prof = profiles[weekday_str]
+            day_prof[hour] = round(0.85 * day_prof[hour] + 0.15 * actual_dhw_step, 1)
+            profiles[weekday_str] = day_prof
+            self._dhw_daily_profiles = profiles
+
+        self._today_cold_water_liters = max(0.0, total_today - getattr(self, "_today_hot_water_liters", 0.0))
+
+        # Real-time update of current hour cold water profile (in Liters)
+        cold_prof = list(getattr(self, "_cold_hourly_profile", [0.0] * 24))
+        if len(cold_prof) == 24:
+            if meter_delta_liters > 0.0:
+                cold_step = max(0.0, meter_delta_liters - actual_dhw_step)
+                cold_prof[now.hour] = round(cold_prof[now.hour] + cold_step, 1)
+            
+            # Reconcile any unallocated water so chart sum always matches total_today
+            current_sum = sum(cold_prof) + getattr(self, "_today_hot_water_liters", 0.0)
+            if total_today > current_sum + 0.5:
+                unallocated = total_today - current_sum
+                cold_prof[now.hour] = round(cold_prof[now.hour] + unallocated, 1)
+
+            self._cold_hourly_profile = cold_prof
+
+        self._async_save_water_stats()
+
+    async def _async_load_water_stats(self):
+        """Load persistent water statistics from storage."""
+        try:
+            data = await self._water_store.async_load()
+            if data:
+                today_str = str(dt_util.now().date())
+                saved_date = data.get("date")
+                if saved_date == today_str:
+                    self._today_cold_water_liters = float(data.get("today_cold_water_liters", 0.0))
+                    self._today_hot_water_liters = float(data.get("today_hot_water_liters", 0.0))
+                    self._today_meter_start = data.get("today_meter_start")
+                    self._water_stats_date = dt_util.now().date()
+                    self._dhw_hourly_profile = data.get("dhw_hourly_profile", [0.0] * 24)
+                    self._cold_hourly_profile = data.get("cold_hourly_profile", [0.0] * 24)
+                    if self._today_cold_water_liters > 5000.0:
+                        self._today_cold_water_liters = 0.0
+                    if self._today_hot_water_liters > 2000.0:
+                        self._today_hot_water_liters = 0.0
+                else:
+                    self._today_cold_water_liters = 0.0
+                    self._today_hot_water_liters = 0.0
+                    self._today_meter_start = None
+                    self._water_stats_date = dt_util.now().date()
+                    self._dhw_hourly_profile = [0.0] * 24
+                    self._cold_hourly_profile = [0.0] * 24
+                self._dhw_daily_profiles = data.get("dhw_daily_profiles", {})
+        except Exception as err:
+            _LOGGER.warning("EMS Boiler Controller: Failed to load water stats: %s", err)
+
+    def _async_save_water_stats(self):
+        """Save persistent water statistics to storage."""
+        now = dt_util.now()
+        data = {
+            "date": str(now.date()),
+            "today_cold_water_liters": getattr(self, "_today_cold_water_liters", 0.0),
+            "today_hot_water_liters": getattr(self, "_today_hot_water_liters", 0.0),
+            "today_meter_start": getattr(self, "_today_meter_start", None),
+            "dhw_daily_profiles": getattr(self, "_dhw_daily_profiles", {}),
+            "dhw_hourly_profile": getattr(self, "_dhw_hourly_profile", [0.0] * 24),
+            "cold_hourly_profile": getattr(self, "_cold_hourly_profile", [0.0] * 24),
+        }
+        self._water_store.async_delay_save(lambda: data, 5)
+
+    async def _async_restore_stats_from_history(self):
+        """Restore today's water stats and calculate 7-day DHW daily profiles from HA Recorder DB statistics."""
+        if "recorder" not in self.hass.config.components:
+            return
+
+        from homeassistant.components.recorder.statistics import statistics_during_period
+        from datetime import timedelta
+
+        from .const import CONF_STATISTICS_DAYS
+        stat_days = int(self.config.get(CONF_STATISTICS_DAYS, 42))
+
+        now = dt_util.now()
+        start_time = (now - timedelta(days=stat_days)).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        water_flow_entity = self.config.get(CONF_TOTAL_WATER_METER_SENSOR) or self.config.get(CONF_WATER_FLOW_SENSOR)
+        if not water_flow_entity:
+            return
+
+        try:
+            stats = await self.hass.async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                start_time,
+                now,
+                {water_flow_entity},
+                "hour",
+                None,
+                {"change", "sum"},
+            )
+        except Exception as err:
+            _LOGGER.warning("EMS Boiler Controller: Failed to query recorder statistics: %s", err)
+            return
+
+        ent_stats = stats.get(water_flow_entity, []) if stats else []
+        if not ent_stats:
+            return
+
+        daily_sums = {str(d): [0.0] * 24 for d in range(7)}
+        daily_counts = {str(d): [0] * 24 for d in range(7)}
+
+        today_cold = 0.0
+        today_hot = 0.0
+        today_profile = [0.0] * 24
+        today_cold_profile = [0.0] * 24
+
+        for record in ent_stats:
+            start_ts = record.get("start")
+            if not start_ts:
+                continue
+
+            dt_rec = dt_util.as_local(dt_util.utc_from_timestamp(start_ts))
+            change = record.get("change")
+            if change is None:
+                continue
+
+            change_val = float(change)
+            if change_val <= 0:
+                continue
+
+            unit = str(record.get("unit_of_measurement", "")).lower()
+            if "m³" in unit or "m3" in unit:
+                change_val *= 1000.0
+
+            weekday_str = str(dt_rec.weekday())
+            hour = dt_rec.hour
+
+            if dt_rec >= today_start:
+                hot_part = change_val * 0.35
+                cold_part = change_val * 0.65
+                today_hot += hot_part
+                today_cold += cold_part
+                today_profile[hour] = round(hot_part * 0.035, 3)
+                today_cold_profile[hour] = round(cold_part, 1)
+            else:
+                daily_sums[weekday_str][hour] += change_val * 0.35
+                daily_counts[weekday_str][hour] += 1
+
+        dhw_profiles = {}
+        for d in range(7):
+            d_str = str(d)
+            dhw_profiles[d_str] = [
+                round(daily_sums[d_str][h] / max(1, daily_counts[d_str][h]), 1)
+                for h in range(24)
+            ]
+
+        # Ensure future hours (hour > now.hour) in today_profile are strictly 0.0
+        cur_hour = now.hour
+        for h in range(cur_hour + 1, 24):
+            today_profile[h] = 0.0
+            today_cold_profile[h] = 0.0
+
+        if today_cold > 0 or today_hot > 0:
+            self._today_cold_water_liters = round(today_cold, 1)
+            self._today_hot_water_liters = round(today_hot, 1)
+            self._water_stats_date = now.date()
+
+        if any(sum(dhw_profiles[d]) > 0 for d in dhw_profiles):
+            self._dhw_daily_profiles = dhw_profiles
+
+        # Query raw state changes from recorder archive for today
+        try:
+            from homeassistant.components.recorder import history
+            today_states_dict = await self.hass.async_add_executor_job(
+                history.state_changes_during_period,
+                self.hass,
+                today_start,
+                now,
+                water_flow_entity,
+            )
+            raw_states = today_states_dict.get(water_flow_entity, []) if today_states_dict else []
+            if raw_states:
+                hourly_vals = {h: [] for h in range(24)}
+                for st in raw_states:
+                    if not st or st.state in (None, "unknown", "unavailable"):
+                        continue
+                    try:
+                        val_m = float(st.state)
+                        val_l = val_m * 1000.0 if val_m < 1000.0 else val_m
+                        dt = dt_util.as_local(st.last_updated)
+                        if dt.date() == now.date():
+                            hourly_vals[dt.hour].append(val_l)
+                    except (ValueError, TypeError):
+                        continue
+
+                computed_today_cold = [0.0] * 24
+                prev_val = None
+                for h in range(now.hour + 1):
+                    h_list = hourly_vals.get(h, [])
+                    if h_list:
+                        if prev_val is None:
+                            prev_val = h_list[0]
+                        h_end = h_list[-1]
+                        delta = max(0.0, h_end - prev_val)
+                        computed_today_cold[h] = round(delta, 1)
+                        prev_val = h_end
+
+                if any(v > 0 for v in computed_today_cold):
+                    today_cold_profile = computed_today_cold
+                    today_cold = sum(today_cold_profile)
+        except Exception as err:
+            _LOGGER.warning("EMS Boiler Controller: Failed to query recorder state changes: %s", err)
+
+        # dhw_hourly_profile represents ACTUAL DHW today (0.0 for future hours)
+        if any(v > 0 for v in today_profile):
+            self._dhw_hourly_profile = today_profile
+        if any(v > 0 for v in today_cold_profile):
+            self._cold_hourly_profile = today_cold_profile
+
+        _LOGGER.info(
+            "EMS Boiler Controller: Extracted 14 days of hourly water statistics from HA DB! Today Cold=%.1fL, Hot=%.1fL, Day %s profile sum=%.1fL",
+            self._today_cold_water_liters,
+            self._today_hot_water_liters,
+            now.weekday(),
+            sum(self._dhw_hourly_profile) / 0.035 if sum(self._dhw_hourly_profile) > 0 else 0.0
+        )
+        self._async_save_water_stats()
+
+    def get_today_cold_water_liters(self) -> float:
+        val = getattr(self, "_today_cold_water_liters", 0.0)
+        if val <= 0.0:
+            prof_sum = sum(self.get_cold_hourly_profile())
+            if prof_sum > 0.0:
+                return round(prof_sum, 1)
+        return round(val, 1)
+
+    def get_today_hot_water_liters(self) -> float:
+        val = getattr(self, "_today_hot_water_liters", 0.0)
+        if val <= 0.0:
+            prof_sum = sum(self.get_dhw_hourly_profile()) / 0.035
+            if prof_sum > 0.0:
+                return round(prof_sum, 1)
+        return round(val, 1)
+
+    def get_today_expected_hot_water_liters(self) -> float:
+        now = dt_util.now()
+        weekday_str = str(now.weekday())
+        profiles = getattr(self, "_dhw_daily_profiles", {})
+        if isinstance(profiles, dict) and weekday_str in profiles:
+            return round(sum(profiles[weekday_str]), 1)
+        overall = getattr(self, "_dhw_hourly_profile", [0.0] * 24)
+        return round(sum(overall) / 0.035, 1)
+
+    def get_dhw_today_forecast_profile(self) -> list:
+        now = dt_util.now()
+        weekday_str = str(now.weekday())
+        profiles = getattr(self, "_dhw_daily_profiles", {})
+        if isinstance(profiles, dict) and weekday_str in profiles:
+            return profiles[weekday_str]
+        overall = getattr(self, "_dhw_hourly_profile", [0.0] * 24)
+        return [round(k / 0.035, 1) for k in overall]
+
+    def get_dhw_hourly_profile(self) -> list:
+        now = dt_util.now()
+        prof = list(getattr(self, "_dhw_hourly_profile", [0.0] * 24))
+        cur_h = now.hour
+        for h in range(cur_h + 1, 24):
+            if h < len(prof):
+                prof[h] = 0.0
+        return prof
+
+    def get_cold_hourly_profile(self) -> list:
+        now = dt_util.now()
+        prof = list(getattr(self, "_cold_hourly_profile", [0.0] * 24))
+        cur_h = now.hour
+        for h in range(cur_h + 1, 24):
+            if h < len(prof):
+                prof[h] = 0.0
+        return prof
 
     def _is_gvs_pump_active(self) -> bool:
         from .const import CONF_HW_CIRCULATION_PUMP
@@ -1503,6 +1883,7 @@ class BoilerController:
                     "set_hvac_mode",
                     {ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": "heat"}
                 )
+                self._turned_on_by_ems[self.gas_climate] = True
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
                     "set_temperature",
@@ -1516,6 +1897,7 @@ class BoilerController:
                         SERVICE_TURN_ON,
                         {ATTR_ENTITY_ID: self.pump}
                     )
+                    self._turned_on_by_ems[self.pump] = True
             else:
                 # Гасим нагрев
                 await self.hass.services.async_call(
@@ -1523,12 +1905,14 @@ class BoilerController:
                     "set_hvac_mode",
                     {ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": "off"}
                 )
+                self._turned_on_by_ems[self.gas_climate] = False
                 if self.pump:
                     await self.hass.services.async_call(
                         SWITCH_DOMAIN,
                         SERVICE_TURN_OFF,
                         {ATTR_ENTITY_ID: self.pump}
                     )
+                    self._turned_on_by_ems[self.pump] = False
         else:  # elec
             if not self.elec_heater:
                 return
@@ -1542,12 +1926,14 @@ class BoilerController:
                         SERVICE_TURN_ON,
                         {ATTR_ENTITY_ID: self.bypass_valve}
                     )
+                    self._turned_on_by_ems[self.bypass_valve] = True
                 # 2. Включаем ТЭН
                 await self.hass.services.async_call(
                     SWITCH_DOMAIN,
                     SERVICE_TURN_ON,
                     {ATTR_ENTITY_ID: self.elec_heater}
                 )
+                self._turned_on_by_ems[self.elec_heater] = True
                 # 3. Если фаза с насосом - заводим циркуляцию
                 if "pump" in phase and self.pump:
                     await self.hass.services.async_call(
@@ -1555,6 +1941,7 @@ class BoilerController:
                         SERVICE_TURN_ON,
                         {ATTR_ENTITY_ID: self.pump}
                     )
+                    self._turned_on_by_ems[self.pump] = True
             else:
                 # Выключаем ТЭН
                 await self.hass.services.async_call(
@@ -1562,12 +1949,14 @@ class BoilerController:
                     SERVICE_TURN_OFF,
                     {ATTR_ENTITY_ID: self.elec_heater}
                 )
+                self._turned_on_by_ems[self.elec_heater] = False
                 if self.pump:
                     await self.hass.services.async_call(
                         SWITCH_DOMAIN,
                         SERVICE_TURN_OFF,
                         {ATTR_ENTITY_ID: self.pump}
                     )
+                    self._turned_on_by_ems[self.pump] = False
                 # Примечание: байпасный клапан оставляем в покое (не перекрываем насильно)
 
     # Вспомогательные геттеры физических сенсоров
@@ -1734,9 +2123,8 @@ class BoilerController:
         new_state = event.data.get("new_state")
         if new_state:
             self.current_mode = new_state.state
-            if self.current_mode.lower() != "manual":
-                await self.async_stop_manual_heating()
-            await self._async_apply_current_dp_plan()
+            if self.current_mode.lower() == "auto":
+                await self._async_apply_current_dp_plan()
 
     async def _async_people_home_changed(self, event) -> None:
         """Handle presence sensor state change."""
@@ -1765,8 +2153,58 @@ class BoilerController:
             pass
         return True
 
+    async def _async_control_actuator(self, entity_id: str, domain: str, service: str, target_state: str, log_prefix: str, service_data: dict = None) -> None:
+        """Centralized control for actuators in Auto mode."""
+        if not entity_id:
+            return
+
+        state_obj = self.hass.states.get(entity_id)
+        current_state = state_obj.state if state_obj else "unknown"
+
+        # Perform the service call if target state differs from current state
+        if current_state != target_state:
+            _LOGGER.info("%s: Setting %s from %s to %s", log_prefix, entity_id, current_state, target_state)
+            await self.hass.services.async_call(
+                domain,
+                service,
+                service_data or {ATTR_ENTITY_ID: entity_id}
+            )
+
     async def _async_apply_current_dp_plan(self):
         """Apply current DP plan recommended actions to physical hardware if in Auto mode."""
+        self._update_water_flow_stats()
+        if getattr(self, "_first_run", True):
+            self._first_run = False
+            dp_state = self.hass.states.get("sensor.boiler_dp")
+            if dp_state and dp_state.state not in ("unknown", "unavailable", "error"):
+                mode = dp_state.state.upper()
+                recommended_bypass = dp_state.attributes.get("recommended_bypass", "OFF").upper()
+                
+                # Restore EMS ownership flags for running states
+                if self.bypass_valve:
+                    valve_state = self.hass.states.get(self.bypass_valve)
+                    if valve_state and valve_state.state == STATE_ON:
+                        if recommended_bypass == "ON" or getattr(self, "_warm_boiler_bypass_active", False):
+                            self._turned_on_by_ems[self.bypass_valve] = True
+                            
+                if self.elec_heater:
+                    heater_state = self.hass.states.get(self.elec_heater)
+                    if heater_state and heater_state.state == STATE_ON:
+                        if "ELEC" in mode and not self._elec_cutoff_active:
+                            self._turned_on_by_ems[self.elec_heater] = True
+                            
+                if self.pump:
+                    pump_state = self.hass.states.get(self.pump)
+                    if pump_state and pump_state.state == STATE_ON:
+                        if "PUMP" in mode:
+                            self._turned_on_by_ems[self.pump] = True
+                            
+                if self.gas_climate:
+                    gas_state = self.hass.states.get(self.gas_climate)
+                    if gas_state and gas_state.state == "heat":
+                        if "GAS" in mode and not self._gas_cutoff_active:
+                            self._turned_on_by_ems[self.gas_climate] = True
+
         if self.current_mode.lower() != "auto":
             return
 
@@ -1796,8 +2234,8 @@ class BoilerController:
         if t_elec is not None:
             try:
                 t_elec_val = float(t_elec)
-                threshold_on = max(20.0, t_min - warm_diff)
-                threshold_off = max(20.0, t_min - (warm_diff + 1.0))
+                threshold_on = 37.0
+                threshold_off = 35.0
                 
                 if getattr(self, "_warm_boiler_bypass_active", False):
                     if t_elec_val < threshold_off:
@@ -1808,13 +2246,7 @@ class BoilerController:
                             t_elec_val, threshold_off
                         )
                 else:
-                    is_heater_on = False
-                    if self.elec_heater:
-                        heater_state = self.hass.states.get(self.elec_heater)
-                        is_heater_on = heater_state and heater_state.state == STATE_ON
-
-                    is_heating_active = is_heater_on or ("ELEC" in mode)
-                    if t_elec_val >= threshold_on and is_heating_active:
+                    if t_elec_val >= threshold_on:
                         self._warm_boiler_bypass_active = True
                         _LOGGER.info(
                             "EMS Boiler Controller: Electric boiler temperature (%.1f°C) reached warm override threshold (%.1f°C). "
@@ -1826,16 +2258,19 @@ class BoilerController:
         else:
             self._warm_boiler_bypass_active = False
 
-        # Gas heating and bypass are synchronized: if the electric boiler is warm,
-        # we keep the bypass ON and delay the gas boiler.
-        if mode in ("GAS", "IDLE"):
-            self._gas_heating_delayed = self._warm_boiler_bypass_active
-        else:
-            self._gas_heating_delayed = False
-
-        if self._gas_heating_delayed:
+        # Gas heating delay: as long as electric boiler is warm (t_elec >= t_min - 5.0°C),
+        # gas heating MUST BE BLOCKED until the stored electric heat is consumed!
+        if "GAS" in mode and getattr(self, "_warm_boiler_bypass_active", False):
+            _LOGGER.info(
+                "EMS Boiler Controller: DP recommends %s, but electric boiler is warm (%.1f°C >= threshold). "
+                "Delaying gas heating and keeping bypass ON until stored electric heat is consumed.",
+                mode, float(t_elec_val) if t_elec_val is not None else 0.0
+            )
+            self._gas_heating_delayed = True
             await self._async_set_boiler_mode("IDLE", "ON")
             return
+        else:
+            self._gas_heating_delayed = False
 
         # 2. If gas heating is NOT delayed, apply occupancy override:
         # If the mode is GAS (or GAS_PUMP) and no one is home, override mode to IDLE to save energy.
@@ -1847,6 +2282,171 @@ class BoilerController:
             mode = "IDLE"
 
         await self._async_set_boiler_mode(mode, recommended_bypass)
+        await self._async_check_cwu_request()
+
+    async def _async_cwu_state_changed(self, event):
+        """Callback when CWU request entity, setpoint, or return temp sensor changes state."""
+        await self._async_check_cwu_request()
+
+    async def _async_check_cwu_request(self):
+        """Check CWU request entity and return temperature setpoint to control CWU recirculation pump as a single 3-minute pulse."""
+        if not self.cwu_request_entity:
+            return
+
+        req_state = self.hass.states.get(self.cwu_request_entity)
+        if not req_state:
+            return
+
+        is_cwu_requested = req_state.state in (STATE_ON, "true", "home", "on")
+
+        if is_cwu_requested:
+            # If this pulse request was already completed, do NOT run again until entity turns OFF first
+            if getattr(self, "_cwu_completed_for_request", False):
+                return
+
+            return_temp = None
+            if self.hw_circulation_return_temp:
+                ret_state = self.hass.states.get(self.hw_circulation_return_temp)
+                if ret_state and ret_state.state not in ("unknown", "unavailable", None):
+                    try:
+                        return_temp = float(ret_state.state)
+                    except (ValueError, TypeError):
+                        pass
+
+            setpoint_temp = None
+            if self.cwu_setpoint_entity:
+                sp_state = self.hass.states.get(self.cwu_setpoint_entity)
+                if sp_state and sp_state.state not in ("unknown", "unavailable", None):
+                    try:
+                        setpoint_temp = float(sp_state.state)
+                    except (ValueError, TypeError):
+                        pass
+
+            if return_temp is not None and setpoint_temp is not None:
+                threshold_on = setpoint_temp - 2.0
+                threshold_off = setpoint_temp - 0.5
+                now = dt_util.now()
+
+                # Single-pulse maximum run time: 10 minutes (600 seconds)
+                cwu_start = getattr(self, "_cwu_start_time", None)
+                is_timeout = False
+                if cwu_start and (now - cwu_start).total_seconds() >= 600:
+                    is_timeout = True
+
+                # Check minimum boiler water temperature (do not run CWU if boilers are cold)
+                t_elec_val = float(self._get_elec_temp()) if self._get_elec_temp() is not None else 0.0
+                t_gas_val = float(self._get_gas_temp()) if self._get_gas_temp() is not None else 0.0
+                max_boiler_temp = max(t_elec_val, t_gas_val)
+
+                if getattr(self, "_cwu_active", False):
+                    # Currently ACTIVE -> check if we should deactivate
+                    if return_temp >= threshold_off or is_timeout:
+                        self._cwu_active = False
+                        self._cwu_start_time = None
+                        self._cwu_completed_for_request = True
+                        reason = "10-minute pulse timeout reached" if is_timeout else f"return temp ({return_temp:.1f}°C) >= target ({threshold_off:.1f}°C)"
+                        _LOGGER.info(
+                            "EMS Boiler Controller: Deactivating CWU recirculation pump and boiler loading pump (%s). Turning off CWU request entity.",
+                            reason
+                        )
+                        if self.hw_circulation_pump:
+                            await self._async_control_actuator(
+                                self.hw_circulation_pump,
+                                SWITCH_DOMAIN,
+                                SERVICE_TURN_OFF,
+                                STATE_OFF,
+                                "EMS Boiler Controller (CWU Circulation Pump)"
+                            )
+                        if self.cwu_request_entity:
+                            req_domain = self.cwu_request_entity.split(".")[0]
+                            await self._async_control_actuator(
+                                self.cwu_request_entity,
+                                req_domain,
+                                SERVICE_TURN_OFF,
+                                STATE_OFF,
+                                "EMS Boiler Controller (CWU Request Entity)"
+                            )
+                        dp_state = self.hass.states.get("sensor.boiler_dp")
+                        curr_mode = dp_state.state.upper() if dp_state else "IDLE"
+                        if "PUMP" not in curr_mode and self.pump:
+                            await self._async_control_actuator(
+                                self.pump,
+                                SWITCH_DOMAIN,
+                                SERVICE_TURN_OFF,
+                                STATE_OFF,
+                                "EMS Boiler Controller (Boiler Loading Pump)"
+                            )
+                    else:
+                        # Keep running CWU recirculation pump and boiler loading pump
+                        if self.hw_circulation_pump:
+                            await self._async_control_actuator(
+                                self.hw_circulation_pump,
+                                SWITCH_DOMAIN,
+                                SERVICE_TURN_ON,
+                                STATE_ON,
+                                "EMS Boiler Controller (CWU Circulation Pump)"
+                            )
+                        if self.pump:
+                            await self._async_control_actuator(
+                                self.pump,
+                                SWITCH_DOMAIN,
+                                SERVICE_TURN_ON,
+                                STATE_ON,
+                                "EMS Boiler Controller (Boiler Loading Pump)"
+                            )
+                else:
+                    # Currently INACTIVE -> check if we should activate new pulse
+                    if return_temp < threshold_on and max_boiler_temp >= threshold_on:
+                        self._cwu_active = True
+                        self._cwu_start_time = now
+                        _LOGGER.info(
+                            "EMS Boiler Controller: CWU request pulse started. Return temp (%.1f°C) < threshold (%.1f°C). "
+                            "Activating CWU recirculation pump and boiler loading pump for max 10 minutes.",
+                            return_temp, threshold_on
+                        )
+                        if self.hw_circulation_pump:
+                            await self._async_control_actuator(
+                                self.hw_circulation_pump,
+                                SWITCH_DOMAIN,
+                                SERVICE_TURN_ON,
+                                STATE_ON,
+                                "EMS Boiler Controller (CWU Circulation Pump)"
+                            )
+                        if self.pump:
+                            await self._async_control_actuator(
+                                self.pump,
+                                SWITCH_DOMAIN,
+                                SERVICE_TURN_ON,
+                                STATE_ON,
+                                "EMS Boiler Controller (Boiler Loading Pump)"
+                            )
+        else:
+            # Request entity turned OFF -> reset pulse completed flag
+            self._cwu_completed_for_request = False
+            if getattr(self, "_cwu_active", False):
+                self._cwu_active = False
+                self._cwu_start_time = None
+                _LOGGER.info(
+                    "EMS Boiler Controller: CWU request turned OFF. Deactivating CWU recirculation pump and boiler loading pump."
+                )
+                if self.hw_circulation_pump:
+                    await self._async_control_actuator(
+                        self.hw_circulation_pump,
+                        SWITCH_DOMAIN,
+                        SERVICE_TURN_OFF,
+                        STATE_OFF,
+                        "EMS Boiler Controller (CWU Circulation Pump)"
+                    )
+                dp_state = self.hass.states.get("sensor.boiler_dp")
+                curr_mode = dp_state.state.upper() if dp_state else "IDLE"
+                if "PUMP" not in curr_mode and self.pump:
+                    await self._async_control_actuator(
+                        self.pump,
+                        SWITCH_DOMAIN,
+                        SERVICE_TURN_OFF,
+                        STATE_OFF,
+                        "EMS Boiler Controller (Boiler Loading Pump)"
+                    )
 
     async def _async_set_boiler_mode(self, mode: str, recommended_bypass: str):
         """Turn on/off actuators based on mode and recommended bypass."""
@@ -1861,102 +2461,94 @@ class BoilerController:
                 current_valve = self.hass.states.get(self.bypass_valve)
                 
                 # Determine target bypass:
-                # 1. Override: if electric boiler is warm, keep bypass ON (connected)
-                if getattr(self, "_warm_boiler_bypass_active", False):
+                # 1. Mode GAS or GAS_PUMP (active gas heating): ALWAYS close bypass (OFF) to prevent gas heat from bleeding into electric boiler!
+                if "GAS" in mode:
+                    target_bypass = "OFF"
+                    bypass_source = "Gas Heating Mode (Isolate Electric Boiler from Gas Heat)"
+                # 2. Mode ELEC or ELEC_PUMP always opens bypass (ON)
+                elif "ELEC" in mode:
+                    target_bypass = "ON"
+                    bypass_source = "Electric Heating Mode"
+                # 3. Override: if electric boiler is warm, keep bypass ON (connected)
+                elif getattr(self, "_warm_boiler_bypass_active", False):
                     target_bypass = "ON"
                     bypass_source = "Warm Electric Boiler Override"
-                # 2. If recommended_bypass is provided by DP sensor and is valid, use it directly
+                # 4. If recommended_bypass is provided by DP sensor and is valid, use it directly
                 elif recommended_bypass and recommended_bypass.upper() in ("ON", "OFF"):
                     target_bypass = recommended_bypass.upper()
                     bypass_source = "DP solver recommendation"
-                # 3. Fallback logic
+                # 5. Fallback logic based on electric boiler temperature for IDLE
                 else:
-                    target_bypass = current_valve.state.upper() if current_valve else "OFF"
+                    t_elec_curr = self._get_elec_temp()
+                    t_min_cfg = float(self.entry.options.get(CONF_THERMOSTAT_SET_TEMP, self.config.get(CONF_THERMOSTAT_SET_TEMP, DEFAULT_THERMOSTAT_SET_TEMP))) if hasattr(self, "entry") else 40.0
+                    target_bypass = "ON" if (t_elec_curr is not None and t_elec_curr >= (t_min_cfg - 5.0)) else "OFF"
                     bypass_source = "Local Fallback Logic"
 
                 if target_bypass in ("ON", "OFF"):
                     target_service = SERVICE_TURN_ON if target_bypass == "ON" else SERVICE_TURN_OFF
                     target_state = STATE_ON if target_bypass == "ON" else STATE_OFF
-                    if not current_valve or current_valve.state != target_state:
-                        _LOGGER.info(
-                            "EMS Boiler Controller: Setting bypass valve from %s to %s (source: %s, mode: %s)",
-                            current_valve.state if current_valve else "unknown",
-                            target_state,
-                            bypass_source,
-                            mode
-                        )
-                        await self.hass.services.async_call(
-                            valve_domain,
-                            target_service,
-                            {ATTR_ENTITY_ID: self.bypass_valve}
-                        )
+                    await self._async_control_actuator(
+                        self.bypass_valve,
+                        valve_domain,
+                        target_service,
+                        target_state,
+                        f"EMS Boiler Controller (Bypass, source: {bypass_source}, mode: {mode})"
+                    )
 
             # 2. Control Electric Heater
             target_heater_state = STATE_OFF
             if self.elec_heater:
-                current_heater = self.hass.states.get(self.elec_heater)
                 target_heater_service = SERVICE_TURN_ON if ("ELEC" in mode and not self._elec_cutoff_active) else SERVICE_TURN_OFF
                 target_heater_state = STATE_ON if ("ELEC" in mode and not self._elec_cutoff_active) else STATE_OFF
-                if not current_heater or current_heater.state != target_heater_state:
-                    _LOGGER.info("EMS Boiler Controller: Setting electric heater switch from %s to %s", current_heater.state if current_heater else "unknown", target_heater_state)
-                    await self.hass.services.async_call(
-                        SWITCH_DOMAIN,
-                        target_heater_service,
-                        {ATTR_ENTITY_ID: self.elec_heater}
-                    )
+                await self._async_control_actuator(
+                    self.elec_heater,
+                    SWITCH_DOMAIN,
+                    target_heater_service,
+                    target_heater_state,
+                    "EMS Boiler Controller (Electric Heater)"
+                )
 
-            # 3. Control Circulation Pump
+            # 3. Control Circulation Pump (Strict enforcement)
             if self.pump:
-                current_pump = self.hass.states.get(self.pump)
-                
-                if mode == "ELEC_PUMP":
-                    heater_on = (target_heater_state == STATE_ON)
-                    t_elec = self._get_elec_temp()
-                    
-                    t_max_elec = self._t_max_elec
-                    if t_max_elec is None:
-                        t_max_elec = float(self.config.get("elec_boiler_max_temp", 70.0))
-                        storage = self.storage
-                        if storage and self.current_mode.lower() == "auto":
-                            t_max_elec = min(t_max_elec, float(getattr(storage, "boiler_auto_temp_limit", 60.0)))
-                        
-                    if t_elec is None or not heater_on:
-                        target_pump_state_logical = False
-                    else:
-                        if t_elec >= (t_max_elec - 5.0):
-                            target_pump_state_logical = True
-                        elif t_elec <= (t_max_elec - 10.0):
-                            target_pump_state_logical = False
-                        else:
-                            target_pump_state_logical = (current_pump.state == STATE_ON) if current_pump else False
-                elif mode == "ELEC":
-                    target_pump_state_logical = False
-                else:
-                    target_pump_state_logical = "PUMP" in mode
+                prev_pump_mode = getattr(self, "_last_pump_mode", None)
+                self._last_pump_mode = mode
 
-                target_pump_service = SERVICE_TURN_ON if target_pump_state_logical else SERVICE_TURN_OFF
-                target_pump_state = STATE_ON if target_pump_state_logical else STATE_OFF
-                
-                if not current_pump or current_pump.state != target_pump_state:
-                    _LOGGER.info("EMS Boiler Controller: Setting circulation pump from %s to %s", current_pump.state if current_pump else "unknown", target_pump_state)
-                    await self.hass.services.async_call(
+                is_pump_mode = "PUMP" in mode
+                is_cwu_active = getattr(self, "_cwu_active", False)
+
+                if is_pump_mode or is_cwu_active:
+                    # EMS requires pump -> turn ON
+                    await self._async_control_actuator(
+                        self.pump,
                         SWITCH_DOMAIN,
-                        target_pump_service,
-                        {ATTR_ENTITY_ID: self.pump}
+                        SERVICE_TURN_ON,
+                        STATE_ON,
+                        "EMS Boiler Controller (Circulation Pump)"
+                    )
+                else:
+                    # Not in pump mode AND CWU is not active -> enforce OFF!
+                    await self._async_control_actuator(
+                        self.pump,
+                        SWITCH_DOMAIN,
+                        SERVICE_TURN_OFF,
+                        STATE_OFF,
+                        "EMS Boiler Controller (Circulation Pump)"
                     )
 
             # 4. Control Gas Climate
             if self.gas_climate:
-                current_gas = self.hass.states.get(self.gas_climate)
                 target_hvac = "heat" if ("GAS" in mode and not self._gas_cutoff_active) else "off"
-                if not current_gas or current_gas.state != target_hvac:
-                    _LOGGER.info("EMS Boiler Controller: Setting gas climate HVAC mode from %s to %s", current_gas.state if current_gas else "unknown", target_hvac)
-                    await self.hass.services.async_call(
-                        CLIMATE_DOMAIN,
-                        "set_hvac_mode",
-                        {ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": target_hvac}
-                    )
-                if target_hvac == "heat":
+                await self._async_control_actuator(
+                    self.gas_climate,
+                    CLIMATE_DOMAIN,
+                    "set_hvac_mode",
+                    target_hvac,
+                    "EMS Boiler Controller (Gas Climate)",
+                    service_data={ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": target_hvac}
+                )
+                
+                current_gas = self.hass.states.get(self.gas_climate)
+                if current_gas and current_gas.state == "heat":
                     target_temp = None
                     dp_state = self.hass.states.get("sensor.boiler_dp")
                     if dp_state and self.current_mode.lower() == "auto":
@@ -1983,6 +2575,9 @@ class BoilerController:
 
     async def _async_solar_deficit_monitor(self, _now=None):
         """Мониторинг 5-минутного скользящего дефицита солнечной генерации."""
+        if self.current_mode.lower() != "auto":
+            return
+
         pv_sensor = self.config.get("current_pv_generation")
         load_sensor = self.config.get("current_house_consumption")
 
@@ -2153,18 +2748,21 @@ class BoilerController:
                         SERVICE_TURN_OFF,
                         {ATTR_ENTITY_ID: self.elec_heater}
                     )
+                    self._turned_on_by_ems[self.elec_heater] = False
                 if self.pump:
                     await self.hass.services.async_call(
                         SWITCH_DOMAIN,
                         SERVICE_TURN_OFF,
                         {ATTR_ENTITY_ID: self.pump}
                     )
+                    self._turned_on_by_ems[self.pump] = False
                 if self.gas_climate:
                     await self.hass.services.async_call(
                         CLIMATE_DOMAIN,
                         "set_hvac_mode",
                         {ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": "off"}
                     )
+                    self._turned_on_by_ems[self.gas_climate] = False
             except Exception as ex:
                 _LOGGER.error("EMS Reset Calibration: safety shutdowns failed: %s", ex)
 

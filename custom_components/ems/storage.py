@@ -32,6 +32,7 @@ class EmsScheduleStorage:
         self.boiler_heating_start_hour: float = 0.0
         self.boiler_heating_end_hour: float = 23.0
         self.boiler_auto_temp_limit: float = 60.0
+        self.min_arbitrage_profit: float = 0.0
 
     @property
     def min_bat_soc(self) -> float:
@@ -99,6 +100,7 @@ class EmsScheduleStorage:
             self.boiler_heating_start_hour = 0.0
             self.boiler_heating_end_hour = 23.0
             self.boiler_auto_temp_limit = 60.0
+            self.min_arbitrage_profit = 0.0
         else:
             self._overrides = data.get("overrides", {})
             self.last_override_change = data.get("last_override_change")
@@ -118,6 +120,10 @@ class EmsScheduleStorage:
             self.boiler_heating_start_hour = float(data.get("boiler_heating_start_hour", 0.0))
             self.boiler_heating_end_hour = float(data.get("boiler_heating_end_hour", 23.0))
             self.boiler_auto_temp_limit = float(data.get("boiler_auto_temp_limit", 60.0))
+            try:
+                self.min_arbitrage_profit = float(data.get("min_arbitrage_profit", 0.0))
+            except (ValueError, TypeError):
+                self.min_arbitrage_profit = 0.0
         _LOGGER.debug(
             "EMS Schedule Storage loaded: %d dates with overrides for entry %s",
             len(self._overrides),
@@ -138,6 +144,7 @@ class EmsScheduleStorage:
             "boiler_heating_start_hour": self.boiler_heating_start_hour,
             "boiler_heating_end_hour": self.boiler_heating_end_hour,
             "boiler_auto_temp_limit": self.boiler_auto_temp_limit,
+            "min_arbitrage_profit": self.min_arbitrage_profit,
         })
 
     def get_overrides(self) -> dict[str, dict[str, str]]:

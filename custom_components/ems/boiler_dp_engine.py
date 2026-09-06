@@ -96,11 +96,19 @@ def run_boiler_dp(
     battery_cycle_cost: float = 0.0,
     min_bat_soc_evening: float | None = None,
     min_bat_soc_morning: float | None = None,
+    dhw_forecast_profile: list | None = None,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run Dynamic Programming strategy optimizer for hot water boiler.
 
     Returns (status, schedule_list, stats_dict).
     """
+    # Attach DHW forecast profile to slots if provided
+    if slots and dhw_forecast_profile and isinstance(dhw_forecast_profile, list) and len(dhw_forecast_profile) > 0:
+        for slot in slots:
+            slot_h = slot.get("hour", 0)
+            if isinstance(slot_h, int) and 0 <= slot_h < len(dhw_forecast_profile):
+                slot["dhw_forecast_liters"] = float(dhw_forecast_profile[slot_h] or 0.0)
+
     # 1. Validation
     if min_bat_soc_evening is None:
         min_bat_soc_evening = min_bat_soc
@@ -155,6 +163,9 @@ def run_boiler_dp(
     # 2. Curtailed PV Energy Budget Allocation (Arbitrage)
     today_date = slots[0].get("date") if slots else None
 
+    # Calculate minimum tariff today for cheap pre-charging priority
+    min_tariff_today = min([float(s.get("buy_price", 0.0) or 0.0) for s in slots if s.get("date") == today_date and s.get("buy_price") is not None and float(s.get("buy_price", 0.0)) > 0.0], default=0.0)
+    
     # Calculate maximum export prices during solar hours for today and tomorrow
     max_sell_today = max([float(s.get("sell_price", 0.0) or 0.0) for s in slots if s.get("date") == today_date and float(s.get("pv_kwh", 0.0) or 0.0) > 0.5], default=0.0)
     max_sell_tomorrow = max([float(s.get("sell_price", 0.0) or 0.0) for s in slots if s.get("date") != today_date and float(s.get("pv_kwh", 0.0) or 0.0) > 0.5], default=0.0)
@@ -400,73 +411,40 @@ def run_boiler_dp(
         mode_config = INVERTER_MODES.get(mode_name)
         grid_available = getattr(mode_config, "is_grid_bypass", False) if mode_config else False
 
+        is_curtailed = bool(mode_config and getattr(mode_config, "curtail_pv", False))
+        solar_cost_kwh = 0.0 if (sell_price <= 0.0 or is_curtailed) else max(0.0, sell_price)
+
         if mode_name == "buy":
             eff_tariff = buy_price
-        elif idx in allocated_free_slots:
-            # Budget hour: solar energy has been pre-allocated for boiler use.
-            # Treat as free regardless of battery state — the budget allocation
-            # already accounted for competition with battery charging.
+        elif is_curtailed and adjusted_soc >= (getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0):
+            # Battery is full enough and PV is physically curtailed — use curtailed PV for 0.0
             eff_tariff = 0.0
-        elif mode_config and mode_config.curtail_pv:
-            limit_soc = getattr(mode_config, "calibration_limit_soc", 90.0) or 90.0
-            if adjusted_soc >= limit_soc:
-                # Battery is full enough — use curtailed PV for free
-                eff_tariff = 0.0
-            elif grid_available:
-                # Grid is accessible (e.g. buy mode logic) — charge at buy_price
-                eff_tariff = buy_price
-            else:
-                # No grid access — only local energy (PV surplus + battery above min_soc)
-                pv_kwh = float(slot.get("pv_kwh", 0.0))
-                consumption_kwh = float(slot.get("consumption_kwh", 0.0))
-                pv_surplus = max(0.0, pv_kwh - consumption_kwh)
-                discharge_allowed = getattr(mode_config, "discharge_to_house", False)
-                bat_avail = max(0.0, (adjusted_soc - slot_min_bat_soc) / 100.0 * safe_capacity) if discharge_allowed else 0.0
-                available_local = pv_surplus + bat_avail
-                boiler_power = max(0.1, float(boiler_hourly_draw))
-                if available_local <= 0.0:
-                    # No local energy at all — heating physically impossible
-                    eff_tariff = 9999.0
-                else:
-                    solar_covered = min(boiler_power, pv_surplus)
-                    remaining_power = boiler_power - solar_covered
-                    battery_covered = min(remaining_power, bat_avail)
-                    uncovered = remaining_power - battery_covered
-                    is_solar_mode = mode_name in ("sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")
-                    if is_solar_mode or pv_surplus > 0.0:
-                        battery_valuation = max(sell_price, max_solar_sell) + battery_cycle_cost
-                    else:
-                        battery_valuation = max(buy_price, sell_price) + battery_cycle_cost
-                    eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + uncovered * 9999.0) / boiler_power
         else:
-            # Calculate effective tariff considering local energy coverage using baseline adjusted_soc
+            # Calculate effective tariff considering real solar surplus, battery energy, and grid import
             pv_kwh = float(slot.get("pv_kwh", 0.0))
             consumption_kwh = float(slot.get("consumption_kwh", 0.0))
             pv_surplus = max(0.0, pv_kwh - consumption_kwh)
 
-            # Battery energy stored above min_bat_soc using adjusted_soc, only if discharge to house is allowed
             discharge_allowed = getattr(mode_config, "discharge_to_house", False) if mode_config else False
             if discharge_allowed:
                 battery_energy_above_min = max(0.0, (adjusted_soc - slot_min_bat_soc) / 100.0 * safe_capacity)
             else:
                 battery_energy_above_min = 0.0
 
-            available_local_energy = pv_surplus + battery_energy_above_min
             boiler_power = max(0.1, float(boiler_hourly_draw))
-
             solar_covered = min(boiler_power, pv_surplus)
             remaining_power = boiler_power - solar_covered
             battery_covered = min(remaining_power, battery_energy_above_min)
             grid_import_needed = remaining_power - battery_covered
 
-            # If grid is not accessible in this mode — treat grid import as prohibitively expensive
             grid_import_price = buy_price if grid_available else 9999.0
             is_solar_mode = mode_name in ("sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat")
             if is_solar_mode or pv_surplus > 0.0:
                 battery_valuation = max(sell_price, max_solar_sell) + battery_cycle_cost
             else:
                 battery_valuation = max(buy_price, sell_price) + battery_cycle_cost
-            eff_tariff = (solar_covered * sell_price + battery_covered * battery_valuation + grid_import_needed * grid_import_price) / boiler_power
+
+            eff_tariff = (solar_covered * solar_cost_kwh + battery_covered * battery_valuation + grid_import_needed * grid_import_price) / boiler_power
 
         slot["effective_tariff"] = eff_tariff
 
@@ -510,9 +488,9 @@ def run_boiler_dp(
             # Electricity pricing tariff logic (precalculated effective tariff)
             tariff = slot.get("effective_tariff", sell_price)
 
-            # Electric heating allowance check
-            allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else False
-            allow_elec = allow_boiler or mode_name in ("sale_pv_bat", "sale_pv_no_bat")
+            # Electric heating allowance check: allow grid electric heating when cost per °C is cheaper than gas
+            allow_boiler = getattr(mode_config, "allow_boiler", False) if mode_config else True
+            allow_elec = allow_boiler or mode_name in ("buy", "idle", "sale_pv_bat", "sale_pv_no_bat") or mode_config is None
 
             # Cost per 1°C rise comparisons for ELEC and ELEC_PUMP
             c_per_gas = (1.0 / eff_gas_only if eff_gas_only > 0.0 else 0.0) * gas_cost_m3
@@ -533,12 +511,16 @@ def run_boiler_dp(
                 T_elec_prev = elec_temp[h - 1][prev_idx]
                 T_bypass_prev = bypass_state[h - 1][prev_idx]
 
-                # Standby cooling
+                # Standby cooling + DHW draw cooling
                 R_gas = get_lut_rate(standby_losses.get("gas", {}), T_gas_prev)
                 R_elec = get_lut_rate(standby_losses.get("elec", {}), T_elec_prev)
-                
-                T_gas_cooled = max(GRID_MIN_TEMP, T_gas_prev - R_gas)
-                T_elec_cooled = max(GRID_MIN_TEMP, T_elec_prev - R_elec)
+
+                dhw_l = float(slot.get("dhw_forecast_liters", 0.0) or 0.0)
+                dhw_drop_gas = (dhw_l / vol_gas * max(0.0, T_gas_prev - 10.0)) if (vol_gas > 0.0 and dhw_l > 0.0) else 0.0
+                dhw_drop_elec = (dhw_l / vol_elec * max(0.0, T_elec_prev - 10.0)) if (vol_elec > 0.0 and dhw_l > 0.0) else 0.0
+
+                T_gas_cooled = max(GRID_MIN_TEMP, T_gas_prev - R_gas - dhw_drop_gas)
+                T_elec_cooled = max(GRID_MIN_TEMP, T_elec_prev - R_elec - dhw_drop_elec)
                 total_vol = vol_gas + vol_elec
 
                 # Iterate modes
@@ -561,7 +543,11 @@ def run_boiler_dp(
 
                     # Mode-specific transitions
                     if mode == "IDLE":
-                        T_bypass_end_val = (T_elec_prev >= t_min)
+                        # User-specified hysteresis for IDLE bypass:
+                        # Turn OFF when dropping below 35.0°C, Turn ON when heating above 37.0°C
+                        threshold_off_bypass = 35.0
+                        threshold_on_bypass = 37.0
+                        T_bypass_end_val = (T_elec_prev >= threshold_off_bypass) if T_bypass_prev else (T_elec_prev >= threshold_on_bypass)
                         T_gas_end_val = T_gas_cooled
                         T_elec_end_val = T_elec_cooled
                         
@@ -713,7 +699,7 @@ def run_boiler_dp(
                         T_elec_end_val = min(current_t_max_elec, T_elec_cooled + max_rise_elec)
                         T_gas_end_val = T_gas_cooled
                         
-                        for T_bypass_end_val in [T_elec_end_val >= t_min]:
+                        for T_bypass_end_val in [T_elec_end_val >= (t_min - 5.0)]:
                             if not T_bypass_end_val:
                                 T_active = T_gas_end_val
                             else:
@@ -739,10 +725,15 @@ def run_boiler_dp(
                                         energy = kwh
                                         
                                         penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
+                                        is_cheap_tariff = (min_tariff_today > 0.0 and tariff <= min_tariff_today * 1.15) or tariff <= 0.0
+                                        cheap_bonus = 0.20 * kwh if is_cheap_tariff else 0.0
                                         if tariff <= 0.0:
-                                            reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min)) + 0.01 * kwh
+                                            reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min)) + 0.01 * kwh + cheap_bonus
+                                        elif c_per_elec < c_per_gas:
+                                            cost_diff = c_per_gas - c_per_elec
+                                            reward = temp_reward * (max(0.0, T_gas_end_val - t_min) + max(0.0, T_elec_end_val - t_min)) + cost_diff * max(0.0, T_elec_end_val - t_min) + 0.01 * kwh + cheap_bonus
                                         else:
-                                            reward = 0.0
+                                            reward = cheap_bonus
                                         new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if was_elec else 0.0)
                                         if new_cost < dp[h][curr_idx]:
                                             dp[h][curr_idx] = new_cost
@@ -794,6 +785,9 @@ def run_boiler_dp(
                             penalty = 1000.0 * (t_min - T_active) if (relax and T_active < t_min) else 0.0
                             if tariff <= 0.0:
                                 reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min)) + 0.01 * kwh
+                            elif c_per_elec_pump < c_per_gas_pump:
+                                cost_diff = c_per_gas_pump - c_per_elec_pump
+                                reward = temp_reward * (max(0.0, T_curr - t_min) + max(0.0, T_curr - t_min)) + cost_diff * max(0.0, T_curr - t_min) + 0.01 * kwh
                             else:
                                 reward = 0.0
                             new_cost = dp[h - 1][prev_idx] + cost + penalty - reward - (0.05 if was_elec else 0.0)
@@ -953,6 +947,8 @@ def run_boiler_dp(
             "temp_dhw_end": step.get("temp_dhw_end"),
             "temp_flow_start": step.get("temp_flow_start"),
             "temp_flow_end": step.get("temp_flow_end"),
+            "expected_dhw_liters": round(float(slot.get("dhw_forecast_liters", 0.0) or 0.0), 1),
+            "expected_dhw_kwh": round(float(slot.get("dhw_forecast_liters", 0.0) or 0.0) * 0.035, 2),
             "bypass": step["bypass"],
             "cost": step["cost"],
             "energy": step["energy"],
