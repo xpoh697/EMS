@@ -91,6 +91,17 @@ class BoilerController:
         self._avg_pv = None
         self._avg_load = None
 
+        # Listeners and background tasks cleanup tracking
+        self._unsub_listeners = []
+        self._background_tasks = set()
+
+    def _create_task(self, coro):
+        """Create and track a background task."""
+        task = self.hass.async_create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
     @property
     def storage(self):
         if not hasattr(self, "entry_id") or not self.entry_id:
@@ -108,25 +119,31 @@ class BoilerController:
         # 2. Защита от ручного включения отключена
 
         # 3. Следим за изменениями планировщика DP для автоматического управления
-        async_track_state_change_event(
-            self.hass,
-            ["sensor.boiler_dp"],
-            self._async_dp_plan_changed
+        self._unsub_listeners.append(
+            async_track_state_change_event(
+                self.hass,
+                ["sensor.boiler_dp"],
+                self._async_dp_plan_changed
+            )
         )
 
         # 4. Следим за переключением режима Auto/Manual
-        async_track_state_change_event(
-            self.hass,
-            ["select.ems_boiler_mode"],
-            self._async_system_mode_changed
+        self._unsub_listeners.append(
+            async_track_state_change_event(
+                self.hass,
+                ["select.ems_boiler_mode"],
+                self._async_system_mode_changed
+            )
         )
 
         # 4a. Следим за изменением сенсора присутствия
         if self.people_home_sensor:
-            async_track_state_change_event(
-                self.hass,
-                [self.people_home_sensor],
-                self._async_people_home_changed
+            self._unsub_listeners.append(
+                async_track_state_change_event(
+                    self.hass,
+                    [self.people_home_sensor],
+                    self._async_people_home_changed
+                )
             )
 
         # 4b. Следим за запросом CWU, уставкой и обраткой ГВС
@@ -139,10 +156,12 @@ class BoilerController:
             cwu_entities.append(self.hw_circulation_return_temp)
 
         if cwu_entities:
-            async_track_state_change_event(
-                self.hass,
-                cwu_entities,
-                self._async_cwu_state_changed
+            self._unsub_listeners.append(
+                async_track_state_change_event(
+                    self.hass,
+                    cwu_entities,
+                    self._async_cwu_state_changed
+                )
             )
 
         # 5. Следим за изменением температуры для работы программного термостата и перекачки
@@ -153,51 +172,107 @@ class BoilerController:
             temp_entities.append(self.gas_climate)
             
         if temp_entities:
-            async_track_state_change_event(
-                self.hass,
-                temp_entities,
-                self._async_temp_changed
+            self._unsub_listeners.append(
+                async_track_state_change_event(
+                    self.hass,
+                    temp_entities,
+                    self._async_temp_changed
+                )
             )
 
         # Применяем план при старте
-        self.hass.async_create_task(self._async_apply_current_dp_plan())
+        self._create_task(self._async_apply_current_dp_plan())
         
         # 3. Throttling вычислений стоимости (раз в 2 минуты)
-        async_track_time_interval(
-            self.hass,
-            self._async_calculate_costs,
-            datetime.timedelta(minutes=2)
+        self._unsub_listeners.append(
+            async_track_time_interval(
+                self.hass,
+                self._async_calculate_costs,
+                datetime.timedelta(minutes=2)
+            )
         )
         
         # 4. Polling ночного мониторинга охлаждения (каждую минуту)
-        async_track_time_interval(
-            self.hass,
-            self._async_overnight_poll,
-            datetime.timedelta(minutes=1)
+        self._unsub_listeners.append(
+            async_track_time_interval(
+                self.hass,
+                self._async_overnight_poll,
+                datetime.timedelta(minutes=1)
+            )
         )
         
         # 5. Регистрация старта/завершения ночного теста (01:00 и 05:00)
-        async_track_time_change(
-            self.hass,
-            self._async_overnight_start,
-            hour=1,
-            minute=0,
-            second=0
+        self._unsub_listeners.append(
+            async_track_time_change(
+                self.hass,
+                self._async_overnight_start,
+                hour=1,
+                minute=0,
+                second=0
+            )
         )
-        async_track_time_change(
-            self.hass,
-            self._async_overnight_end,
-            hour=5,
-            minute=0,
-            second=0
+        self._unsub_listeners.append(
+            async_track_time_change(
+                self.hass,
+                self._async_overnight_end,
+                hour=5,
+                minute=0,
+                second=0
+            )
         )
         
         # 6. Регистрация периодического опроса дефицита солнца (каждые 10 секунд)
-        async_track_time_interval(
-            self.hass,
-            self._async_solar_deficit_monitor,
-            datetime.timedelta(seconds=10)
+        self._unsub_listeners.append(
+            async_track_time_interval(
+                self.hass,
+                self._async_solar_deficit_monitor,
+                datetime.timedelta(seconds=10)
+            )
         )
+
+    async def async_shutdown(self) -> None:
+        """Безопасная остановка контроллера: снятие слушателей, отмена тасок, fail-safe сброс."""
+        _LOGGER.info(
+            "BoilerController: shutting down, cancelling %d listeners and %d tasks...",
+            len(self._unsub_listeners),
+            len(self._background_tasks),
+        )
+
+        # 1. Снимаем все зарегистрированные слушатели событий и таймеры
+        while self._unsub_listeners:
+            unsub = self._unsub_listeners.pop()
+            try:
+                unsub()
+            except Exception as err:
+                _LOGGER.warning("Error unsubscribing listener during shutdown: %s", err)
+
+        # 2. Безопасный сброс активного нагрева при калибровке (если была в процессе)
+        if hasattr(self, "_calibration_task") and self._calibration_task and not self._calibration_task.done():
+            try:
+                await self._actuate_heating("elec", turn_on=False)
+                await self._actuate_heating("gas", turn_on=False)
+            except Exception as err:
+                _LOGGER.warning("BoilerController: error turning off calibration heating during shutdown: %s", err)
+
+        # 3. Отменяем активные фоновые задачи
+        tasks_to_cancel = [t for t in self._background_tasks if not t.done()]
+        if hasattr(self, "_calibration_task") and self._calibration_task and not self._calibration_task.done():
+            tasks_to_cancel.append(self._calibration_task)
+
+        for task in tasks_to_cancel:
+            task.cancel()
+
+        if tasks_to_cancel:
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks_to_cancel, return_exceptions=True), timeout=3.0)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("BoilerController: timeout waiting for background tasks cancellation")
+            except Exception as err:
+                _LOGGER.warning("BoilerController: error during task cancellation: %s", err)
+
+        self._background_tasks.clear()
+        self._calibration_task = None
+        _LOGGER.info("BoilerController: shutdown completed successfully.")
         
     def _update_cutoff_states(self):
         """Обновление флагов отсечки нагрева и перекачки с учетом гистерезиса и режима Fail-Safe."""
@@ -363,7 +438,7 @@ class BoilerController:
         self.hass.bus.async_fire("ems_manual_heating_updated")
         
         if mode == "PUMP_ONLY":
-            self.hass.async_create_task(self._async_pump_only_timer())
+            self._create_task(self._async_pump_only_timer())
 
     async def async_stop_manual_heating(self):
         """Остановка ручного цикла нагрева и принудительное отключение нагревателей."""
@@ -1480,7 +1555,7 @@ class BoilerController:
         self.calibration_sensor.set_calibration_state(phase, cal_data)
 
         # Запуск фонового процесса выполнения калибровки
-        self._calibration_task = self.hass.async_create_task(self._async_execute_heating_phase(phase, cal_data))
+        self._calibration_task = self._create_task(self._async_execute_heating_phase(phase, cal_data))
         return True
 
     def _is_temp_too_high_for_calibration(self, phase: str, target_delta: float) -> bool:
@@ -1805,11 +1880,11 @@ class BoilerController:
                 remaining = stab_total - elapsed
                 if remaining > 0:
                     _LOGGER.info("Resuming stabilization delay for phase %s: %s seconds remaining.", phase, round(remaining, 1))
-                    self._calibration_task = self.hass.async_create_task(self._async_stabilize_and_finalize(phase, calibration_data, remaining))
+                    self._calibration_task = self._create_task(self._async_stabilize_and_finalize(phase, calibration_data, remaining))
                     return
                 else:
                     _LOGGER.info("Stabilization delay elapsed during reboot. final calculations will run immediately.")
-                    self._calibration_task = self.hass.async_create_task(self._async_stabilize_and_finalize(phase, calibration_data, 0.0))
+                    self._calibration_task = self._create_task(self._async_stabilize_and_finalize(phase, calibration_data, 0.0))
                     return
                     
         # Если HA перезапустился прямо в процессе нагрева - аварийно выключаем нагреватели ради безопасности

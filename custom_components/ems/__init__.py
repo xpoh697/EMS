@@ -55,9 +55,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     debug_enabled = entry.options.get(CONF_DEBUG, entry.data.get(CONF_DEBUG, False))
     hass.data[DOMAIN]["debug"] = debug_enabled
 
-    # Register the static HTTP view immediately to prevent 404 errors during early boot
-    www_path = Path(__file__).parent / "www"
-    hass.http.register_view(CardStaticView(www_path))
+    # Register the static HTTP view immediately (once per HA start to prevent route conflict on reload)
+    if not hass.data[DOMAIN].get("_view_registered"):
+        if getattr(hass, "http", None) is not None:
+            www_path = Path(__file__).parent / "www"
+            hass.http.register_view(CardStaticView(www_path))
+        hass.data[DOMAIN]["_view_registered"] = True
     
     # Defer Lovelace card database resource registration to prevent startup deadlocks
     from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
@@ -90,6 +93,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    boiler_controller = entry_data.get("boiler_controller")
+    if boiler_controller:
+        try:
+            await boiler_controller.async_shutdown()
+        except Exception as err:
+            _LOGGER.error("Error shutting down BoilerController: %s", err)
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor", "number", "select"])
     if unload_ok:
         if entry.entry_id in hass.data.get(DOMAIN, {}):

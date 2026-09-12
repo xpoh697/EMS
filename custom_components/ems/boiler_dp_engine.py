@@ -394,7 +394,7 @@ def run_boiler_dp(
         max_solar_sell = max_sell_tomorrow if is_tomorrow else max_sell_today
         
         slot_hour = int(slot.get("hour", 0))
-        slot_min_bat_soc = min_bat_soc_evening if 10 <= slot_hour < 24 else min_bat_soc_morning
+        slot_min_bat_soc = min_bat_soc_morning if 6 <= slot_hour < 10 else min_bat_soc_evening
         
         # Reconstruct baseline SOC trajectory by adding back planned boiler energy (decouples feedback loop)
         actual_planned = float(slot.get("actual_planned_boiler_kwh", 0.0))

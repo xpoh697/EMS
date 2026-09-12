@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.131"
+VERSION = "0.3.147"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"

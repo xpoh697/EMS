@@ -26,7 +26,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
-from .utils import ems_log
+from .utils import ems_log, is_debug_enabled
 
 from .const import (
     DOMAIN,
@@ -1612,6 +1612,8 @@ class EmsDpSensor(SensorEntity):
         self._boiler_expected_consumption_tomorrow: float = 0.0
         self._curtailed_pv_today: float = 0.0
         self._curtailed_pv_tomorrow: float = 0.0
+        self._last_hour_action: str | None = None
+        self._last_action_hour: int = -1
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -1936,7 +1938,8 @@ class EmsDpSensor(SensorEntity):
             min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
             min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
             current_hour = dt_util.now().hour
-            min_bat_soc = min_bat_soc_evening if 10 <= current_hour < 24 else min_bat_soc_morning
+            base_min_soc = min(min_bat_soc_evening, min_bat_soc_morning)
+            min_bat_soc = base_min_soc
 
             # Parse capacity with fallback
             bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
@@ -2231,6 +2234,8 @@ class EmsDpSensor(SensorEntity):
 
             self._last_calc_time = dt_util.now()
             self._last_calc_soc = soc
+            self._last_hour_action = self._state
+            self._last_action_hour = self._last_calc_time.hour
 
             # Update last calculated PV forecast values
             pv_today_entity = self.hass.states.get("sensor.pv_forecast_today")
@@ -2297,6 +2302,7 @@ class EmsDpSensor(SensorEntity):
             min_bat_soc_evening = min_bat_soc
         if min_bat_soc_morning is None:
             min_bat_soc_morning = min_bat_soc
+        base_min_soc = min(min_bat_soc_evening, min_bat_soc_morning)
 
         if planned_boiler_today is None:
             planned_boiler_today = [0.0] * 24
@@ -2348,8 +2354,8 @@ class EmsDpSensor(SensorEntity):
                     "override": override,
                 })
 
-        usable_capacity = capacity * (1 - min_bat_soc / 100)
-        current_usable = capacity * (soc - min_bat_soc) / 100
+        usable_capacity = capacity * (1 - base_min_soc / 100)
+        current_usable = capacity * (soc - base_min_soc) / 100
         current_usable = max(0.0, min(current_usable, usable_capacity))
 
         # Reserve calculation (night hours average demand)
@@ -2393,7 +2399,7 @@ class EmsDpSensor(SensorEntity):
             min_discharge_price=min_discharge_price,
             battery_max_discharge_power=bat_max_power / 1000.0,
             battery_max_charge_power=bat_max_power / 1000.0,
-            battery_min_soc=int(min_bat_soc),
+            battery_min_soc=int(round(base_min_soc)),
             battery_capacity=capacity,
             min_energy_to_discharge=min_energy_to_discharge,
             disable_discharge=False,
@@ -2523,6 +2529,20 @@ class EmsDpSensor(SensorEntity):
                         "pv_kwh": slot["pv_kwh"],
                     })
 
+            if idx == 0:
+                # End-of-hour lock: if within 180s of the hour boundary and same hour,
+                # prevent transient drop to idle / solar_export if battery is not yet full/empty
+                now_m = now.minute
+                now_s = now.second
+                rem_sec = (59 - now_m) * 60 + (60 - now_s)
+                if rem_sec < 180 and now.hour == self._last_action_hour:
+                    if action in ("idle", "solar_export"):
+                        if self._last_hour_action == "pv_charge" and soc < 99.0:
+                            action = "pv_charge"
+                        elif self._last_hour_action == "self_consume" and soc > (min_bat_soc + 1.0):
+                            action = "self_consume"
+                current_action = action
+
             # Calculate cheap_ahead for the slot (next 6 hours, ONLY negative price)
             cheap_ahead = False
             if action != "self_consume":
@@ -2533,10 +2553,7 @@ class EmsDpSensor(SensorEntity):
                         cheap_ahead = True
                         break
 
-            _is_override_slot = (
-                (action == "discharge" and dis_keys.get(key, {}).get("override", False))
-                or (action == "grid_charge" and chg_keys.get(key, {}).get("override", False))
-            )
+            _is_override_slot = bool(slot.get("override"))
             _map_fn = map_override_to_physical if _is_override_slot else map_dp_to_physical
             physical_mode, mapping_reason = _map_fn(
                 action=action,
@@ -2546,9 +2563,6 @@ class EmsDpSensor(SensorEntity):
                 min_discharge_price=min_discharge_price,
                 cheap_ahead=cheap_ahead,
             )
-
-            if idx == 0:
-                current_action = action
 
             expected_soc_val = stats.get("expected_trajectory", [])[idx] if idx < len(stats.get("expected_trajectory", [])) else 0.0
             # Calculate curtailed solar energy
@@ -2812,19 +2826,6 @@ class EmsSchedulerSensor(SensorEntity):
         if base_mode == "sale_pv_no_bat" and self._dynamic_sale_pv_active:
             return "sale_pv"
 
-        # Apply next-hour lookahead to prevent idle state during transition hours
-        if active_override is None and base_mode == "idle" and len(schedule) > 1:
-            next_mode = schedule[1].get("physical_mode")
-            if next_mode:
-                from .const import INVERTER_MODES
-                next_cfg = INVERTER_MODES.get(next_mode)
-                next_hour = (now.hour + 1) % 24
-                min_b_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
-                min_b_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
-                min_b_soc = min_b_soc_evening if 10 <= next_hour < 24 else min_b_soc_morning
-                if next_cfg and next_cfg.discharge_to_house and soc is not None and soc > min_b_soc + 1.0:
-                    return next_mode
-
         # Apply PV surplus override for IDLE mode
         if active_override is None and base_mode == "idle":
             pv_sensor_id = options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION))
@@ -2890,7 +2891,8 @@ class EmsSchedulerSensor(SensorEntity):
         bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
         min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
         min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
-        min_bat_soc = min_bat_soc_evening if 10 <= now.hour < 24 else min_bat_soc_morning
+        base_min_soc = min(min_bat_soc_evening, min_bat_soc_morning)
+        min_bat_soc = base_min_soc
         bat_soc_emergency_val = options.get(CONF_BAT_SOC_EMERGENCY, config.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY))
         try:
             bat_soc_emergency_val = float(bat_soc_emergency_val)
@@ -2951,8 +2953,8 @@ class EmsSchedulerSensor(SensorEntity):
         safe_voltage = voltage if voltage > 0.0 else 51.2
 
         # Simulate SOC, power and current progression over the plan
-        usable_capacity = capacity * (1 - min_bat_soc / 100)
-        current_usable = capacity * (soc - min_bat_soc) / 100
+        usable_capacity = capacity * (1 - base_min_soc / 100)
+        current_usable = capacity * (soc - base_min_soc) / 100
         current_usable = max(0.0, min(current_usable, usable_capacity))
 
         usable_energy = current_usable
@@ -3006,7 +3008,7 @@ class EmsSchedulerSensor(SensorEntity):
                 slot_hour = int(slot.get("hour", current_hour))
             except (ValueError, TypeError):
                 slot_hour = current_hour
-            slot_min_bat_soc = min_bat_soc_evening if 10 <= slot_hour < 24 else min_bat_soc_morning
+            slot_min_bat_soc = min_bat_soc_morning if 6 <= slot_hour < 10 else min_bat_soc_evening
 
             # Calculate SOC at the end of the hour based on continuous physical battery energy
             end_soc = (current_physical_kwh / safe_capacity) * 100.0
@@ -3127,24 +3129,6 @@ class EmsSchedulerSensor(SensorEntity):
             self._last_active_amps = 0.0
             self._last_active_hour = now.hour
 
-        # Check next-hour lookahead to align extra attributes
-        lookahead_active = False
-        if active_override is None and base_mode == "idle" and len(schedule) > 1:
-            next_mode = schedule[1].get("physical_mode")
-            if next_mode:
-                from .const import INVERTER_MODES
-                next_cfg = INVERTER_MODES.get(next_mode)
-                next_hour = (now.hour + 1) % 24
-                min_b_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
-                min_b_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
-                min_b_soc = min_b_soc_evening if 10 <= next_hour < 24 else min_b_soc_morning
-                if next_cfg and next_cfg.discharge_to_house and soc is not None and soc > min_b_soc + 1.0:
-                    lookahead_active = True
-                    raw_mode = next_mode
-                    mapping_reason = f"idle_lookahead_transition: {next_mode}"
-                    if dispatched_plan:
-                        dispatched_plan[0]["physical_mode"] = next_mode
-
         current_power = 0.0
         current_amps = 0.0
         current_target_soc = soc
@@ -3158,15 +3142,9 @@ class EmsSchedulerSensor(SensorEntity):
                 self._last_active_power_w = slot_power
                 self._last_active_amps = slot_amps
 
-            if lookahead_active and len(dispatched_plan) > 1:
-                next_slot = dispatched_plan[1]
-                current_power = max(self._last_active_power_w, next_slot.get("power_w", 0.0))
-                current_amps = max(self._last_active_amps, next_slot.get("current_a", 0.0))
-                current_target_soc = next_slot.get("soc", soc)
-            else:
-                current_power = slot_power
-                current_amps = slot_amps
-                current_target_soc = current_slot.get("soc", soc)
+            current_power = slot_power
+            current_amps = slot_amps
+            current_target_soc = current_slot.get("soc", soc)
 
         avg_pv = self._avg_buffer(self._pv_buffer)
         avg_load = self._avg_buffer(self._load_buffer)
@@ -4819,17 +4797,25 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             ", ".join([f"H{s['hour']} Cons={s['consumption_kwh']} Boiler={s['planned_boiler_kwh']}" for s in slots[:3]])
         )
 
-        try:
-            import json as _json_mod
-            with open("/config/ems_debug_slots.json", "w", encoding="utf-8") as f:
-                _json_mod.dump({
-                    "timestamp": now.isoformat(),
-                    "boiler_dp_state": self._state,
-                    "boiler_dp_schedule": self._schedule,
-                    "slots_passed": slots
-                }, f, indent=2)
-        except Exception as e:
-            _LOGGER.warning("EMS Boiler DP: failed to write debug dump: %s", e)
+        if is_debug_enabled(self.hass):
+            def _write_debug_dump(file_path: str, data: dict) -> None:
+                try:
+                    import json as _json_mod
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        _json_mod.dump(data, f, indent=2)
+                except Exception as err:
+                    _LOGGER.warning("EMS Boiler DP: failed to write debug dump: %s", err)
+
+            dump_path = self.hass.config.path("ems_debug_slots.json")
+            dump_data = {
+                "timestamp": now.isoformat(),
+                "boiler_dp_state": self._state,
+                "boiler_dp_schedule": self._schedule,
+                "slots_passed": slots,
+            }
+            self.hass.async_create_task(
+                self.hass.async_add_executor_job(_write_debug_dump, dump_path, dump_data)
+            )
 
         # 4. Retrieve calibration coefficients from sensor.boiler_calibration
         cal_state = self.hass.states.get("sensor.boiler_calibration")

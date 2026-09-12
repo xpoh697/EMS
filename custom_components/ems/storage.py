@@ -38,9 +38,9 @@ class EmsScheduleStorage:
     def min_bat_soc(self) -> float:
         """Get minimum battery SOC based on current hour."""
         hour = dt_util.now().hour
-        if 10 <= hour < 24:
-            return self.min_bat_soc_evening
-        return self.min_bat_soc_morning
+        if 6 <= hour < 10:
+            return self.min_bat_soc_morning
+        return self.min_bat_soc_evening
 
     @min_bat_soc.setter
     def min_bat_soc(self, value: float) -> None:
