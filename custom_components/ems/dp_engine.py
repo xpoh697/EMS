@@ -259,7 +259,7 @@ def run_unified_dp(
                         to_grid = max(0.0, ac_exp + pv_kwh - consumption_kwh)
                         grid_imp = max(0.0, consumption_kwh - ac_exp - pv_kwh)
                         if to_grid > 0.0:
-                            if to_grid < config.min_energy_to_discharge or not can_export:
+                            if exp < config.min_energy_to_discharge or not can_export:
                                 continue
                             if (usable_energy - exp) < home_needed and not arbitrage_ok:
                                 continue
@@ -610,7 +610,7 @@ def run_unified_dp(
                         to_grid = max(0.0, ac_exp + pv_kwh - consumption_kwh)
                         grid_imp = max(0.0, consumption_kwh - ac_exp - pv_kwh)
                         if not override and to_grid > 0.0:
-                            if to_grid < config.min_energy_to_discharge or not can_export:
+                            if exp < config.min_energy_to_discharge or not can_export:
                                 continue
                             if (usable_energy - exp) < home_needed and not arbitrage_ok:
                                 continue
@@ -917,8 +917,7 @@ def run_unified_dp(
             battery_to_home = min(amount, home_deficit)
             battery_to_grid = max(0.0, amount - battery_to_home)
 
-            min_grid_export = max(0.15, config.min_energy_to_discharge)
-            if battery_to_grid < min_grid_export:
+            if amount < config.min_energy_to_discharge or battery_to_grid < 0.05:
                 # If grid export portion is below limit, switch to self-consumption or idle
                 amount = round(amount, 2)
                 if home_deficit > 0.0:
