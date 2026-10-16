@@ -183,7 +183,7 @@ def map_dp_to_physical(
     if action in ("grid_charge", "paid_import"):
         return "buy", reason
 
-    # Actions: pv_charge, self_consume, solar_export
+    # Actions: pv_charge, self_consume, normal, solar_export
     if sell_price > min_sell_price:
         if action == "solar_export" and pv_kwh > 0.01 and sell_price > min_sell_price:
             return "sale_pv_no_bat", reason
@@ -229,6 +229,7 @@ def map_override_to_physical(
     if action in ("grid_charge", "paid_import"):
         return "buy", reason
 
+    # Actions: pv_charge, self_consume, normal, solar_export
     if sell_price > min_sell_price:
         if action == "solar_export" and pv_kwh > 0.01 and sell_price > min_sell_price:
             return "sale_pv_no_bat", reason

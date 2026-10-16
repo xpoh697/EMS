@@ -26,7 +26,5 @@ env/
 .DS_Store
 Thumbs.db
 
-# Custom debate logs
-DEBATE.md
-debate.md
-
+# Temporary scratch files and test logs
+scratch/

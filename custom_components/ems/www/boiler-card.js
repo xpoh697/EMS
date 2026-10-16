@@ -7,7 +7,7 @@
  * - Изменены цвета иконок ТЭНа и горелки: красный при нагреве, серый при простое
  */
 
-const CARD_VERSION = "2.2.4";
+const CARD_VERSION = "2.3.4";
 
 // ── CSS ────────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -456,6 +456,7 @@ const STYLES = `
     padding: 0 16px 16px;
   }
   .schedule-tile {
+    position: relative;
     border-radius: 8px;
     padding: 10px 4px;
     display: flex;
@@ -745,7 +746,141 @@ const STYLES = `
     cursor: pointer;
     font-family: inherit;
   }
+
+  /* ─── Boiler override badge on schedule tiles ─────────────────────────── */
+  .schedule-tile.has-override {
+    border-color: rgba(255, 193, 7, 0.6) !important;
+    box-shadow: 0 0 0 1px rgba(255, 193, 7, 0.3);
+  }
+  .schedule-tile .manual-indicator {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    color: #ffffff;
+    --mdc-icon-size: 14px;
+    pointer-events: none;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.8));
+    z-index: 5;
+  }
+  .schedule-tile .override-badge {
+    font-size: 8px;
+    font-weight: 800;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255, 193, 7, 0.18);
+    color: #ffc107;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+  }
+
+  /* ─── Override control section in modal ──────────────────────────────── */
+  .modal-override-section {
+    border-top: 1px solid rgba(255,255,255,0.07);
+    padding-top: 8px;
+    margin-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .modal-override-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #ffc107;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .modal-override-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .modal-override-row select {
+    flex: 1;
+    background: #2c2c2e;
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    outline: none;
+    cursor: pointer;
+    font-family: inherit;
+    width: 100%;
+  }
+  .modal-override-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .modal-override-apply {
+    background: #ffc107;
+    color: #1c1c1e;
+    border: none;
+    border-radius: 7px;
+    padding: 7px 16px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s;
+  }
+  .modal-override-apply:hover { background: #ffca28; }
+  .modal-override-reset {
+    background: rgba(255,255,255,0.06);
+    color: #ffc107;
+    border: 1px solid rgba(255, 193, 7, 0.3);
+    border-radius: 7px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .modal-override-reset:hover {
+    background: rgba(255, 193, 7, 0.15);
+    border-color: #ffc107;
+  }
+  .modal-override-reset.hidden { display: none !important; }
+
+  .modal-override-temp-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(255, 193, 7, 0.06);
+    border: 1px solid rgba(255, 193, 7, 0.2);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-top: 2px;
+  }
+  .modal-override-temp-group.hidden { display: none !important; }
+  .modal-override-temp-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .modal-override-temp-val {
+    font-size: 13px;
+    font-weight: 700;
+    color: #ffc107;
+  }
+  .modal-override-slider-row input[type=range] {
+    width: 100%;
+    accent-color: #ffc107;
+    cursor: pointer;
+  }
 `;
+
+
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const fmt1 = (v) => (v != null && !isNaN(+v)) ? (+v).toFixed(1) : "–";
@@ -1707,12 +1842,13 @@ class BoilerCard extends HTMLElement {
     } else {
       const activeMode = dpS?.state?.toUpperCase();
       if (activeMode) {
+        const sched0 = dpS?.attributes?.schedule?.[0];
         if (activeMode.includes("ELEC")) {
-          const tMaxElec = dpS?.attributes?.t_max_elec;
-          currentSetpoint = (tMaxElec != null ? parseFloat(tMaxElec).toFixed(1) : "–") + " °C";
+          const target = sched0?.override_target_temp ?? sched0?.temp_elec_end ?? dpS?.attributes?.t_max_elec;
+          currentSetpoint = (target != null ? parseFloat(target).toFixed(1) : "–") + " °C";
         } else if (activeMode.includes("GAS")) {
-          const tMaxGas = dpS?.attributes?.t_max_gas;
-          currentSetpoint = (tMaxGas != null ? parseFloat(tMaxGas).toFixed(1) : "–") + " °C";
+          const target = sched0?.override_target_temp ?? sched0?.temp_gas_end ?? dpS?.attributes?.t_max_gas;
+          currentSetpoint = (target != null ? parseFloat(target).toFixed(1) : "–") + " °C";
         } else if (activeMode === "IDLE" || activeMode === "PUMP_ONLY") {
           const tMin = dpS?.attributes?.t_min;
           currentSetpoint = (tMin != null ? parseFloat(tMin).toFixed(1) : "–") + " °C (IDLE)";
@@ -1885,6 +2021,8 @@ class BoilerCard extends HTMLElement {
 
     const dpS = this._hass.states["sensor.boiler_dp"];
     const schedule = dpS?.attributes?.schedule || [];
+    // Read boiler overrides dict: { "YYYY-MM-DD": { "H": "MODE" } }
+    const boilerOverrides = dpS?.attributes?.boiler_overrides || {};
 
     const hdrToday = this._scheduleContent.querySelector("#sched-hdr-today");
     const gridToday = this._scheduleContent.querySelector("#sched-grid-today");
@@ -1910,10 +2048,30 @@ class BoilerCard extends HTMLElement {
     schedule.forEach((slot, i) => {
       const tile = document.createElement("div");
       const modeName = slot.mode || "IDLE";
-      tile.className = `schedule-tile theme-${modeName.toLowerCase()}`;
-      
+      // Check if this slot has a boiler override
+      const slotDate = String(slot.date || "");
+      const slotHour = String(slot.hour);
+      const rawOv = (boilerOverrides[slotDate] && (
+        boilerOverrides[slotDate][slotHour] !== undefined ? boilerOverrides[slotDate][slotHour] :
+        boilerOverrides[slotDate][parseInt(slotHour)]
+      )) || slot.override_mode || null;
+      const hasOverride = !!rawOv;
+      let overrideTemp = slot.override_target_temp;
+      if (rawOv && typeof rawOv === "string" && rawOv.includes(":")) {
+        const p = rawOv.split(":");
+        if (p[1]) {
+          const pf = parseFloat(p[1]);
+          if (!isNaN(pf)) overrideTemp = pf;
+        }
+      }
+      const badgeText = hasOverride
+        ? (overrideTemp != null ? `${overrideTemp.toFixed(0)}°C` : "FORCE")
+        : "";
+
+      tile.className = `schedule-tile theme-${modeName.toLowerCase()}${hasOverride ? " has-override" : ""}`;
+
       const hourStr = String(slot.hour).padStart(2, '0') + ":00";
-      
+
       let iconsHtml = "";
       if (modeName === "IDLE") {
         iconsHtml = `<ha-icon icon="mdi:power-sleep"></ha-icon>`;
@@ -1929,13 +2087,23 @@ class BoilerCard extends HTMLElement {
         iconsHtml = `<ha-icon icon="mdi:pump" class="pump-icon"></ha-icon>`;
       }
 
+      const overrideBadgeHtml = hasOverride
+        ? `<span class="override-badge">${badgeText}</span>`
+        : "";
+
+      const manualIndicatorHtml = hasOverride
+        ? `<ha-icon class="manual-indicator" icon="mdi:hand-back-right"></ha-icon>`
+        : "";
+
       tile.innerHTML = `
         <span class="st-hour">${hourStr}</span>
+        ${manualIndicatorHtml}
         <div class="st-icons">${iconsHtml}</div>
         <span class="st-mode mode-${modeName.toLowerCase()}">${modeName}</span>
+        ${overrideBadgeHtml}
       `;
       tile.addEventListener("click", () => {
-        this._showSlotDetails(slot);
+        this._showSlotDetails(slot, boilerOverrides);
       });
 
       if (startHour + i < 24) {
@@ -1965,7 +2133,7 @@ class BoilerCard extends HTMLElement {
   }
 
   // ── Show Popup Detail Modal ──────────────────────────────────────────────
-  _showSlotDetails(slot) {
+  _showSlotDetails(slot, boilerOverrides) {
     const titleEl = this._modalOverlay.querySelector("#modal-title");
     const contentEl = this._modalOverlay.querySelector("#modal-content");
     
@@ -2047,6 +2215,37 @@ class BoilerCard extends HTMLElement {
     const flowStart = getFlowStart();
     const flowEnd = getFlowEnd();
 
+    // Determine current override for this slot (if any)
+    const slotDate = String(slot.date || "");
+    const slotHourStr = String(slot.hour);
+    const ovDict = boilerOverrides ? (boilerOverrides[slotDate] || {}) : {};
+    const rawOverride = ovDict[slotHourStr] !== undefined ? ovDict[slotHourStr] : (ovDict[parseInt(slotHourStr)] || slot.override_mode || null);
+
+    let currentOverrideMode = null;
+    let currentOverrideTemp = null;
+    if (rawOverride) {
+      const parts = String(rawOverride).split(":");
+      currentOverrideMode = parts[0];
+      if (parts.length > 1) {
+        const pf = parseFloat(parts[1]);
+        if (!isNaN(pf)) currentOverrideTemp = pf;
+      }
+    }
+    if (currentOverrideTemp == null && slot.override_target_temp != null) {
+      currentOverrideTemp = parseFloat(slot.override_target_temp);
+    }
+
+    const tMin = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.config_t_min ?? this._hass?.states["sensor.boiler_dp"]?.attributes?.t_min ?? 40.0);
+    const tMaxGas = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.config_max_gas ?? this._hass?.states["sensor.boiler_dp"]?.attributes?.t_max_gas ?? 50.0);
+    const tMaxElec = parseFloat(this._hass?.states["sensor.boiler_dp"]?.attributes?.config_max_elec ?? this._hass?.states["sensor.boiler_dp"]?.attributes?.t_max_elec ?? 70.0);
+
+    const isHeatingMode = currentOverrideMode && ["GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"].includes(currentOverrideMode);
+    const initialIsGas = currentOverrideMode && currentOverrideMode.includes("GAS");
+    const initialMin = tMin;
+    const initialMax = initialIsGas ? tMaxGas : tMaxElec;
+    let initialTemp = currentOverrideTemp != null ? currentOverrideTemp : (initialIsGas ? Math.min(tMaxGas, slot.temp_gas_end || tMaxGas) : Math.min(tMaxElec, slot.temp_elec_end || tMaxElec));
+    initialTemp = Math.max(initialMin, Math.min(initialMax, initialTemp));
+
     contentEl.innerHTML = `
       <div class="modal-row-detail">
         <span class="m-label">Режим системы</span>
@@ -2108,8 +2307,106 @@ class BoilerCard extends HTMLElement {
         <span class="m-label">Электро + Насос</span>
         <span class="m-val">${formatCostPerC(slot.cost_per_c_elec_pump)}</span>
       </div>
+
+      <div class="modal-override-section">
+        <div class="modal-override-title">
+          <ha-icon icon="mdi:hand-back-right" style="--mdc-icon-size: 14px; color: #ffc107;"></ha-icon>
+          Ручной оверайд
+        </div>
+        <div class="modal-override-row">
+          <select id="override-mode-select">
+            <option value="">— AUTO (DP оптимизатор) —</option>
+            <option value="IDLE"${currentOverrideMode === "IDLE" ? " selected" : ""}>IDLE — Простой</option>
+            <option value="GAS"${currentOverrideMode === "GAS" ? " selected" : ""}>GAS — Газовый нагрев</option>
+            <option value="GAS_PUMP"${currentOverrideMode === "GAS_PUMP" ? " selected" : ""}>GAS_PUMP — Газ + Насос</option>
+            <option value="ELEC"${currentOverrideMode === "ELEC" ? " selected" : ""}>ELEC — Электронагрев</option>
+            <option value="ELEC_PUMP"${currentOverrideMode === "ELEC_PUMP" ? " selected" : ""}>ELEC_PUMP — Электро + Насос</option>
+            <option value="PUMP_ONLY"${currentOverrideMode === "PUMP_ONLY" ? " selected" : ""}>PUMP_ONLY — Только насос</option>
+          </select>
+        </div>
+        <div class="modal-override-temp-group${isHeatingMode ? "" : " hidden"}" id="override-temp-group">
+          <div class="modal-override-temp-header">
+            <span class="m-label">Целевая температура:</span>
+            <span class="modal-override-temp-val" id="override-temp-val">${initialTemp.toFixed(1)} °C</span>
+          </div>
+          <div class="modal-override-slider-row">
+            <input type="range" id="override-temp-slider" min="${initialMin}" max="${initialMax}" step="0.5" value="${initialTemp}">
+          </div>
+        </div>
+        <div class="modal-override-actions">
+          <button class="modal-override-reset${currentOverrideMode ? "" : " hidden"}" id="override-reset-btn">
+            <ha-icon icon="mdi:auto-fix" style="--mdc-icon-size: 14px; margin-right: 3px;"></ha-icon>Reset to AI
+          </button>
+          <button class="modal-override-apply" id="override-apply-btn">Применить</button>
+        </div>
+      </div>
     `;
-    
+
+    // ── Override apply handler ──────────────────────────────────────────────
+    const applyBtn = contentEl.querySelector("#override-apply-btn");
+    const resetBtn = contentEl.querySelector("#override-reset-btn");
+    const modeSelect = contentEl.querySelector("#override-mode-select");
+    const tempGroup = contentEl.querySelector("#override-temp-group");
+    const tempSlider = contentEl.querySelector("#override-temp-slider");
+    const tempValEl = contentEl.querySelector("#override-temp-val");
+
+    modeSelect.addEventListener("change", () => {
+      const mode = modeSelect.value;
+      const isHeating = ["GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"].includes(mode);
+      if (isHeating) {
+        tempGroup.classList.remove("hidden");
+        const isGas = mode.includes("GAS");
+        const curMin = tMin;
+        const curMax = isGas ? tMaxGas : tMaxElec;
+        tempSlider.min = curMin;
+        tempSlider.max = curMax;
+        let v = parseFloat(tempSlider.value);
+        if (isNaN(v) || v < curMin) v = curMin;
+        if (v > curMax) v = curMax;
+        tempSlider.value = v;
+        tempValEl.textContent = v.toFixed(1) + " °C";
+      } else {
+        tempGroup.classList.add("hidden");
+      }
+    });
+
+    tempSlider.addEventListener("input", () => {
+      const v = parseFloat(tempSlider.value);
+      tempValEl.textContent = (!isNaN(v) ? v.toFixed(1) : tempSlider.value) + " °C";
+    });
+
+    applyBtn.addEventListener("click", () => {
+      const selectedMode = modeSelect.value;
+      if (!selectedMode) {
+        // No mode selected = treat as reset
+        this._hass.callService("ems", "clear_boiler_override", {
+          date: slotDate || undefined,
+          hour: parseInt(slotHourStr),
+        });
+        this._modalOverlay.classList.remove("open");
+        return;
+      }
+      const serviceData = {
+        date: slotDate || undefined,
+        hour: parseInt(slotHourStr),
+        mode: selectedMode,
+      };
+      const isHeating = ["GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"].includes(selectedMode);
+      if (isHeating && tempSlider) {
+        serviceData.target_temp = parseFloat(tempSlider.value);
+      }
+      this._hass.callService("ems", "set_boiler_override", serviceData);
+      this._modalOverlay.classList.remove("open");
+    });
+
+    resetBtn.addEventListener("click", () => {
+      this._hass.callService("ems", "clear_boiler_override", {
+        date: slotDate || undefined,
+        hour: parseInt(slotHourStr),
+      });
+      this._modalOverlay.classList.remove("open");
+    });
+
     this._modalOverlay.classList.add("open");
   }
 

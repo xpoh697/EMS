@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import voluptuous as vol
 
 import homeassistant.helpers.config_validation as cv
@@ -59,6 +60,24 @@ START_MANUAL_HEATING_SCHEMA = vol.Schema({
 
 RESET_CALIBRATION_SCHEMA = vol.Schema({
     vol.Optional("reset_type", default="all"): vol.In(["all", "heating", "standby"]),
+})
+
+SERVICE_SET_BOILER_OVERRIDE = "set_boiler_override"
+SERVICE_CLEAR_BOILER_OVERRIDE = "clear_boiler_override"
+SERVICE_CLEAR_ALL_BOILER_OVERRIDES = "clear_all_boiler_overrides"
+
+BOILER_MODES = ["IDLE", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP", "PUMP_ONLY"]
+
+SET_BOILER_OVERRIDE_SCHEMA = vol.Schema({
+    vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{4}-\d{2}-\d{2}$")),
+    vol.Required("hour"): vol.All(vol.Coerce(int), vol.Range(min=0, max=23)),
+    vol.Required("mode"): vol.In(BOILER_MODES),
+    vol.Optional("target_temp"): vol.All(vol.Coerce(float), vol.Range(min=20.0, max=85.0)),
+})
+
+CLEAR_BOILER_OVERRIDE_SCHEMA = vol.Schema({
+    vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{4}-\d{2}-\d{2}$")),
+    vol.Required("hour"): vol.All(vol.Coerce(int), vol.Range(min=0, max=23)),
 })
 
 
@@ -152,24 +171,46 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             safe_capacity = max(capacity_kwh, 0.001)
             max_power_kw = bat_max_power_w / 1000.0
 
-            # Calculate required power for the desired SOC change
-            soc_delta = abs(target_soc - start_soc)
-            req_power_kw = (soc_delta / 100.0 * safe_capacity) / duration_h
+            # Determine battery charge/discharge efficiency from weekly loss rate
+            weekly_state = hass.states.get("sensor.ems_battery_weekly_loss_rate")
+            weekly_rte = 0.865
+            if weekly_state and weekly_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    weekly_loss_pct = float(weekly_state.state)
+                    weekly_rte = max(0.50, min(1.0, (100.0 - weekly_loss_pct) / 100.0))
+                except (ValueError, TypeError):
+                    weekly_rte = 0.865
+            eta_charge = round(math.sqrt(max(0.50, min(1.0, weekly_rte))), 4)
+            eta_discharge = eta_charge
 
-            # Clamp target_soc if power exceeds battery max
-            if req_power_kw > max_power_kw:
-                achievable_delta = (max_power_kw * duration_h / safe_capacity) * 100.0
-                if action == "grid_charge":
+            # Calculate required power for the desired SOC change with efficiency
+            soc_delta = abs(target_soc - start_soc)
+            if action == "grid_charge":
+                eff = eta_charge if eta_charge > 0 else 1.0
+                achievable_delta = (max_power_kw * duration_h * eff / safe_capacity) * 100.0
+                req_power_kw = (soc_delta / 100.0 * safe_capacity) / (duration_h * eff)
+                if req_power_kw > max_power_kw:
                     target_soc = round(min(start_soc + achievable_delta, 100.0), 1)
-                else:  # discharge
+                    _LOGGER.info(
+                        "set_manual_override: required power %.2f kW exceeds max %.2f kW. "
+                        "Realistic end-of-hour target_soc: %.1f%%",
+                        req_power_kw, max_power_kw, target_soc,
+                    )
+                else:
+                    target_soc = round(target_soc, 1)
+            else:  # discharge
+                eff = eta_discharge if eta_discharge > 0 else 1.0
+                achievable_delta = (max_power_kw * duration_h / (safe_capacity * eff)) * 100.0
+                req_power_kw = (soc_delta / 100.0 * safe_capacity * eff) / duration_h
+                if req_power_kw > max_power_kw:
                     target_soc = round(max(start_soc - achievable_delta, min_bat_soc), 1)
-                _LOGGER.info(
-                    "set_manual_override: required power %.2f kW exceeds max %.2f kW. "
-                    "Clamping target_soc to %.1f%%",
-                    req_power_kw, max_power_kw, target_soc,
-                )
-            else:
-                target_soc = round(target_soc, 1)
+                    _LOGGER.info(
+                        "set_manual_override: required power %.2f kW exceeds max %.2f kW. "
+                        "Realistic end-of-hour target_soc: %.1f%%",
+                        req_power_kw, max_power_kw, target_soc,
+                    )
+                else:
+                    target_soc = round(target_soc, 1)
 
             # Clamp to valid SOC range
             target_soc = max(min_bat_soc, min(100.0, target_soc))
@@ -269,6 +310,65 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
     hass.services.async_register(
         DOMAIN, SERVICE_RESET_PV_FACTOR, handle_reset_pv_factor
     )
+
+    # ── Boiler mode override services ────────────────────────────────────────
+
+    async def handle_set_boiler_override(call: ServiceCall) -> None:
+        """Handle setting a boiler mode override for a specific hour."""
+        date_str = call.data.get("date") or dt_util.now().strftime("%Y-%m-%d")
+        hour = call.data["hour"]
+        mode = call.data["mode"]
+        target_temp_raw = call.data.get("target_temp")
+
+        override_val = mode
+        if target_temp_raw is not None and mode in ("GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP"):
+            try:
+                target_temp = float(target_temp_raw)
+                config = entry.data
+                options = entry.options
+
+                t_min = float(options.get("thermostat_set_temp", config.get("thermostat_set_temp", 40.0)))
+                if "GAS" in mode:
+                    t_max = float(options.get("gas_boiler_max_temp", config.get("gas_boiler_max_temp", 50.0)))
+                else:
+                    t_max = float(options.get("elec_boiler_max_temp", config.get("elec_boiler_max_temp", 70.0)))
+                t_max = min(t_max, 85.0)
+
+                clamped_temp = max(t_min, min(t_max, target_temp))
+                override_val = f"{mode}:{clamped_temp:.1f}"
+            except (ValueError, TypeError):
+                override_val = mode
+
+        await storage.async_set_boiler_override(date_str, hour, override_val)
+        _LOGGER.debug("Boiler override set via service: %s %02d:00 -> %s", date_str, hour, override_val)
+        hass.bus.async_fire("ems_schedule_updated")
+
+    async def handle_clear_boiler_override(call: ServiceCall) -> None:
+        """Handle clearing a boiler mode override for a specific hour."""
+        date_str = call.data.get("date") or dt_util.now().strftime("%Y-%m-%d")
+        hour = call.data["hour"]
+        await storage.async_clear_boiler_override(date_str, hour)
+        _LOGGER.debug("Boiler override cleared via service: %s %02d:00", date_str, hour)
+        hass.bus.async_fire("ems_schedule_updated")
+
+    async def handle_clear_all_boiler_overrides(call: ServiceCall) -> None:
+        """Handle clearing all boiler mode overrides."""
+        await storage.async_clear_all_boiler_overrides()
+        _LOGGER.debug("All boiler overrides cleared via service")
+        hass.bus.async_fire("ems_schedule_updated")
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_BOILER_OVERRIDE, handle_set_boiler_override,
+        schema=SET_BOILER_OVERRIDE_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_CLEAR_BOILER_OVERRIDE, handle_clear_boiler_override,
+        schema=CLEAR_BOILER_OVERRIDE_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_CLEAR_ALL_BOILER_OVERRIDES, handle_clear_all_boiler_overrides,
+    )
+
     _LOGGER.debug("EMS services successfully registered")
 
 
@@ -283,9 +383,13 @@ def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_RESET_PV_FACTOR,
         "start_manual_heating",
         "stop_manual_heating",
+        SERVICE_SET_BOILER_OVERRIDE,
+        SERVICE_CLEAR_BOILER_OVERRIDE,
+        SERVICE_CLEAR_ALL_BOILER_OVERRIDES,
     ]:
         try:
             hass.services.async_remove(DOMAIN, service)
         except ValueError:
             pass
     _LOGGER.debug("EMS services unregistered")
+

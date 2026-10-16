@@ -190,3 +190,84 @@ reset_calibration:
 reset_pv_factor:
   name: Reset PV Forecast Factor
   description: Resets the PV forecast Layer 2 corrective factor and its 7-day history back to 1.0.
+
+set_boiler_override:
+  name: Set Boiler Mode Override
+  description: Forces a specific boiler heating mode for a given date and hour slot, overriding the DP optimizer decision.
+  fields:
+    date:
+      name: Date
+      description: Target date in YYYY-MM-DD format (defaults to current date).
+      required: false
+      example: "2026-09-20"
+      selector:
+        text:
+    hour:
+      name: Hour
+      description: Target hour slot (0 to 23).
+      required: true
+      example: 17
+      selector:
+        number:
+          min: 0
+          max: 23
+          step: 1
+          mode: box
+    mode:
+      name: Boiler Mode
+      description: The boiler operating mode to force for this hour slot.
+      required: true
+      example: ELEC
+      selector:
+        select:
+          options:
+            - label: IDLE - Standby
+              value: IDLE
+            - label: GAS - Gas boiler only
+              value: GAS
+            - label: GAS_PUMP - Gas boiler + circulation pump
+              value: GAS_PUMP
+            - label: ELEC - Electric boiler only
+              value: ELEC
+            - label: ELEC_PUMP - Electric boiler + circulation pump
+              value: ELEC_PUMP
+            - label: PUMP_ONLY - Circulation pump only (mixing)
+              value: PUMP_ONLY
+    target_temp:
+      name: Target Temperature
+      description: Target temperature to heat the boiler up to for this hour slot (°C).
+      required: false
+      example: 65.0
+      selector:
+        number:
+          min: 20.0
+          max: 85.0
+          step: 0.5
+          mode: box
+
+clear_boiler_override:
+  name: Clear Boiler Mode Override
+  description: Removes the forced boiler mode override for a specific date and hour slot, restoring DP optimizer control.
+  fields:
+    date:
+      name: Date
+      description: Target date in YYYY-MM-DD format (defaults to current date).
+      required: false
+      example: "2026-09-20"
+      selector:
+        text:
+    hour:
+      name: Hour
+      description: Target hour slot (0 to 23).
+      required: true
+      example: 17
+      selector:
+        number:
+          min: 0
+          max: 23
+          step: 1
+          mode: box
+
+clear_all_boiler_overrides:
+  name: Clear All Boiler Mode Overrides
+  description: Removes all forced boiler mode overrides, restoring full DP optimizer control for all hours.

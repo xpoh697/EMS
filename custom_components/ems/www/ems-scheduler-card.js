@@ -2537,7 +2537,13 @@ class EmsSchedulerCard extends HTMLElement {
     const activeOverrideAction = overrideParts ? overrideParts[0] : slot.action;
     const activeOverrideSoc = (overrideParts && overrideParts.length > 1) ? parseFloat(overrideParts[1]) : null;
 
-    this.shadowRoot.getElementById('modal-mode').value = activeOverrideAction;
+    let modalMode = activeOverrideAction;
+    if (modalMode === 'normal' || modalMode === 'pv_charge') {
+      modalMode = 'sale_pv';
+    } else if (modalMode === 'solar_export') {
+      modalMode = 'sale_pv_no_bat';
+    }
+    this.shadowRoot.getElementById('modal-mode').value = modalMode;
 
     // Target SOC min limit set to 10.0%
     const minSocVal = 10.0;

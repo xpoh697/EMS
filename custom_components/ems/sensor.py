@@ -85,7 +85,7 @@ from .const import (
     STANDBY_LOSSES_PRESETS,
 )
 from .utils import ems_log, calculate_battery_degradation, parse_price_sensor, map_dp_to_physical, map_override_to_physical
-from .dp_engine import run_unified_dp, DPConfig
+from .dp_engine import run_unified_dp, DPConfig, get_cvcc_charge_multiplier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1648,6 +1648,7 @@ class EmsDpSensor(SensorEntity):
             "last_calculation": self._last_calc_time.isoformat() if self._last_calc_time else None,
             "calculation_duration": self._calc_duration,
             "overrides": storage.get_overrides(),
+            "boiler_overrides": storage.get_boiler_overrides() if hasattr(storage, "get_boiler_overrides") else {},
             "vacation_mode": self._vacation_mode,
             "boiler_average_budget_today": self._boiler_average_budget_today,
             "boiler_average_profile_today": self._boiler_average_profile_today,
@@ -1788,6 +1789,16 @@ class EmsDpSensor(SensorEntity):
             # sensor.boiler_dp always re-writes last_calculation/calculation_duration,
             # so attribute-level changes alone must NOT re-trigger sensor.dp.
             if entity_id == "sensor.boiler_dp":
+                now_dt = dt_util.now()
+                if self._last_calc_time is not None and (now_dt - self._last_calc_time).total_seconds() < 90:
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.DEBUG,
+                        "EMS DP: cross-trigger from sensor.boiler_dp debounced (< 90s since last calc)"
+                    )
+                    return
+
                 def _boiler_sched_key(slot):
                     if not isinstance(slot, dict):
                         return ()
@@ -1914,10 +1925,16 @@ class EmsDpSensor(SensorEntity):
             bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
 
             # 2. Check states of required entities
+            price_buy_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
+            price_sell_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
             for entity_id in [
                 total_load_consumption_id,
                 bat_soc_entity_id,
+                price_buy_id,
+                price_sell_id,
             ]:
+                if not entity_id:
+                    continue
                 state_obj = self.hass.states.get(entity_id)
                 if not state_obj or state_obj.state in (None, "unknown", "unavailable"):
                     ems_log(
@@ -2295,7 +2312,11 @@ class EmsDpSensor(SensorEntity):
         min_arbitrage_profit: float = 0.0,
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
-        from .dp_engine import run_unified_dp, DPConfig
+        import importlib
+        from . import dp_engine
+        importlib.reload(dp_engine)
+        run_unified_dp = dp_engine.run_unified_dp
+        DPConfig = dp_engine.DPConfig
         from .const import INVERTER_MODES
 
         if min_bat_soc_evening is None:
@@ -2438,6 +2459,37 @@ class EmsDpSensor(SensorEntity):
             math_slots.append(math_slot)
 
         try:
+            import json as _json
+            with open("/config/scratch_math_slots.json", "w", encoding="utf-8") as _f:
+                _json.dump({
+                    "current_usable": current_usable,
+                    "usable_capacity": usable_capacity,
+                    "cycle_cost": cycle_cost,
+                    "terminal_value": terminal_value,
+                    "min_end_usable": min_end_usable,
+                    "remaining_hour_fraction": remaining_hour_fraction,
+                    "dp_config": {
+                        "min_sell_price": dp_config.min_sell_price,
+                        "min_discharge_price": dp_config.min_discharge_price,
+                        "battery_max_discharge_power": dp_config.battery_max_discharge_power,
+                        "battery_max_charge_power": dp_config.battery_max_charge_power,
+                        "battery_min_soc": dp_config.battery_min_soc,
+                        "battery_capacity": dp_config.battery_capacity,
+                        "min_energy_to_discharge": dp_config.min_energy_to_discharge,
+                        "disable_discharge": dp_config.disable_discharge,
+                        "battery_min_soc_evening": dp_config.battery_min_soc_evening,
+                        "battery_min_soc_morning": dp_config.battery_min_soc_morning,
+                        "min_arbitrage_profit": dp_config.min_arbitrage_profit,
+                        "eta_charge": dp_config.eta_charge,
+                        "eta_discharge": dp_config.eta_discharge,
+                        "last_sell_hour_by_date": getattr(dp_config, 'last_sell_hour_by_date', {}),
+                    },
+                    "slots": math_slots,
+                }, _f, indent=2)
+        except Exception as _e:
+            _LOGGER.error("Failed to dump scratch_math_slots: %s", _e)
+
+        try:
             (
                 chg_h,
                 dis_h,
@@ -2455,6 +2507,37 @@ class EmsDpSensor(SensorEntity):
                 config=dp_config,
                 remaining_hour_fraction=remaining_hour_fraction,
             )
+
+            # Two-pass dynamic morning min SOC: after first DP determines discharge
+            # hours, re-run with updated last_sell_hour_by_date so hours after the
+            # last sell use the lower morning limit (allows deeper self-consumption).
+            if (dp_config.battery_min_soc_evening or 0) > (dp_config.battery_min_soc_morning or 0):
+                _lsh: dict[str, int] = {}
+                for _d in dis_h:
+                    _dd = _d.get("date", "")
+                    _dh = _d.get("hour", 0)
+                    if _dh >= 12:
+                        if _dd not in _lsh or _dh > _lsh[_dd]:
+                            _lsh[_dd] = _dh
+                if _lsh != dp_config.last_sell_hour_by_date:
+                    dp_config.last_sell_hour_by_date = _lsh
+                    (
+                        chg_h,
+                        dis_h,
+                        pvc_h,
+                        sc_h,
+                        pim_h,
+                        stats,
+                    ) = run_unified_dp(
+                        slots=math_slots,
+                        current_usable=current_usable,
+                        usable_capacity=usable_capacity,
+                        cycle_cost=cycle_cost,
+                        terminal_value_per_kwh=terminal_value,
+                        min_end_usable=min_end_usable,
+                        config=dp_config,
+                        remaining_hour_fraction=remaining_hour_fraction,
+                    )
 
             # Check if total planned discharge is less than the minimum configured limit
             if (
@@ -2521,26 +2604,98 @@ class EmsDpSensor(SensorEntity):
                 action = "paid_import"
                 energy = pim_keys[key].get("planned_grid_import_kwh", 0.0)
             else:
-                if slot["pv_kwh"] > 0.1:
+                total_consumption = (
+                    slot.get("consumption_kwh", 0.0)
+                    + slot.get("ev_kwh", 0.0)
+                    + slot.get("planned_boiler_kwh", 0.0)
+                )
+                pv_surplus = max(0.0, slot.get("pv_kwh", 0.0) - total_consumption)
+                if pv_surplus > 0.1:
                     action = "solar_export"
                     solar_export_hours.append({
                         "date": slot["date"],
                         "hour": slot["hour"],
-                        "pv_kwh": slot["pv_kwh"],
+                        "pv_kwh": round(pv_surplus, 2),
                     })
+                elif slot.get("pv_kwh", 0.0) > 0.05:
+                    action = "normal"
 
             if idx == 0:
-                # End-of-hour lock: if within 180s of the hour boundary and same hour,
-                # prevent transient drop to idle / solar_export if battery is not yet full/empty
+                slot_min_soc = dp_config.get_min_soc(slot["hour"])
+                # Scale pv and consumption to remaining hour fraction for slot 0
+                slot_consumption = (
+                    slot.get("consumption_kwh", 0.0)
+                    + slot.get("ev_kwh", 0.0)
+                    + slot.get("planned_boiler_kwh", 0.0)
+                ) * remaining_hour_fraction
+                slot_pv = slot.get("pv_kwh", 0.0) * remaining_hour_fraction
+                slot_pv_surplus = max(0.0, slot_pv - slot_consumption)
+
+                # Anti-chattering: prevent mid-hour drop from self_consume to idle if house still has load
+                # and battery is safely above slot minimum SOC (prevents micro-arbitrage jitter & fractional load drop)
+                if (
+                    self._last_hour_action == "self_consume"
+                    and action == "idle"
+                    and now.hour == self._last_action_hour
+                    and slot.get("consumption_kwh", 0.0) > 0.01
+                    and soc > (slot_min_soc + 0.5)
+                ):
+                    action = "self_consume"
+
+                # Anti-chattering for discharge: prevent mid-hour drop to self_consume/idle/normal/solar_export
+                # when discharge was already active in this hour and battery is safely above minimum SOC
+                if (
+                    self._last_hour_action == "discharge"
+                    and action in ("self_consume", "idle", "normal", "solar_export")
+                    and now.hour == self._last_action_hour
+                    and soc > (slot_min_soc + 0.5)
+                ):
+                    action = "discharge"
+
+                # Anti-chattering for grid_charge: prevent mid-hour drop to pv_charge/idle/normal
+                # if grid charging was already active in this hour and hour remains cheap
+                if (
+                    self._last_hour_action == "grid_charge"
+                    and action in ("pv_charge", "idle", "normal")
+                    and now.hour == self._last_action_hour
+                    and not slot.get("override")
+                ):
+                    if soc >= 95.0:
+                        # Battery is virtually full; allow transition to pv_charge/idle
+                        action = "pv_charge" if slot_pv_surplus > 0.0 else "idle"
+                    elif slot.get("buy_price", 1.0) <= (global_min_buy + 0.15) or slot_pv_surplus < 0.5:
+                        # Hour is cheap or PV surplus is not overwhelming; hold grid_charge
+                        action = "grid_charge"
+                        if energy <= 0.0:
+                            needed_kwh = (95.0 - soc) * dp_config.battery_capacity / 100.0
+                            energy = min(dp_config.battery_max_charge_power * remaining_hour_fraction, max(0.5, needed_kwh))
+
+                # Anti-chattering for pv_charge: prevent flipping into grid_charge
+                # when pv_charge was active in this hour, unless substantial net grid energy is required
+                if (
+                    self._last_hour_action == "pv_charge"
+                    and action == "grid_charge"
+                    and now.hour == self._last_action_hour
+                    and not slot.get("override")
+                ):
+                    net_grid_needed = max(0.0, energy - slot_pv_surplus)
+                    if soc >= 92.0 or net_grid_needed < 0.5:
+                        action = "pv_charge"
+
+                # End-of-hour lock: if within 300s of the hour boundary and same hour,
+                # prevent transient drop or premature cutoff if battery is within safe limits
                 now_m = now.minute
                 now_s = now.second
                 rem_sec = (59 - now_m) * 60 + (60 - now_s)
-                if rem_sec < 180 and now.hour == self._last_action_hour:
-                    if action in ("idle", "solar_export"):
-                        if self._last_hour_action == "pv_charge" and soc < 99.0:
-                            action = "pv_charge"
-                        elif self._last_hour_action == "self_consume" and soc > (min_bat_soc + 1.0):
-                            action = "self_consume"
+                if rem_sec < 300 and now.hour == self._last_action_hour:
+                    if self._last_hour_action == "discharge" and soc > (slot_min_soc + 0.5):
+                        action = "discharge"
+                    elif self._last_hour_action == "pv_charge" and soc < 99.0:
+                        action = "pv_charge"
+                    elif self._last_hour_action == "self_consume" and soc > (slot_min_soc + 0.5):
+                        action = "self_consume"
+                    elif self._last_hour_action == "grid_charge" and soc < 95.0:
+                        action = "grid_charge"
                 current_action = action
 
             # Calculate cheap_ahead for the slot (next 6 hours, ONLY negative price)
@@ -2640,6 +2795,10 @@ class EmsSchedulerSensor(SensorEntity):
         self._last_active_power_w: float = 0.0
         self._last_active_amps: float = 0.0
         self._last_active_hour: int = -1
+        self._set_power_w: float = 0.0
+        self._set_amps: float = 0.0
+        self._set_action: str | None = None
+        self._set_hour: int = -1
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -2961,6 +3120,24 @@ class EmsSchedulerSensor(SensorEntity):
         safe_capacity = capacity if capacity > 0.0 else 5.12
         current_physical_kwh = safe_capacity * (soc / 100.0) if soc is not None else safe_capacity * 0.5
 
+        # Determine live battery efficiency
+        weekly_state = self.hass.states.get("sensor.ems_battery_weekly_loss_rate")
+        if weekly_state and weekly_state.state not in (None, "unknown", "unavailable"):
+            try:
+                weekly_loss_pct = float(weekly_state.state)
+                weekly_rte = max(0.50, min(1.0, (100.0 - weekly_loss_pct) / 100.0))
+            except (ValueError, TypeError):
+                weekly_rte = 0.865
+        else:
+            weekly_rte = self.hass.data.get(DOMAIN, {}).get("weekly_round_trip_efficiency", 0.865)
+
+        try:
+            live_eta_charge = round(math.sqrt(max(0.50, min(1.0, weekly_rte))), 4)
+            live_eta_discharge = round(math.sqrt(max(0.50, min(1.0, weekly_rte))), 4)
+        except Exception:
+            live_eta_charge = 0.930
+            live_eta_discharge = 0.930
+
         dispatched_plan = []
 
         # For the first slot (current hour), energy_kwh covers only the
@@ -2970,6 +3147,16 @@ class EmsSchedulerSensor(SensorEntity):
         now_second = now.second
         remaining_seconds = (59 - now_minute) * 60 + (60 - now_second)
         remaining_hour_fraction = max(remaining_seconds / 3600.0, 1 / 3600.0)
+
+        # Compute last discharge hour in [12..23] per date for dynamic morning min SOC
+        last_sell_hour_by_date: dict[str, int] = {}
+        for _s in schedule:
+            if _s.get("action") == "discharge":
+                _s_date = _s.get("date", "")
+                _s_hour = int(_s.get("hour", 0))
+                if _s_hour >= 12:
+                    if _s_date not in last_sell_hour_by_date or _s_hour > last_sell_hour_by_date[_s_date]:
+                        last_sell_hour_by_date[_s_date] = _s_hour
 
         for slot_idx, slot in enumerate(schedule):
             action = slot.get("action", "idle")
@@ -2994,7 +3181,11 @@ class EmsSchedulerSensor(SensorEntity):
             if action in ("grid_charge", "pv_charge"):
                 end_usable = min(usable_capacity, usable_energy + energy)
                 current_physical_kwh = min(safe_capacity, current_physical_kwh + energy)
-                power_w = energy_for_power * 1000.0
+                # 3x power headroom for small grid charge (<1.0 kWh) to prevent battery sag and absorb home surges from grid
+                if action == "grid_charge" and 0.0 < energy_for_power < 1.0:
+                    power_w = min(bat_max_power, max(600.0, energy_for_power * 3000.0))
+                else:
+                    power_w = energy_for_power * 1000.0
                 current_a = power_w / safe_voltage
             elif action in ("discharge", "self_consume"):
                 end_usable = max(0.0, usable_energy - energy)
@@ -3008,7 +3199,25 @@ class EmsSchedulerSensor(SensorEntity):
                 slot_hour = int(slot.get("hour", current_hour))
             except (ValueError, TypeError):
                 slot_hour = current_hour
-            slot_min_bat_soc = min_bat_soc_morning if 6 <= slot_hour < 10 else min_bat_soc_evening
+            # Dynamic min SOC with 12:00 reference point:
+            # - Before 12:00: always morning limit
+            # - From 12:00: evening limit up to last sale hour, morning limit thereafter or if no sales
+            _slot_date = str(slot.get("date", ""))
+            if slot_hour < 12:
+                slot_min_bat_soc = min_bat_soc_morning
+            elif _slot_date in last_sell_hour_by_date:
+                if 12 <= slot_hour <= last_sell_hour_by_date[_slot_date]:
+                    slot_min_bat_soc = min_bat_soc_evening
+                else:
+                    slot_min_bat_soc = min_bat_soc_morning
+            else:
+                slot_min_bat_soc = min_bat_soc_morning
+
+            # If action is discharge but calculated power dropped to 0 (e.g. at end-of-hour discrete step),
+            # hold bat_max_power as long as SOC is above cutoff
+            if action == "discharge" and power_w <= 0.0 and soc is not None and soc > (slot_min_bat_soc + 0.5):
+                power_w = round(bat_max_power, 1)
+                current_a = round(power_w / safe_voltage, 1)
 
             # Calculate SOC at the end of the hour based on continuous physical battery energy
             end_soc = (current_physical_kwh / safe_capacity) * 100.0
@@ -3028,6 +3237,65 @@ class EmsSchedulerSensor(SensorEntity):
 
                 slot_date = slot.get("date", today_str)
                 slot_override = overrides.get(slot_date, {}).get(str(slot_hour))
+
+                if slot_override:
+                    _ov_parts = slot_override.split(":", 1)
+                    _ov_act = _ov_parts[0]
+                    _ov_target_soc = None
+                    if len(_ov_parts) == 2:
+                        try:
+                            _ov_target_soc = float(_ov_parts[1])
+                        except (ValueError, TypeError):
+                            _ov_target_soc = None
+
+                    if _ov_act == "grid_charge":
+                        _target_soc = _ov_target_soc if _ov_target_soc is not None else 100.0
+                        if slot_soc < _target_soc:
+                            slot_data["action"] = "grid_charge"
+                            slot_data["physical_mode"] = "buy"
+                            cvcc_m = get_cvcc_charge_multiplier(slot_soc)
+
+                            # Required power to reach _target_soc over remaining time
+                            rem_fraction = remaining_hour_fraction if (slot_idx == 0 and remaining_hour_fraction > 0) else 1.0
+                            soc_gap = max(0.0, _target_soc - slot_soc)
+                            eff_chg = live_eta_charge if live_eta_charge > 0 else 1.0
+                            req_p_w = (soc_gap / 100.0 * safe_capacity) / (rem_fraction * eff_chg) * 1000.0
+
+                            # Max power with CVCC if req_p_w exceeds max, else proportional smooth rate (floor 600W)
+                            p_w = round(min(bat_max_power * cvcc_m, max(600.0, req_p_w)), 1)
+                            slot_data["power_w"] = p_w
+                            slot_data["current_a"] = round(p_w / safe_voltage, 1)
+
+                            if slot_idx == 0 and soc is not None:
+                                chg_kwh = (p_w / 1000.0) * rem_fraction * eff_chg
+                                realistic_soc = round(min(_target_soc, min(100.0, soc + (chg_kwh / safe_capacity) * 100.0)), 1)
+                                slot_data["soc"] = realistic_soc
+                    elif _ov_act == "discharge":
+                        _target_soc = _ov_target_soc if _ov_target_soc is not None else slot_min_bat_soc
+                        if slot_soc > _target_soc:
+                            slot_data["action"] = "discharge"
+                            slot_data["physical_mode"] = "sale_pv_bat"
+
+                            rem_fraction = remaining_hour_fraction if (slot_idx == 0 and remaining_hour_fraction > 0) else 1.0
+                            soc_gap = max(0.0, slot_soc - _target_soc)
+                            eff_dis = live_eta_discharge if live_eta_discharge > 0 else 1.0
+                            req_p_w = (soc_gap / 100.0 * safe_capacity * eff_dis) / rem_fraction * 1000.0
+
+                            p_w = round(min(bat_max_power, max(600.0, req_p_w)), 1)
+                            slot_data["power_w"] = p_w
+                            slot_data["current_a"] = round(p_w / safe_voltage, 1)
+
+                            if slot_idx == 0 and soc is not None:
+                                dis_kwh = (p_w / 1000.0) * rem_fraction / eff_dis
+                                realistic_soc = round(max(_target_soc, max(slot_min_bat_soc, soc - (dis_kwh / safe_capacity) * 100.0)), 1)
+                                slot_data["soc"] = realistic_soc
+                    elif _ov_act in ("sale_pv_no_bat", "sale_pv", "sale_pv_bat", "stop_sale", "no_pv_sale_no_bat", "idle"):
+                        slot_data["action"] = _ov_act
+                        slot_data["physical_mode"] = _ov_act
+                        slot_data["power_w"] = 0.0
+                        slot_data["current_a"] = 0.0
+                        if slot_idx == 0 and soc is not None:
+                            slot_data["soc"] = round(soc, 1)
 
                 if slot_idx == 0:
                     is_high_soc_override = (self._pv_export_soc_override_active and slot_override is None)
@@ -3135,15 +3403,37 @@ class EmsSchedulerSensor(SensorEntity):
 
         if dispatched_plan:
             current_slot = dispatched_plan[0]
-            slot_power = current_slot.get("power_w", 0.0)
-            slot_amps = current_slot.get("current_a", 0.0)
+            slot_power = float(current_slot.get("power_w", 0.0) or 0.0)
+            slot_amps = float(current_slot.get("current_a", 0.0) or 0.0)
+            slot_action = current_slot.get("action", raw_mode)
 
-            if slot_power > 0.0:
-                self._last_active_power_w = slot_power
-                self._last_active_amps = slot_amps
+            # 5% Deadband filter: prevent jittering the inverter setpoint every second.
+            # Update the baseline setpoint only if:
+            # 1. Action/mode changed or hour changed.
+            # 2. Power drops to 0.0 (stopped) or starts from 0.0.
+            # 3. Calculated power deviates by > 5% from the currently set baseline.
+            is_mode_changed = (slot_action != self._set_action or now.hour != self._set_hour)
+            is_zero_transition = (slot_power <= 0.0 or self._set_power_w <= 0.0)
 
-            current_power = slot_power
-            current_amps = slot_amps
+            if is_mode_changed or is_zero_transition:
+                self._set_power_w = round(slot_power, 1)
+                self._set_amps = round(slot_amps, 1)
+                self._set_action = slot_action
+                self._set_hour = now.hour
+            else:
+                delta_pct = abs(slot_power - self._set_power_w) / self._set_power_w
+                if delta_pct > 0.05:
+                    self._set_power_w = round(slot_power, 1)
+                    self._set_amps = round(slot_amps, 1)
+
+            if self._set_power_w > 0.0:
+                self._last_active_power_w = self._set_power_w
+                self._last_active_amps = self._set_amps
+
+            current_power = self._set_power_w
+            current_amps = self._set_amps
+            current_slot["power_w"] = self._set_power_w
+            current_slot["current_a"] = self._set_amps
             current_target_soc = current_slot.get("soc", soc)
 
         avg_pv = self._avg_buffer(self._pv_buffer)
@@ -4263,8 +4553,10 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             manual_setpoint = getattr(controller, "_manual_heating_setpoint", None)
             gas_heating_delayed = getattr(controller, "_gas_heating_delayed", False)
 
+        storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
         return {
             "schedule": self._schedule,
+            "boiler_overrides": storage.get_boiler_overrides() if hasattr(storage, "get_boiler_overrides") else {},
             "stats": self._stats,
             "recommended_bypass": self._recommended_bypass,
             "t_start": self._t_start,
@@ -4385,7 +4677,17 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             )
         )
 
+        # Recalculate immediately when manual overrides change
+        self.async_on_remove(
+            self.hass.bus.async_listen("ems_schedule_updated", self._async_schedule_updated_listener)
+        )
+
         # Initial trigger
+        await self.async_update_boiler_dp(force=True)
+
+    async def _async_schedule_updated_listener(self, _event=None) -> None:
+        """Handle forced recalculation when manual overrides are updated."""
+        ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS Boiler DP: schedule updated event received, recalculating")
         await self.async_update_boiler_dp(force=True)
 
     async def _async_hourly_trigger(self, datetime_now) -> None:
@@ -4425,6 +4727,16 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
         # Поля last_calculation/calculation_duration меняются всегда, поэтому
         # attribute-only изменения НЕ должны повторно запускать sensor.boiler_dp.
         if entity_id == "sensor.dp":
+            now_dt = dt_util.now()
+            if self._last_calc_time is not None and (now_dt - self._last_calc_time).total_seconds() < 90:
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.DEBUG,
+                    "EMS Boiler DP: cross-trigger from sensor.dp debounced (< 90s since last calc)"
+                )
+                return
+
             if self.hass.data.setdefault(DOMAIN, {}).get("boiler_recalculating"):
                 self.hass.data[DOMAIN]["boiler_recalculating"] = False
                 ems_log(
@@ -4438,12 +4750,14 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             def _dp_sched_key(slot):
                 if not isinstance(slot, dict):
                     return ()
+                pm = slot.get("physical_mode")
+                norm_mode = "charge_or_pv" if pm in ("buy", "sale_pv") else pm
                 return (
                     slot.get("date"),
                     slot.get("hour"),
                     safe_round(slot.get("buy_price"), 4),
                     safe_round(slot.get("sell_price"), 4),
-                    slot.get("physical_mode"),
+                    norm_mode,
                 )
 
             old_sched = (
@@ -4912,6 +5226,9 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
             b_controller = self.hass.data[DOMAIN][self._entry_id].get("boiler_controller")
             dhw_forecast = b_controller.get_dhw_today_forecast_profile() if b_controller else [0.0] * 24
 
+            # Retrieve boiler mode overrides from storage
+            boiler_overrides = storage.get_boiler_overrides() if hasattr(storage, "get_boiler_overrides") else {}
+
             from .boiler_dp_engine import run_boiler_dp
             import functools
             func = functools.partial(
@@ -4938,6 +5255,7 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
                 min_bat_soc_evening=min_bat_soc_evening,
                 min_bat_soc_morning=min_bat_soc_morning,
                 dhw_forecast_profile=dhw_forecast,
+                boiler_overrides=boiler_overrides if boiler_overrides else None,
             )
             current_action, schedule_list, stats_dict = await self.hass.async_add_executor_job(func)
 

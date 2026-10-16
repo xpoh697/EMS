@@ -22,7 +22,8 @@ class EmsScheduleStorage:
         self.hass = hass
         self.entry_id = entry_id
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY.format(entry_id=entry_id))
-        self._overrides: dict[str, dict[str, str]] = {}  # date -> hour -> action
+        self._overrides: dict[str, dict[str, str]] = {}  # date -> hour -> action (inverter)
+        self._boiler_overrides: dict[str, dict[str, str]] = {}  # date -> hour -> boiler mode
         self.last_override_change: str | None = None
         self.min_bat_soc_evening: float = 15.0
         self.min_bat_soc_morning: float = 15.0
@@ -38,7 +39,7 @@ class EmsScheduleStorage:
     def min_bat_soc(self) -> float:
         """Get minimum battery SOC based on current hour."""
         hour = dt_util.now().hour
-        if 6 <= hour < 10:
+        if 0 <= hour < 10:
             return self.min_bat_soc_morning
         return self.min_bat_soc_evening
 
@@ -91,6 +92,7 @@ class EmsScheduleStorage:
 
         if data is None:
             self._overrides = {}
+            self._boiler_overrides = {}
             self.last_override_change = None
             self.min_bat_soc_evening = fallback_min_bat_soc_evening
             self.min_bat_soc_morning = fallback_min_bat_soc_morning
@@ -103,6 +105,7 @@ class EmsScheduleStorage:
             self.min_arbitrage_profit = 0.0
         else:
             self._overrides = data.get("overrides", {})
+            self._boiler_overrides = data.get("boiler_overrides", {})
             self.last_override_change = data.get("last_override_change")
             
             old_soc_in_json = data.get("min_bat_soc")
@@ -134,6 +137,7 @@ class EmsScheduleStorage:
         """Save data to JSON storage."""
         await self._store.async_save({
             "overrides": self._overrides,
+            "boiler_overrides": self._boiler_overrides,
             "last_override_change": self.last_override_change,
             "min_bat_soc": self.min_bat_soc,
             "min_bat_soc_evening": self.min_bat_soc_evening,
@@ -182,6 +186,43 @@ class EmsScheduleStorage:
         await self.async_save()
         _LOGGER.info("EMS All manual overrides cleared")
 
+    # ── Boiler mode overrides ────────────────────────────────────────────────
+
+    def get_boiler_overrides(self) -> dict[str, dict[str, str]]:
+        """Return all boiler mode overrides (date -> hour_str -> mode)."""
+        import copy
+        return copy.deepcopy(self._boiler_overrides)
+
+    def get_boiler_hour_override(self, date_str: str, hour: int) -> str | None:
+        """Get boiler override mode for a specific hour, or None if not set."""
+        return self._boiler_overrides.get(date_str, {}).get(str(hour))
+
+    async def async_set_boiler_override(self, date_str: str, hour: int, mode: str) -> None:
+        """Set a boiler mode override for a specific hour."""
+        if date_str not in self._boiler_overrides:
+            self._boiler_overrides[date_str] = {}
+        self._boiler_overrides[date_str][str(hour)] = mode
+        self.last_override_change = dt_util.now().isoformat()
+        await self.async_save()
+        _LOGGER.info("EMS Boiler Override set: %s hour %d -> %s", date_str, hour, mode)
+
+    async def async_clear_boiler_override(self, date_str: str, hour: int) -> None:
+        """Clear a boiler mode override for a specific hour."""
+        if date_str in self._boiler_overrides and str(hour) in self._boiler_overrides[date_str]:
+            del self._boiler_overrides[date_str][str(hour)]
+            if not self._boiler_overrides[date_str]:
+                del self._boiler_overrides[date_str]
+            self.last_override_change = dt_util.now().isoformat()
+            await self.async_save()
+            _LOGGER.info("EMS Boiler Override cleared: %s hour %d", date_str, hour)
+
+    async def async_clear_all_boiler_overrides(self) -> None:
+        """Clear all boiler mode overrides."""
+        self._boiler_overrides = {}
+        self.last_override_change = dt_util.now().isoformat()
+        await self.async_save()
+        _LOGGER.info("EMS All boiler overrides cleared")
+
     def cleanup_old_dates(self, today_str: str) -> None:
         """Remove overrides older than today."""
         dates_to_remove = []
@@ -190,9 +231,14 @@ class EmsScheduleStorage:
                 dates_to_remove.append(d_str)
         for d_str in dates_to_remove:
             del self._overrides[d_str]
-        if dates_to_remove:
+        # Also clean boiler overrides
+        boiler_dates_to_remove = [d for d in self._boiler_overrides if d < today_str]
+        for d_str in boiler_dates_to_remove:
+            del self._boiler_overrides[d_str]
+        if dates_to_remove or boiler_dates_to_remove:
             self.hass.async_create_task(self.async_save())
-            _LOGGER.debug("EMS Cleaned up old overrides: %s", dates_to_remove)
+            _LOGGER.debug("EMS Cleaned up old overrides: %s, boiler: %s", dates_to_remove, boiler_dates_to_remove)
+
 
 
 # ---------------------------------------------------------------------------

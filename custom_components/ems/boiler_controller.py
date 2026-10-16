@@ -79,6 +79,7 @@ class BoilerController:
         self._manual_heating_setpoint = 50.0
         self._manual_pump_dump_active = False
         self._warm_boiler_bypass_active = False
+        self._elec_pump_pumping = False
         
         # Capacity and cost settings
         self.gas_capacity = config.get("gas_boiler_capacity", 100)
@@ -289,7 +290,11 @@ class BoilerController:
         if dp_state and self.current_mode.lower() == "auto":
             schedule = dp_state.attributes.get("schedule", [])
             if schedule:
-                dp_t_max_elec = schedule[0].get("temp_elec_end")
+                override_temp = schedule[0].get("override_target_temp")
+                if override_temp is not None:
+                    dp_t_max_elec = float(override_temp)
+                else:
+                    dp_t_max_elec = schedule[0].get("temp_elec_end")
                 dp_t_max_gas = schedule[0].get("temp_gas_end")
 
         # 1. Электробойлер
@@ -303,6 +308,12 @@ class BoilerController:
         self._t_max_elec = t_max_elec
         hysteresis = 5.0
         
+        has_override = False
+        if dp_state and self.current_mode.lower() == "auto":
+            schedule = dp_state.attributes.get("schedule", [])
+            if schedule and len(schedule) > 0:
+                has_override = bool(schedule[0].get("override_mode"))
+
         if t_elec is None:
             mode = dp_state.state.upper() if dp_state else "IDLE"
             if "ELEC" in mode and self.current_mode.lower() == "auto":
@@ -310,12 +321,12 @@ class BoilerController:
                     _LOGGER.warning("EMS Boiler Controller: Temperature sensor for electric boiler is unavailable during active heating. Activating safety cutoff.")
                 self._elec_cutoff_active = True
         else:
-            # Общая остановка при достижении setpoint или дефиците солнца
+            # Общая остановка при достижении setpoint или дефиците солнца (дефицит игнорируется при ручном оверайде)
             if t_elec >= t_max_elec:
                 if not self._elec_cutoff_active:
                     _LOGGER.info("EMS Boiler Controller: Electric boiler reached setpoint (%.1f >= %.1f). Stopping heating.", t_elec, t_max_elec)
                 self._elec_cutoff_active = True
-            elif self._solar_deficit_cutoff:
+            elif self._solar_deficit_cutoff and not has_override:
                 self._elec_cutoff_active = True
             elif t_elec < t_max_elec - hysteresis:
                 if self._elec_cutoff_active:
@@ -2588,10 +2599,48 @@ class BoilerController:
                 prev_pump_mode = getattr(self, "_last_pump_mode", None)
                 self._last_pump_mode = mode
 
-                is_pump_mode = "PUMP" in mode
                 is_cwu_active = getattr(self, "_cwu_active", False)
+                should_run_pump = False
 
-                if is_pump_mode or is_cwu_active:
+                if mode == "ELEC_PUMP":
+                    t_elec = self._get_elec_temp()
+                    setpoint = float(self._t_max_elec) if self._t_max_elec is not None else 70.0
+                    
+                    if t_elec is None:
+                        _LOGGER.warning("EMS Boiler Controller: t_elec sensor unavailable during ELEC_PUMP. Pump kept OFF for safety.")
+                        self._elec_pump_pumping = False
+                    else:
+                        if not self._elec_pump_pumping:
+                            # 1. Электро бойлер греется до сетпоинт - 2.0, в это время насос выключен
+                            if t_elec >= (setpoint - 2.0):
+                                self._elec_pump_pumping = True
+                                _LOGGER.info(
+                                    "EMS Boiler Controller: ELEC_PUMP started pumping (t_elec=%.1f >= setpoint-2=%.1f)",
+                                    t_elec, setpoint - 2.0
+                                )
+                        else:
+                            # 2. Насос работает либо до достижения сетпоинта, либо до снижения сетпоинт - 10.0
+                            if t_elec >= setpoint:
+                                self._elec_pump_pumping = False
+                                _LOGGER.info(
+                                    "EMS Boiler Controller: ELEC_PUMP stopped pumping (target reached: t_elec=%.1f >= setpoint=%.1f)",
+                                    t_elec, setpoint
+                                )
+                            elif t_elec <= (setpoint - 10.0):
+                                self._elec_pump_pumping = False
+                                _LOGGER.info(
+                                    "EMS Boiler Controller: ELEC_PUMP stopped pumping (cooled down: t_elec=%.1f <= setpoint-10=%.1f)",
+                                    t_elec, setpoint - 10.0
+                                )
+                    should_run_pump = self._elec_pump_pumping
+                elif "PUMP" in mode:
+                    self._elec_pump_pumping = False
+                    should_run_pump = True
+                else:
+                    self._elec_pump_pumping = False
+                    should_run_pump = False
+
+                if should_run_pump or is_cwu_active:
                     # EMS requires pump -> turn ON
                     await self._async_control_actuator(
                         self.pump,

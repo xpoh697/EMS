@@ -97,6 +97,7 @@ def run_boiler_dp(
     min_bat_soc_evening: float | None = None,
     min_bat_soc_morning: float | None = None,
     dhw_forecast_profile: list | None = None,
+    boiler_overrides: dict | None = None,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run Dynamic Programming strategy optimizer for hot water boiler.
 
@@ -385,6 +386,18 @@ def run_boiler_dp(
     # 2.5 Precalculate effective electricity tariffs for all slots to prevent inverter mode oscillations
     cum_boiler_today = 0.0
     cum_boiler_tomorrow = 0.0
+
+    # Compute last discharge hour in [12..23] per date for dynamic morning min SOC
+    _boiler_lsh: dict[str, int] = {}
+    for _bs in slots:
+        _bm = _bs.get("physical_mode", "")
+        if _bm in ("discharge", "export", "self_consume_with_export"):
+            _bd = _bs.get("date", "")
+            _bh = int(_bs.get("hour", 0))
+            if _bh >= 12:
+                if _bd not in _boiler_lsh or _bh > _boiler_lsh[_bd]:
+                    _boiler_lsh[_bd] = _bh
+
     for idx, slot in enumerate(slots):
         buy_price = float(slot.get("buy_price", 0.0))
         sell_price = float(slot.get("sell_price", 0.0))
@@ -394,7 +407,17 @@ def run_boiler_dp(
         max_solar_sell = max_sell_tomorrow if is_tomorrow else max_sell_today
         
         slot_hour = int(slot.get("hour", 0))
-        slot_min_bat_soc = min_bat_soc_morning if 6 <= slot_hour < 10 else min_bat_soc_evening
+        # Dynamic min SOC with 12:00 reference point:
+        _boiler_date = str(slot.get("date", ""))
+        if slot_hour < 12:
+            slot_min_bat_soc = min_bat_soc_morning
+        elif _boiler_date in _boiler_lsh:
+            if 12 <= slot_hour <= _boiler_lsh[_boiler_date]:
+                slot_min_bat_soc = min_bat_soc_evening
+            else:
+                slot_min_bat_soc = min_bat_soc_morning
+        else:
+            slot_min_bat_soc = min_bat_soc_morning
         
         # Reconstruct baseline SOC trajectory by adding back planned boiler energy (decouples feedback loop)
         actual_planned = float(slot.get("actual_planned_boiler_kwh", 0.0))
@@ -959,6 +982,43 @@ def run_boiler_dp(
         })
         total_cost += step["cost"]
 
+    # ── Apply boiler mode overrides (post-processing) ──────────────────────
+    # Overrides are applied AFTER DP to guarantee the forced mode is respected,
+    # regardless of cost optimisation. The schedule entry's mode is replaced
+    # and the override_mode field is set for UI indication.
+    if boiler_overrides:
+        for sched_entry in schedule:
+            entry_date = str(sched_entry.get("date", ""))
+            entry_hour = str(sched_entry.get("hour", ""))
+            forced_raw = (boiler_overrides.get(entry_date, {}).get(entry_hour)
+                          or boiler_overrides.get(entry_date, {}).get(int(entry_hour) if entry_hour.isdigit() else entry_hour))
+            if forced_raw:
+                parts = str(forced_raw).split(":", 1)
+                forced_mode = parts[0]
+                forced_temp = None
+                if len(parts) > 1:
+                    try:
+                        forced_temp = float(parts[1])
+                    except (ValueError, TypeError):
+                        forced_temp = None
+
+                if forced_mode in ["IDLE", "GAS", "GAS_PUMP", "ELEC", "ELEC_PUMP", "PUMP_ONLY"]:
+                    sched_entry["mode"] = forced_mode
+                    sched_entry["override_mode"] = forced_mode
+                    if forced_temp is not None:
+                        sched_entry["override_target_temp"] = forced_temp
+                        if "GAS" in forced_mode:
+                            sched_entry["temp_gas_end"] = forced_temp
+                            sched_entry["temp_active_end"] = forced_temp
+                        elif "ELEC" in forced_mode:
+                            sched_entry["temp_elec_end"] = forced_temp
+                            sched_entry["temp_active_end"] = forced_temp
+                    # Recalculate cost placeholder — actual cost is determined by boiler_controller at runtime
+                    sched_entry["cost"] = 0.0
+                    sched_entry["energy"] = 0.0
+            else:
+                sched_entry["override_mode"] = None
+
     # Рассчитываем плановое потребление электроэнергии бойлером сегодня
     today_planned_elec = 0.0
     if best_path and today_date:
@@ -985,5 +1045,5 @@ def run_boiler_dp(
         "remaining_pv_today": round(max(0.0, total_pv_budget_today - actual_boiler_today), 2),
     }
 
-    current_action = best_path[0]["mode"] if best_path else "IDLE"
+    current_action = schedule[0]["mode"] if schedule else (best_path[0]["mode"] if best_path else "IDLE")
     return current_action, schedule, stats

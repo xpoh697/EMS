@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -39,14 +39,38 @@ class DPConfig:
     min_arbitrage_profit: float = 0.0
     eta_charge: float = 1.0
     eta_discharge: float = 1.0
+    last_sell_hour_by_date: dict = field(default_factory=dict)
 
-    def get_min_soc(self, hour: int) -> float:
-        """Get the hourly minimum battery SOC."""
+    def get_min_soc(self, hour: int, date: str | None = None) -> float:
+        """Get the hourly minimum battery SOC based on the 12:00 reference point.
+
+        1. Before 12:00 (0 <= hour < 12): always morning min SOC.
+        2. From 12:00 to 23:59:
+           - If a sale (discharge) is planned on that date between 12 and 23:
+             - From 12:00 up to the last sale hour: evening min SOC (to hold charge for sale).
+             - After the last sale hour: back to morning min SOC.
+           - If no sale is planned after 12:00: morning min SOC all day.
+        """
         min_ev = self.battery_min_soc_evening if self.battery_min_soc_evening is not None else float(self.battery_min_soc)
         min_mo = self.battery_min_soc_morning if self.battery_min_soc_morning is not None else float(self.battery_min_soc)
-        if 6 <= hour < 10:
+        if hour < 12:
             return min_mo
-        return min_ev
+
+        # Hour >= 12: check if there is a planned sale on this date
+        if date and date in self.last_sell_hour_by_date:
+            last_sell = self.last_sell_hour_by_date[date]
+            if 12 <= hour <= last_sell:
+                return min_ev
+            return min_mo
+
+        # If date is not in last_sell_hour_by_date, but date is not passed, fallback
+        if date is None:
+            if 0 <= hour < 10:
+                return min_mo
+            return min_ev
+
+        # Date is known and has no sales in [12..23] -> morning min SOC
+        return min_mo
 
 
 def hours_from_now(price_entry: dict) -> float:
@@ -65,15 +89,21 @@ def hours_from_now(price_entry: dict) -> float:
 
 def get_cvcc_charge_multiplier(soc: float) -> float:
     """Calculate the charge power multiplier based on CVCC battery characteristics."""
-    if soc < 93.0:
+    if soc < 84.0:
         return 1.0
-    if soc < 95.0:
-        return 0.80
-    if soc < 97.0:
-        return 0.50
+    if soc < 87.0:
+        return 0.85
+    if soc < 90.0:
+        return 0.65
+    if soc < 93.0:
+        return 0.45
+    if soc < 96.0:
+        return 0.28
+    if soc < 98.0:
+        return 0.15
     if soc < 99.0:
-        return 0.25
-    return 0.10
+        return 0.08
+    return 0.05
 
 
 def run_unified_dp(
@@ -119,17 +149,18 @@ def run_unified_dp(
     if not slots or usable_capacity <= 0 or config.battery_capacity <= 0.0:
         return [], [], [], [], [], empty_stats
 
+    _LOGGER.info("EMS DP: DC-coupled PV charging v2 active")
     # Clone slots to avoid mutating input objects (and scale the first slot)
     scaled_slots = [dict(s) for s in slots]
     today_date = slots[0].get("date") if slots else None
     if today_date:
         for s in scaled_slots:
-            if s.get("date") != today_date and s.get("hour", 0) >= 8:
+            if s.get("date") != today_date and s.get("hour", 0) >= 10:
                 # 15% uncertainty discount for future day slots (from 08:00 onwards)
                 # to prevent withholding energy today for marginal speculative savings tomorrow,
                 # while keeping tonight's immediate night horizon (00:00..07:00) at real tariffs.
-                if "buy_price" in s:
-                    s["buy_price"] = s["buy_price"] * 0.85
+                # Only discount speculative future sell revenue to avoid withholding energy today.
+                # Never discount buy_price so that true night vs day tariffs are evaluated accurately.
                 if "sell_price" in s:
                     s["sell_price"] = s["sell_price"] * 0.85
 
@@ -156,6 +187,7 @@ def run_unified_dp(
         if s.get("hour", 0) in (22, 23, 0, 1, 2, 3, 4, 5) and s.get("pv_kwh", 0.0) <= 0.5
     ]
     ref_night_buy = max(night_buys) if night_buys else 1.0
+    min_day_buy = min((s.get("buy_price", 99.0) for s in scaled_slots), default=ref_night_buy)
     min_arbitrage_margin = config.min_arbitrage_profit if config.min_arbitrage_profit > 0.0 else 0.30
 
     # Pre-calculate CVCC charge multipliers for all states to optimize loop performance
@@ -164,7 +196,7 @@ def run_unified_dp(
     cvcc_multipliers = []
     for s_idx in range(max_energy_idx + 1):
         usable_energy = s_idx * energy_step
-        soc_val = current_min_soc + (usable_energy / config.battery_capacity * 100.0)
+        soc_val = config.battery_min_soc + (usable_energy / config.battery_capacity * 100.0)
         clamped_soc = min(100.0, max(0.0, soc_val))
         cvcc_multipliers.append(get_cvcc_charge_multiplier(clamped_soc))
 
@@ -202,25 +234,34 @@ def run_unified_dp(
             # (no PV export). Use effective_sell_price=0 so the DP doesn't credit
             # phantom export revenue and correctly prefers PV charging instead.
             effective_sell_price = sell_price if sell_price >= config.min_sell_price else 0.0
-            is_pre_solar = slot.get("hour", 0) < 10 and slot.get("pv_kwh", 0.0) <= 0.5
+            slot_hour = slot.get("hour", 0)
+            is_pre_solar = slot_hour < 6 and slot.get("pv_kwh", 0.0) <= 0.5
+            is_pre_solar_low_price = (slot_hour in (5, 6, 7, 8) and slot.get("pv_kwh", 0.0) <= 0.5
+                                       and sell_price < config.min_discharge_price)
             eff_sell_net = sell_price * config.eta_discharge - cycle_cost
             can_export = (not is_pre_solar) or ((eff_sell_net - ref_night_buy) >= min_arbitrage_margin)
 
-            slot_min_soc = config.get_min_soc(slot.get("hour", 0))
+            slot_min_soc = config.get_min_soc(slot.get("hour", 0), slot.get("date"))
             min_usable_allowed = config.battery_capacity * max(0.0, slot_min_soc - config.battery_min_soc) / 100.0
             min_slot_idx = int(round(min_usable_allowed / energy_step))
 
             pre_solar_ahead = []
-            if config.min_arbitrage_profit > 0.0:
-                for _f in scaled_slots[slot_idx:]:
-                    if _f.get("pv_kwh", 0.0) > 0.5:
-                        break
-                    pre_solar_ahead.append(_f)
+            for _f in scaled_slots[slot_idx:]:
+                if _f.get("pv_kwh", 0.0) > 0.5 or (_f.get("hour", 0) >= 10 and (_f.get("date") != slot.get("date") or slot.get("hour", 0) < 10)):
+                    break
+                pre_solar_ahead.append(_f)
             home_needed = (sum(max(0.0, _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0) - _f.get("pv_kwh", 0.0)) for _f in pre_solar_ahead) / (config.eta_discharge if config.eta_discharge > 0.0 else 1.0)) if pre_solar_ahead else 0.0
-            max_future_buy = max((_f.get("buy_price", 0.0) for _f in pre_solar_ahead), default=0.0) if pre_solar_ahead else 0.0
-            eff_future_buy = max_future_buy / config.eta_charge if config.eta_charge > 0.0 else max_future_buy
-            eff_sell = sell_price * config.eta_discharge
-            arbitrage_ok = (eff_sell - eff_future_buy - 2 * cycle_cost) >= config.min_arbitrage_profit
+            higher_sell_cap = sum(
+                min(config.battery_max_discharge_power, config.battery_capacity)
+                for _f in pre_solar_ahead
+                if _f.get("sell_price", 0.0) > (sell_price + 0.02)
+            ) if pre_solar_ahead else 0.0
+            night_recharge_buys = [_f.get("buy_price", 99.0) for _f in pre_solar_ahead if _f.get("hour", 0) in (22, 23, 0, 1, 2, 3, 4, 5)]
+            max_night_buy = max(night_recharge_buys) if night_recharge_buys else (max((_f.get("buy_price", 0.0) for _f in pre_solar_ahead), default=0.0))
+            min_night_buy = min(night_recharge_buys) if night_recharge_buys else max_night_buy
+            eff_sell_net = sell_price * config.eta_discharge - cycle_cost
+            recharge_replacement_cost = (min_night_buy / config.eta_charge + cycle_cost) if config.eta_charge > 0.0 else min_night_buy
+            discharge_arbitrage_ok = (eff_sell_net >= recharge_replacement_cost) or (eff_sell_net >= max_night_buy)
 
             for state_idx, current_value in enumerate(dp_n[slot_idx - 1]):
                 if current_value == neg_inf:
@@ -261,7 +302,12 @@ def run_unified_dp(
                         if to_grid > 0.0:
                             if exp < config.min_energy_to_discharge or not can_export:
                                 continue
-                            if (usable_energy - exp) < home_needed and not arbitrage_ok:
+                            if is_pre_solar_low_price:
+                                continue
+                            req_reserve = (higher_sell_cap + home_needed) if (not discharge_arbitrage_ok and slot_hour < 12) else higher_sell_cap
+                            if req_reserve > 0.0 and (usable_energy - exp) < req_reserve:
+                                continue
+                            if (usable_energy - exp) < home_needed and not discharge_arbitrage_ok:
                                 continue
                         _update_n(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
 
@@ -272,7 +318,7 @@ def run_unified_dp(
                     if slot_idx == 1 and remaining_hour_fraction < 1.0:
                         max_charge_power *= remaining_hour_fraction
                     max_pvc = min(pv_surplus, avail_cap, max_charge_power)
-                    steps = int(max_pvc / energy_step)
+                    steps = int((max_pvc + 1e-6) / energy_step)
                     if steps == 0 and slot_idx == 1 and remaining_hour_fraction < 1.0 and pv_surplus > 0.001:
                         steps = 1
                     for ci in range(1, steps + 1):
@@ -284,8 +330,9 @@ def run_unified_dp(
                         _update_n(nsi, reward, ACT_PV_CHARGE, chg)
 
                 # === GRID_CHARGE ===
-                if avail_cap >= energy_step:
-                    max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
+                min_gc_power = max(0.5, float(config.min_energy_to_discharge or 0.5))
+                max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
+                if avail_cap >= energy_step and (max_charge_power >= min_gc_power or slot_idx == 1):
                     if slot_idx == 1 and remaining_hour_fraction < 1.0:
                         max_charge_power *= remaining_hour_fraction
                     max_gc = min(max_charge_power, avail_cap)
@@ -294,21 +341,28 @@ def run_unified_dp(
                         curr_slot = scaled_slots[slot_idx - 1]
                         is_pre_solar_night = curr_slot.get("pv_kwh", 0.0) <= 0.5 and curr_slot.get("hour", 0) in (22, 23, 0, 1, 2, 3, 4, 5, 6)
                         eta_rt = (config.eta_charge * config.eta_discharge) if (config.eta_charge > 0.0 and config.eta_discharge > 0.0) else 1.0
-                        eff_stored_cost = (buy_price / eta_rt) + 2 * cycle_cost
+                        eff_stored_cost = (buy_price / eta_rt) + cycle_cost
 
                         if is_pre_solar_night:
                             pre_solar_slots = []
                             for _ps in scaled_slots[slot_idx - 1:]:
-                                if _ps.get("pv_kwh", 0.0) > 0.5:
+                                if _ps.get("pv_kwh", 0.0) > 0.5 or _ps.get("hour", 0) in range(10, 22):
                                     break
                                 pre_solar_slots.append(_ps)
                             sum_pv_ahead = sum(s.get("pv_kwh", 0.0) for s in scaled_slots[slot_idx - 1:])
-                            eval_slots = pre_solar_slots if sum_pv_ahead >= usable_capacity else scaled_slots[slot_idx - 1:]
+                            max_pre_solar_sell = max((s.get("sell_price", 0.0) for s in pre_solar_slots), default=0.0)
+                            cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.01) for s in scaled_slots[slot_idx:])
+                            eval_to_pre_solar = (
+                                max_pre_solar_sell >= config.min_discharge_price
+                                or cheaper_future_buy
+                                or sum_pv_ahead >= max(0.0, usable_capacity - usable_energy)
+                            )
+                            eval_slots = pre_solar_slots if eval_to_pre_solar else scaled_slots[slot_idx - 1:]
 
                             max_future_sell = max((s.get("sell_price", 0.0) for s in eval_slots), default=0.0)
                             effective_future_sell = max_future_sell * config.eta_discharge
                             effective_buy_cost = buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price
-                            arbitrage_margin = effective_future_sell - effective_buy_cost - 2 * cycle_cost
+                            arbitrage_margin = effective_future_sell - effective_buy_cost - cycle_cost
                             if arbitrage_margin < config.min_arbitrage_profit:
                                 home_deficit_until_solar = 0.0
                                 for f_slot in pre_solar_slots:
@@ -316,18 +370,43 @@ def run_unified_dp(
                                         f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
                                         net_def = max(0.0, f_cons - f_slot.get("pv_kwh", 0.0))
                                         home_deficit_until_solar += (net_def / config.eta_discharge if config.eta_discharge > 0.0 else net_def)
-                                allowed_capacity = max(0.0, home_deficit_until_solar - usable_energy)
+                                pre_solar_needed = max(0.0, max(home_deficit_until_solar, 1.0 if home_deficit_until_solar > 0.1 else 0.0) - usable_energy)
+                                if not cheaper_future_buy:
+                                    sum_day_home_def = 0.0
+                                    sum_pv_ahead = 0.0
+                                    for f_slot in scaled_slots[slot_idx - 1:]:
+                                        if f_slot.get("date") != curr_slot.get("date"):
+                                            break
+                                        f_pv = f_slot.get("pv_kwh", 0.0)
+                                        f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
+                                        if f_pv > f_cons:
+                                            sum_pv_ahead += (f_pv - f_cons)
+                                        else:
+                                            sum_day_home_def += (f_cons - f_pv)
+                                    needed_day_deficit = max(0.0, sum_day_home_def - sum_pv_ahead - usable_energy)
+                                    space_with_solar_reserve = max(0.0, avail_cap - sum_pv_ahead)
+                                    allowed_capacity = max(0.0, min(space_with_solar_reserve, max(pre_solar_needed, needed_day_deficit)))
+                                else:
+                                    allowed_capacity = max(0.0, pre_solar_needed)
                                 max_gc = min(max_gc, allowed_capacity)
                         else:
                             future_slots = scaled_slots[slot_idx - 1:]
                             max_future_sell = max((s.get("sell_price", 0.0) for s in future_slots), default=0.0)
                             effective_future_sell = max_future_sell * config.eta_discharge
                             effective_buy_cost = buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price
-                            arbitrage_margin = effective_future_sell - effective_buy_cost - 2 * cycle_cost
-                            if arbitrage_margin < config.min_arbitrage_profit:
+                            arbitrage_margin = effective_future_sell - effective_buy_cost - cycle_cost
+                            orig_slot = slots[slot_idx - 1]
+                            orig_buy = orig_slot.get("buy_price", 0.0)
+                            orig_max_future_sell = max((s.get("sell_price", 0.0) for s in slots[slot_idx - 1:]), default=0.0)
+                            gross_arbitrage_margin = orig_max_future_sell - orig_buy
+                            is_arb_profitable = (arbitrage_margin >= config.min_arbitrage_profit) or (gross_arbitrage_margin >= config.min_arbitrage_profit and arbitrage_margin > 0.0)
+                            cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.005) for s in future_slots[1:])
+                            if not is_arb_profitable:
                                 sum_expensive_deficit = 0.0
                                 sum_pv_between = 0.0
                                 for f_slot in future_slots[1:]:
+                                    if cheaper_future_buy and f_slot.get("buy_price", 0.0) < (buy_price - 0.005):
+                                        break
                                     f_pv = f_slot.get("pv_kwh", 0.0)
                                     f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
                                     if f_pv > f_cons:
@@ -335,7 +414,14 @@ def run_unified_dp(
                                     elif f_slot.get("buy_price", 0.0) > eff_stored_cost:
                                         net_def = f_cons - f_pv
                                         sum_expensive_deficit += (net_def / config.eta_discharge if config.eta_discharge > 0.0 else net_def)
-                                net_needed = max(0.0, sum_expensive_deficit + float(min_end_usable or 0.0) - sum_pv_between - usable_energy)
+                                reserve_to_charge = float(min_end_usable or 0.0) if (not cheaper_future_buy and buy_price <= (ref_night_buy + 0.15)) else 0.0
+                                net_needed = max(0.0, sum_expensive_deficit + reserve_to_charge - sum_pv_between - usable_energy)
+                                max_future_buy = max((s.get("buy_price", 0.0) for s in future_slots[1:]), default=0.0)
+                                eff_saving_vs_future_buy = max_future_buy * config.eta_discharge - eff_stored_cost
+                                if eff_saving_vs_future_buy >= 0.15 or buy_price <= 0.25:
+                                    spare_capacity_after_solar = max(0.0, avail_cap - sum_pv_between)
+                                    home_saving_cap = max(0.0, min(spare_capacity_after_solar, sum_expensive_deficit - usable_energy))
+                                    net_needed = max(net_needed, home_saving_cap)
                                 max_gc = min(max_gc, net_needed)
                             else:
                                 # Arbitrage is profitable, but must not displace cheap solar!
@@ -345,20 +431,24 @@ def run_unified_dp(
                                 effective_charge_cost = effective_buy_cost + cycle_cost
                                 for f_slot in future_slots[1:]:
                                     f_sell = f_slot.get("sell_price", 0.0)
-                                    f_pv = f_slot.get("pv_kwh", 0.0)
+                                    f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0) + f_slot.get("ev_kwh", 0.0)
+                                    f_net_pv = max(0.0, f_slot.get("pv_kwh", 0.0) - f_cons)
                                     if f_sell < effective_charge_cost:
-                                        pv_cheap_to_reserve += f_pv
+                                        pv_cheap_to_reserve += f_net_pv
                                     if f_sell >= max_future_sell - 1e-4:
                                         break
                                 allowed_arbitrage_gc = max(0.0, avail_cap - pv_cheap_to_reserve)
                                 max_gc = min(max_gc, allowed_arbitrage_gc)
 
-                    for ci in range(1, int(max_gc / energy_step) + 1):
+                    min_ci = 1 if (slot_idx == 1 or avail_cap < config.min_energy_to_discharge) else (max(1, int(round(config.min_energy_to_discharge / energy_step))) if config.min_energy_to_discharge > 0 else 1)
+                    for ci in range(min_ci, int(round(max_gc / energy_step)) + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                        req_chg = chg / config.eta_charge if config.eta_charge > 0.0 else chg
-                        net_chg = (req_chg - pv_surplus) if req_chg > pv_surplus else 0.0
-                        reward = - buy_price * (net_chg + pv_deficit) - cycle_cost * chg
+                        grid_part = max(0.0, chg - pv_surplus)
+                        net_chg = grid_part / config.eta_charge if config.eta_charge > 0.0 else grid_part
+                        reward = - buy_price * (net_chg + pv_deficit)
+                        if slot_idx == 1:
+                            reward += 1e-4 * chg
                         _update_n(nsi, reward, ACT_GRID_CHARGE, chg)
 
                 # === SELF_CONSUME ===
@@ -458,10 +548,16 @@ def run_unified_dp(
         pv_surplus = max(0.0, pv_kwh - consumption_kwh)
         pv_deficit = max(0.0, consumption_kwh - pv_kwh)
         effective_sell_price = sell_price if sell_price >= config.min_sell_price else 0.0
-        is_pre_solar = slot.get("hour", 0) < 10 and slot.get("pv_kwh", 0.0) <= 0.5
+        slot_hour = slot.get("hour", 0)
+        is_pre_solar = slot_hour < 6 and slot.get("pv_kwh", 0.0) <= 0.5
+        # Pre-solar morning hours: block battery export to grid if sell_price is below min_discharge_price.
+        # This prevents "dumping" stored energy cheaply in the morning that could have been sold at
+        # higher evening peak prices, forcing battery into self-consume mode instead.
+        is_pre_solar_low_price = (slot_hour in (5, 6, 7, 8) and slot.get("pv_kwh", 0.0) <= 0.5
+                                   and sell_price < config.min_discharge_price)
         eff_sell_net = sell_price * config.eta_discharge - cycle_cost
         can_export = (not is_pre_solar) or ((eff_sell_net - ref_night_buy) >= min_arbitrage_margin)
-        slot_min_soc = config.get_min_soc(slot.get("hour", 0))
+        slot_min_soc = config.get_min_soc(slot.get("hour", 0), slot.get("date"))
         min_usable_allowed = config.battery_capacity * max(0.0, slot_min_soc - config.battery_min_soc) / 100.0
         min_slot_idx = int(round(min_usable_allowed / energy_step))
         override = slot.get("override")
@@ -481,10 +577,10 @@ def run_unified_dp(
                 if override_action == "grid_charge":
                     override_target_soc = 100.0
                 elif override_action == "discharge":
-                    override_target_soc = float(config.get_min_soc(slot.get("hour", 0)))
+                    override_target_soc = float(config.get_min_soc(slot.get("hour", 0), slot.get("date")))
 
             if override_target_soc is not None and config.battery_capacity > 0.0 and energy_step > 0.0:
-                target_usable = config.battery_capacity * (override_target_soc - config.get_min_soc(slot.get("hour", 0))) / 100.0
+                target_usable = config.battery_capacity * (override_target_soc - config.battery_min_soc) / 100.0
                 target_nsi = max(0, min(max_energy_idx, int(round(target_usable / energy_step))))
 
         # Resolve override to physical mode config
@@ -511,16 +607,23 @@ def run_unified_dp(
             mode_config = INVERTER_MODES.get(physical_mode)
 
         pre_solar_ahead = []
-        if not override and config.min_arbitrage_profit > 0.0:
+        if not override:
             for _f in scaled_slots[slot_idx:]:
-                if _f.get("pv_kwh", 0.0) > 0.5:
+                if _f.get("pv_kwh", 0.0) > 0.5 or (_f.get("hour", 0) >= 10 and (_f.get("date") != slot.get("date") or slot.get("hour", 0) < 10)):
                     break
                 pre_solar_ahead.append(_f)
         home_needed = (sum(max(0.0, _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0) - _f.get("pv_kwh", 0.0)) for _f in pre_solar_ahead) / (config.eta_discharge if config.eta_discharge > 0.0 else 1.0)) if pre_solar_ahead else 0.0
-        max_future_buy = max((_f.get("buy_price", 0.0) for _f in pre_solar_ahead), default=0.0) if pre_solar_ahead else 0.0
-        eff_future_buy = max_future_buy / config.eta_charge if config.eta_charge > 0.0 else max_future_buy
-        eff_sell = sell_price * config.eta_discharge
-        arbitrage_ok = (eff_sell - eff_future_buy - 2 * cycle_cost) >= config.min_arbitrage_profit
+        higher_sell_cap = sum(
+            min(config.battery_max_discharge_power, config.battery_capacity)
+            for _f in pre_solar_ahead
+            if _f.get("sell_price", 0.0) > (sell_price + 0.02)
+        ) if pre_solar_ahead else 0.0
+        night_recharge_buys = [_f.get("buy_price", 99.0) for _f in pre_solar_ahead if _f.get("hour", 0) in (22, 23, 0, 1, 2, 3, 4, 5)]
+        max_night_buy = max(night_recharge_buys) if night_recharge_buys else (max((_f.get("buy_price", 0.0) for _f in pre_solar_ahead), default=0.0))
+        min_night_buy = min(night_recharge_buys) if night_recharge_buys else max_night_buy
+        eff_sell_net = sell_price * config.eta_discharge - cycle_cost
+        recharge_replacement_cost = (min_night_buy / config.eta_charge + cycle_cost) if config.eta_charge > 0.0 else min_night_buy
+        discharge_arbitrage_ok = (eff_sell_net >= recharge_replacement_cost) or (eff_sell_net >= max_night_buy)
 
         for state_idx, current_value in enumerate(dp[slot_idx - 1]):
             if current_value == neg_inf:
@@ -538,15 +641,17 @@ def run_unified_dp(
                     if slot_idx == 1 and remaining_hour_fraction < 1.0:
                         max_charge_power *= remaining_hour_fraction
                     avail_cap = usable_capacity - usable_energy
-                    max_gc = min(max_charge_power, avail_cap)
-                    max_possible_chg_steps = int(max_gc / energy_step)
+                    max_gc = min(max_charge_power, max(energy_step, avail_cap))
+                    max_possible_chg_steps = int(round(max_gc / energy_step))
+                    if max_possible_chg_steps == 0 and slot_idx == 1 and target_nsi > state_idx:
+                        max_possible_chg_steps = 1
                     expected_nsi = min(target_nsi, state_idx + max_possible_chg_steps)
                 elif target_nsi < state_idx:
                     max_discharge_power = config.battery_max_discharge_power
                     if slot_idx == 1 and remaining_hour_fraction < 1.0:
                         max_discharge_power *= remaining_hour_fraction
                     max_exp = min(max_discharge_power, usable_energy)
-                    max_possible_dis_steps = int(max_exp / energy_step)
+                    max_possible_dis_steps = int(round(max_exp / energy_step))
                     expected_nsi = max(target_nsi, state_idx - max_possible_dis_steps)
 
             def _update(nsi: int, rwd: float, act: int, amt: float) -> None:
@@ -582,7 +687,7 @@ def run_unified_dp(
                 max_exp = min(max_discharge_power, usable_energy)
                 
                 if target_nsi is not None:
-                    max_possible_dis_steps = int(max_exp / energy_step)
+                    max_possible_dis_steps = int(round(max_exp / energy_step))
                     desired_dis_steps = min(state_idx - target_nsi, max_possible_dis_steps)
                     if desired_dis_steps >= 1:
                         exp = desired_dis_steps * energy_step
@@ -594,8 +699,14 @@ def run_unified_dp(
                         if not override and to_grid > 0.0:
                             if not can_export:
                                 blocked = True
-                            elif (usable_energy - exp) < home_needed and not arbitrage_ok:
+                            elif is_pre_solar_low_price:
                                 blocked = True
+                            else:
+                                req_reserve = (higher_sell_cap + home_needed) if (not discharge_arbitrage_ok and slot_hour < 12) else higher_sell_cap
+                                if req_reserve > 0.0 and (usable_energy - exp) < req_reserve:
+                                    blocked = True
+                                elif (usable_energy - exp) < home_needed and not discharge_arbitrage_ok:
+                                    blocked = True
                         if not blocked and (override or nsi >= min_slot_idx):
                             _update(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
                 else:
@@ -612,7 +723,12 @@ def run_unified_dp(
                         if not override and to_grid > 0.0:
                             if exp < config.min_energy_to_discharge or not can_export:
                                 continue
-                            if (usable_energy - exp) < home_needed and not arbitrage_ok:
+                            if is_pre_solar_low_price:
+                                continue
+                            req_reserve = (higher_sell_cap + home_needed) if (not discharge_arbitrage_ok and slot_hour < 12) else higher_sell_cap
+                            if req_reserve > 0.0 and (usable_energy - exp) < req_reserve:
+                                continue
+                            if (usable_energy - exp) < home_needed and not discharge_arbitrage_ok:
                                 continue
                         _update(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
 
@@ -624,18 +740,19 @@ def run_unified_dp(
                 max_pvc = min(pv_surplus, avail_cap, max_charge_power)
                 
                 if target_nsi is not None:
-                    max_possible_chg_steps = int(max_pvc / energy_step)
+                    max_possible_chg_steps = int((max_pvc + 1e-6) / energy_step)
                     if max_possible_chg_steps == 0 and slot_idx == 1 and remaining_hour_fraction < 1.0 and pv_surplus > 0.001:
                         max_possible_chg_steps = 1
                     desired_chg_steps = min(target_nsi - state_idx, max_possible_chg_steps)
-                    if desired_chg_steps >= 1:
+                    min_ci = max(1, int(round(config.min_energy_to_discharge / energy_step))) if config.min_energy_to_discharge > 0 else 1
+                    if desired_chg_steps >= min_ci:
                         chg = desired_chg_steps * energy_step
                         nsi = min(max_energy_idx, max(0, state_idx + desired_chg_steps))
                         reward = sell_price * max(0.0, pv_surplus - chg) - buy_price * pv_deficit
                         reward += 1e-6 * chg
                         _update(nsi, reward, ACT_PV_CHARGE, chg)
                 elif override_action:
-                    chg_steps = int(max_pvc / energy_step)
+                    chg_steps = int((max_pvc + 1e-6) / energy_step)
                     if chg_steps == 0 and slot_idx == 1 and remaining_hour_fraction < 1.0 and pv_surplus > 0.001:
                         chg_steps = 1
                     if chg_steps >= 1:
@@ -645,7 +762,7 @@ def run_unified_dp(
                         reward += 1e-6 * chg
                         _update(nsi, reward, ACT_PV_CHARGE, chg)
                 else:
-                    steps = int(max_pvc / energy_step)
+                    steps = int((max_pvc + 1e-6) / energy_step)
                     if steps == 0 and slot_idx == 1 and remaining_hour_fraction < 1.0 and pv_surplus > 0.001:
                         steps = 1
                     for ci in range(1, steps + 1):
@@ -656,31 +773,39 @@ def run_unified_dp(
                         _update(nsi, reward, ACT_PV_CHARGE, chg)
 
             # === GRID_CHARGE: charge battery from grid ===
-            if (not override_action or (mode_config and mode_config.charge_from_grid)) and avail_cap >= energy_step and (target_nsi is None or target_nsi > state_idx):
-                max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
+            min_gc_power = max(0.5, float(config.min_energy_to_discharge or 0.5))
+            max_charge_power = config.battery_max_charge_power * cvcc_multipliers[state_idx]
+            if (not override_action or (mode_config and mode_config.charge_from_grid)) and (avail_cap >= energy_step or (target_nsi is not None and target_nsi > state_idx) or (slot_idx == 1 and state_idx < max_energy_idx)) and (target_nsi is None or target_nsi > state_idx) and (override or max_charge_power >= min_gc_power or slot_idx == 1):
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_charge_power *= remaining_hour_fraction
-                max_gc = min(max_charge_power, avail_cap)
+                max_gc = min(max_charge_power, max(energy_step, avail_cap)) if (target_nsi is not None and target_nsi > state_idx) else min(max_charge_power, avail_cap)
 
                 if not override and config.min_arbitrage_profit > 0.0:
                     curr_slot = scaled_slots[slot_idx - 1]
                     is_pre_solar_night = curr_slot.get("pv_kwh", 0.0) <= 0.5 and curr_slot.get("hour", 0) in (22, 23, 0, 1, 2, 3, 4, 5, 6)
                     eta_rt = (config.eta_charge * config.eta_discharge) if (config.eta_charge > 0.0 and config.eta_discharge > 0.0) else 1.0
-                    eff_stored_cost = (buy_price / eta_rt) + 2 * cycle_cost
+                    eff_stored_cost = (buy_price / eta_rt) + cycle_cost
 
                     if is_pre_solar_night:
                         pre_solar_slots = []
                         for _ps in scaled_slots[slot_idx - 1:]:
-                            if _ps.get("pv_kwh", 0.0) > 0.5:
+                            if _ps.get("pv_kwh", 0.0) > 0.5 or _ps.get("hour", 0) in range(10, 22):
                                 break
                             pre_solar_slots.append(_ps)
                         sum_pv_ahead = sum(s.get("pv_kwh", 0.0) for s in scaled_slots[slot_idx - 1:])
-                        eval_slots = pre_solar_slots if sum_pv_ahead >= usable_capacity else scaled_slots[slot_idx - 1:]
+                        max_pre_solar_sell = max((s.get("sell_price", 0.0) for s in pre_solar_slots), default=0.0)
+                        cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.01) for s in scaled_slots[slot_idx:])
+                        eval_to_pre_solar = (
+                            max_pre_solar_sell >= config.min_discharge_price
+                            or cheaper_future_buy
+                            or sum_pv_ahead >= max(0.0, usable_capacity - usable_energy)
+                        )
+                        eval_slots = pre_solar_slots if eval_to_pre_solar else scaled_slots[slot_idx - 1:]
 
                         max_future_sell = max((s.get("sell_price", 0.0) for s in eval_slots), default=0.0)
                         effective_future_sell = max_future_sell * config.eta_discharge
                         effective_buy_cost = buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price
-                        arbitrage_margin = effective_future_sell - effective_buy_cost - 2 * cycle_cost
+                        arbitrage_margin = effective_future_sell - effective_buy_cost - cycle_cost
                         if arbitrage_margin < config.min_arbitrage_profit:
                             home_deficit_until_solar = 0.0
                             for f_slot in pre_solar_slots:
@@ -688,18 +813,43 @@ def run_unified_dp(
                                     f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
                                     net_def = max(0.0, f_cons - f_slot.get("pv_kwh", 0.0))
                                     home_deficit_until_solar += (net_def / config.eta_discharge if config.eta_discharge > 0.0 else net_def)
-                            allowed_capacity = max(0.0, home_deficit_until_solar - usable_energy)
+                            pre_solar_needed = max(0.0, max(home_deficit_until_solar, 1.0 if home_deficit_until_solar > 0.1 else 0.0) - usable_energy)
+                            if not cheaper_future_buy:
+                                sum_day_home_def = 0.0
+                                sum_pv_ahead = 0.0
+                                for f_slot in scaled_slots[slot_idx - 1:]:
+                                    if f_slot.get("date") != curr_slot.get("date"):
+                                        break
+                                    f_pv = f_slot.get("pv_kwh", 0.0)
+                                    f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
+                                    if f_pv > f_cons:
+                                        sum_pv_ahead += (f_pv - f_cons)
+                                    else:
+                                        sum_day_home_def += (f_cons - f_pv)
+                                needed_day_deficit = max(0.0, sum_day_home_def - sum_pv_ahead - usable_energy)
+                                space_with_solar_reserve = max(0.0, avail_cap - sum_pv_ahead)
+                                allowed_capacity = max(0.0, min(space_with_solar_reserve, max(pre_solar_needed, needed_day_deficit)))
+                            else:
+                                allowed_capacity = max(0.0, pre_solar_needed)
                             max_gc = min(max_gc, allowed_capacity)
                     else:
                         future_slots = scaled_slots[slot_idx - 1:]
                         max_future_sell = max((s.get("sell_price", 0.0) for s in future_slots), default=0.0)
                         effective_future_sell = max_future_sell * config.eta_discharge
                         effective_buy_cost = buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price
-                        arbitrage_margin = effective_future_sell - effective_buy_cost - 2 * cycle_cost
-                        if arbitrage_margin < config.min_arbitrage_profit:
+                        arbitrage_margin = effective_future_sell - effective_buy_cost - cycle_cost
+                        orig_slot = slots[slot_idx - 1]
+                        orig_buy = orig_slot.get("buy_price", 0.0)
+                        orig_max_future_sell = max((s.get("sell_price", 0.0) for s in slots[slot_idx - 1:]), default=0.0)
+                        gross_arbitrage_margin = orig_max_future_sell - orig_buy
+                        is_arb_profitable = (arbitrage_margin >= config.min_arbitrage_profit) or (gross_arbitrage_margin >= config.min_arbitrage_profit and arbitrage_margin > 0.0)
+                        cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.005) for s in future_slots[1:])
+                        if not is_arb_profitable:
                             sum_expensive_deficit = 0.0
                             sum_pv_between = 0.0
                             for f_slot in future_slots[1:]:
+                                if cheaper_future_buy and f_slot.get("buy_price", 0.0) < (buy_price - 0.005):
+                                    break
                                 f_pv = f_slot.get("pv_kwh", 0.0)
                                 f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
                                 if f_pv > f_cons:
@@ -707,7 +857,14 @@ def run_unified_dp(
                                 elif f_slot.get("buy_price", 0.0) > eff_stored_cost:
                                     net_def = f_cons - f_pv
                                     sum_expensive_deficit += (net_def / config.eta_discharge if config.eta_discharge > 0.0 else net_def)
-                            net_needed = max(0.0, sum_expensive_deficit + float(min_end_usable or 0.0) - sum_pv_between - usable_energy)
+                            reserve_to_charge = float(min_end_usable or 0.0) if (not cheaper_future_buy and buy_price <= (ref_night_buy + 0.15)) else 0.0
+                            net_needed = max(0.0, sum_expensive_deficit + reserve_to_charge - sum_pv_between - usable_energy)
+                            max_future_buy = max((s.get("buy_price", 0.0) for s in future_slots[1:]), default=0.0)
+                            eff_saving_vs_future_buy = max_future_buy * config.eta_discharge - eff_stored_cost
+                            if eff_saving_vs_future_buy >= 0.15 or buy_price <= 0.25:
+                                spare_capacity_after_solar = max(0.0, avail_cap - sum_pv_between)
+                                home_saving_cap = max(0.0, min(spare_capacity_after_solar, sum_expensive_deficit - usable_energy))
+                                net_needed = max(net_needed, home_saving_cap)
                             max_gc = min(max_gc, net_needed)
                         else:
                             # Arbitrage is profitable, but must not displace cheap solar!
@@ -717,29 +874,39 @@ def run_unified_dp(
                             effective_charge_cost = effective_buy_cost + cycle_cost
                             for f_slot in future_slots[1:]:
                                 f_sell = f_slot.get("sell_price", 0.0)
-                                f_pv = f_slot.get("pv_kwh", 0.0)
+                                f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0) + f_slot.get("ev_kwh", 0.0)
+                                f_net_pv = max(0.0, f_slot.get("pv_kwh", 0.0) - f_cons)
                                 if f_sell < effective_charge_cost:
-                                    pv_cheap_to_reserve += f_pv
+                                    pv_cheap_to_reserve += f_net_pv
                                 if f_sell >= max_future_sell - 1e-4:
                                     break
                             allowed_arbitrage_gc = max(0.0, avail_cap - pv_cheap_to_reserve)
                             max_gc = min(max_gc, allowed_arbitrage_gc)
                 
                 if target_nsi is not None:
-                    max_possible_chg_steps = int(max_gc / energy_step)
+                    max_possible_chg_steps = int(round(max_gc / energy_step))
+                    if max_possible_chg_steps == 0 and slot_idx == 1 and target_nsi > state_idx:
+                        max_possible_chg_steps = 1
                     desired_chg_steps = min(target_nsi - state_idx, max_possible_chg_steps)
                     if desired_chg_steps >= 1:
                         chg = desired_chg_steps * energy_step
                         nsi = min(max_energy_idx, max(0, state_idx + desired_chg_steps))
-                        net_chg = (chg - pv_surplus) if chg > pv_surplus else 0.0
-                        reward = - buy_price * (net_chg + pv_deficit) - cycle_cost * chg
+                        grid_part = max(0.0, chg - pv_surplus)
+                        net_chg = grid_part / config.eta_charge if config.eta_charge > 0.0 else grid_part
+                        reward = - buy_price * (net_chg + pv_deficit)
+                        if slot_idx == 1:
+                            reward += 1e-4 * chg
                         _update(nsi, reward, ACT_GRID_CHARGE, chg)
                 else:
-                    for ci in range(1, int(max_gc / energy_step) + 1):
+                    min_ci = 1 if (slot_idx == 1 or avail_cap < config.min_energy_to_discharge) else (max(1, int(round(config.min_energy_to_discharge / energy_step))) if config.min_energy_to_discharge > 0 else 1)
+                    for ci in range(min_ci, int(round(max_gc / energy_step)) + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
-                        net_chg = (chg - pv_surplus) if chg > pv_surplus else 0.0
-                        reward = - buy_price * (net_chg + pv_deficit) - cycle_cost * chg
+                        grid_part = max(0.0, chg - pv_surplus)
+                        net_chg = grid_part / config.eta_charge if config.eta_charge > 0.0 else grid_part
+                        reward = - buy_price * (net_chg + pv_deficit)
+                        if slot_idx == 1:
+                            reward += 1e-4 * chg
                         _update(nsi, reward, ACT_GRID_CHARGE, chg)
 
             # === SELF_CONSUME: battery covers consumption deficit ===
@@ -905,19 +1072,35 @@ def run_unified_dp(
     total_paid_import = 0.0
     expected_trajectory: list[float] = []
 
+    # Compute last discharge hour in [12..23] per date for dynamic morning min SOC
+    _lsh: dict[str, int] = {}
+    for _ls_slot, _ls_act in zip(scaled_slots, types_by_slot, strict=False):
+        if _ls_act == ACT_DIS:
+            _ls_date = _ls_slot.get("date", "")
+            _ls_hour = _ls_slot.get("hour", 0)
+            if _ls_hour >= 12:
+                if _ls_date not in _lsh or _ls_hour > _lsh[_ls_date]:
+                    _lsh[_ls_date] = _ls_hour
+    config.last_sell_hour_by_date = _lsh
+
     for slot, act, amount in zip(scaled_slots, types_by_slot, amounts_by_slot, strict=False):
         start_usable = usable_energy
         soc_val = max(0.0, min(100.0, config.battery_min_soc + (start_usable / config.battery_capacity * 100.0)))
         expected_trajectory.append(round(soc_val, 2))
 
         # Apply post-processing filter for small grid discharges (exporters)
-        if act == ACT_DIS and amount > 0:
+        if act == ACT_DIS and amount > 0 and not slot.get("override"):
             total_consumption = slot["consumption_kwh"] + slot.get("ev_kwh", 0.0) + slot.get("planned_boiler_kwh", 0.0)
             home_deficit = max(0.0, total_consumption - slot["pv_kwh"])
             battery_to_home = min(amount, home_deficit)
             battery_to_grid = max(0.0, amount - battery_to_home)
 
-            if amount < config.min_energy_to_discharge or battery_to_grid < 0.05:
+            min_grid_exp = max(0.15, config.min_energy_to_discharge)
+            # For the current running slot, normalize export to full-hour equivalent so end-of-hour minutes don't kill discharge
+            is_first_running_slot = (slot is scaled_slots[0] and remaining_hour_fraction < 1.0)
+            effective_grid_exp = (battery_to_grid / remaining_hour_fraction) if is_first_running_slot else battery_to_grid
+
+            if effective_grid_exp < min_grid_exp:
                 # If grid export portion is below limit, switch to self-consumption or idle
                 amount = round(amount, 2)
                 if home_deficit > 0.0:
@@ -927,28 +1110,28 @@ def run_unified_dp(
                     amount = 0.0
 
         # Apply post-processing filter for negligible grid charges.
-        # When net energy drawn from the grid is < 0.1 kWh (one DP energy step),
+        # When net energy drawn from the grid is < 0.25 kWh (or battery is >= 95% SOC),
         # the slot is effectively a PV-only charge — downgrade GRID_CHARGE to
         # PV_CHARGE (or SOL if there is no PV surplus at all).
-        if act == ACT_GRID_CHARGE and amount > 0:
+        if act == ACT_GRID_CHARGE and amount > 0 and not slot.get("override"):
             pv_surplus = max(0.0, slot["pv_kwh"] - (slot.get("consumption_kwh", 0.0) + slot.get("ev_kwh", 0.0) + slot.get("planned_boiler_kwh", 0.0)))
             net_grid = amount - pv_surplus
-            if net_grid < 0.1:
+            if net_grid < 0.25 or soc_val >= 95.0:
                 if pv_surplus > 0.0:
                     amount = round(pv_surplus, 2)
                     act = ACT_PV_CHARGE
                     _LOGGER.debug(
                         "EMS DP: GRID_CHG→PV_CHG at %s %02dh "
-                        "(net_grid=%.3f kWh < 0.1 threshold, pv_surplus=%.3f kWh)",
-                        slot.get("date"), slot.get("hour"), net_grid, pv_surplus,
+                        "(net_grid=%.3f kWh < 0.25 threshold or soc=%.1f%% >= 95%%, pv_surplus=%.3f kWh)",
+                        slot.get("date"), slot.get("hour"), net_grid, soc_val, pv_surplus,
                     )
                 else:
                     act = ACT_SOL
                     amount = 0.0
                     _LOGGER.debug(
                         "EMS DP: GRID_CHG→SOL at %s %02dh "
-                        "(net_grid=%.3f kWh < 0.1 threshold, no pv_surplus)",
-                        slot.get("date"), slot.get("hour"), net_grid,
+                        "(net_grid=%.3f kWh < 0.25 threshold or soc=%.1f%% >= 95%%, no pv_surplus)",
+                        slot.get("date"), slot.get("hour"), net_grid, soc_val,
                     )
 
         if act == ACT_DIS and amount > 0:
@@ -960,7 +1143,7 @@ def run_unified_dp(
             battery_to_grid = max(0.0, amount - battery_to_home)
             grid_import = max(0.0, home_deficit - amount)
             total_export += battery_to_grid
-            slot_min_soc = config.get_min_soc(slot.get('hour', 0))
+            slot_min_soc = config.get_min_soc(slot.get('hour', 0), slot.get('date'))
             soc_limit = max(
                 slot_min_soc,
                 config.battery_min_soc + (max(0.0, end_usable) / config.battery_capacity * 100),
