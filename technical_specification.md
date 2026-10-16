@@ -62,7 +62,6 @@ To deploy the integration files to the Home Assistant server, the following rule
 2. **Bytecode Cache Reset**: After the files are successfully copied, the compiled bytecode directory `__pycache__` on the server must be deleted:
    `\\192.168.100.5\config\custom_components\ems\__pycache__`
    This is critical to prevent Home Assistant from executing outdated cached Python files.
-3. **Deployment Script**: An automated script `deploy.ps1` in the root of the project handles safety checks, file copying (excluding local `__pycache__`), and remote cache cleaning.
 
 ## 6. Statistics Management (Работа со статистикой)
 To analyze historical energy usage and compute average consumption profiles, the module `custom_components/ems/statistics.py` implements the following procedure:

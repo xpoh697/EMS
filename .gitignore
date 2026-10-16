@@ -26,5 +26,10 @@ env/
 .DS_Store
 Thumbs.db
 
-# Temporary scratch files and test logs
+# Deployment and temporary scripts
+deploy.ps1
 scratch/
+
+# Local debate logs
+DEBATE.md
+debate.md
