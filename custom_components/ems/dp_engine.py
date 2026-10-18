@@ -404,18 +404,22 @@ def run_unified_dp(
                             if not is_arb_profitable:
                                 sum_expensive_deficit = 0.0
                                 sum_pv_between = 0.0
+                                cheaper_future_capacity = 0.0
                                 for f_slot in future_slots[1:]:
-                                    if cheaper_future_buy and f_slot.get("buy_price", 0.0) < (buy_price - 0.005):
-                                        break
+                                    f_buy = f_slot.get("buy_price", 0.0)
                                     f_pv = f_slot.get("pv_kwh", 0.0)
                                     f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
+                                    if f_buy < (buy_price - 0.005):
+                                        f_net_pv = max(0.0, f_pv - f_cons)
+                                        cheaper_future_capacity += max(0.0, config.battery_max_charge_power - f_net_pv)
                                     if f_pv > f_cons:
                                         sum_pv_between += (f_pv - f_cons)
-                                    elif f_slot.get("buy_price", 0.0) > eff_stored_cost:
+                                    elif f_buy > eff_stored_cost:
                                         net_def = f_cons - f_pv
                                         sum_expensive_deficit += (net_def / config.eta_discharge if config.eta_discharge > 0.0 else net_def)
-                                reserve_to_charge = float(min_end_usable or 0.0) if (not cheaper_future_buy and buy_price <= (ref_night_buy + 0.15)) else 0.0
-                                net_needed = max(0.0, sum_expensive_deficit + reserve_to_charge - sum_pv_between - usable_energy)
+                                reserve_to_charge = float(min_end_usable or 0.0) if buy_price <= (ref_night_buy + 0.15) else 0.0
+                                total_deficit = max(0.0, sum_expensive_deficit + reserve_to_charge - sum_pv_between - usable_energy)
+                                net_needed = max(0.0, total_deficit - cheaper_future_capacity)
                                 max_future_buy = max((s.get("buy_price", 0.0) for s in future_slots[1:]), default=0.0)
                                 eff_saving_vs_future_buy = max_future_buy * config.eta_discharge - eff_stored_cost
                                 if eff_saving_vs_future_buy >= 0.15 or buy_price <= 0.25:
@@ -847,18 +851,22 @@ def run_unified_dp(
                         if not is_arb_profitable:
                             sum_expensive_deficit = 0.0
                             sum_pv_between = 0.0
+                            cheaper_future_capacity = 0.0
                             for f_slot in future_slots[1:]:
-                                if cheaper_future_buy and f_slot.get("buy_price", 0.0) < (buy_price - 0.005):
-                                    break
+                                f_buy = f_slot.get("buy_price", 0.0)
                                 f_pv = f_slot.get("pv_kwh", 0.0)
                                 f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
+                                if f_buy < (buy_price - 0.005):
+                                    f_net_pv = max(0.0, f_pv - f_cons)
+                                    cheaper_future_capacity += max(0.0, config.battery_max_charge_power - f_net_pv)
                                 if f_pv > f_cons:
                                     sum_pv_between += (f_pv - f_cons)
-                                elif f_slot.get("buy_price", 0.0) > eff_stored_cost:
+                                elif f_buy > eff_stored_cost:
                                     net_def = f_cons - f_pv
                                     sum_expensive_deficit += (net_def / config.eta_discharge if config.eta_discharge > 0.0 else net_def)
-                            reserve_to_charge = float(min_end_usable or 0.0) if (not cheaper_future_buy and buy_price <= (ref_night_buy + 0.15)) else 0.0
-                            net_needed = max(0.0, sum_expensive_deficit + reserve_to_charge - sum_pv_between - usable_energy)
+                            reserve_to_charge = float(min_end_usable or 0.0) if buy_price <= (ref_night_buy + 0.15) else 0.0
+                            total_deficit = max(0.0, sum_expensive_deficit + reserve_to_charge - sum_pv_between - usable_energy)
+                            net_needed = max(0.0, total_deficit - cheaper_future_capacity)
                             max_future_buy = max((s.get("buy_price", 0.0) for s in future_slots[1:]), default=0.0)
                             eff_saving_vs_future_buy = max_future_buy * config.eta_discharge - eff_stored_cost
                             if eff_saving_vs_future_buy >= 0.15 or buy_price <= 0.25:
