@@ -49,10 +49,16 @@ class EmsBoilerModeSelect(SelectEntity, RestoreEntity):
         # Push state to controller
         controller = self.hass.data[DOMAIN][self._entry.entry_id].get("boiler_controller")
         if controller:
+            old_mode = getattr(controller, "current_mode", "Auto")
             controller.current_mode = self._attr_current_option
+            if controller.current_mode.lower() == "auto" and old_mode.lower() != "auto":
+                controller._create_task(controller._async_apply_current_dp_plan())
+            elif controller.current_mode.lower() == "manual" and old_mode.lower() == "auto":
+                controller._create_task(controller._async_shutdown_ems_heaters())
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
+        old_option = self._attr_current_option
         self._attr_current_option = option
         self.async_write_ha_state()
         
@@ -60,3 +66,7 @@ class EmsBoilerModeSelect(SelectEntity, RestoreEntity):
         controller = self.hass.data[DOMAIN][self._entry.entry_id].get("boiler_controller")
         if controller:
             controller.current_mode = option
+            if option.lower() == "auto":
+                controller._create_task(controller._async_apply_current_dp_plan())
+            elif option.lower() == "manual" and old_option.lower() == "auto":
+                controller._create_task(controller._async_shutdown_ems_heaters())

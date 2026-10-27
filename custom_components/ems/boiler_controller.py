@@ -182,7 +182,11 @@ class BoilerController:
             )
 
         # Применяем план при старте
-        self._create_task(self._async_apply_current_dp_plan())
+        mode_state = self.hass.states.get("select.ems_boiler_mode")
+        if mode_state and mode_state.state in ("Auto", "Manual"):
+            self.current_mode = mode_state.state
+        if self.current_mode.lower() == "auto":
+            self._create_task(self._async_apply_current_dp_plan())
         
         # 3. Throttling вычислений стоимости (раз в 2 минуты)
         self._unsub_listeners.append(
@@ -2208,9 +2212,47 @@ class BoilerController:
         """Handle system mode selection changes (Auto/Manual)."""
         new_state = event.data.get("new_state")
         if new_state:
+            old_mode = getattr(self, "current_mode", "Auto")
             self.current_mode = new_state.state
             if self.current_mode.lower() == "auto":
                 await self._async_apply_current_dp_plan()
+            elif self.current_mode.lower() == "manual" and old_mode.lower() == "auto":
+                await self._async_shutdown_ems_heaters()
+
+    async def _async_shutdown_ems_heaters(self):
+        """Безопасное отключение нагревателей, включенных автоматикой EMS, при переходе в Manual."""
+        if self._manual_heating_active:
+            return
+
+        _LOGGER.info("EMS Boiler Controller: Transitioned to Manual mode. Shutting down EMS-managed heaters.")
+        if self.gas_climate and self._turned_on_by_ems.get(self.gas_climate):
+            try:
+                await self._async_control_actuator(
+                    self.gas_climate,
+                    CLIMATE_DOMAIN,
+                    "set_hvac_mode",
+                    "off",
+                    "EMS Boiler Controller (Auto->Manual Gas Shutdown)",
+                    service_data={ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": "off"}
+                )
+            except Exception as ex:
+                _LOGGER.warning("Error turning off gas climate on Manual switch: %s", ex)
+            finally:
+                self._turned_on_by_ems[self.gas_climate] = False
+
+        if self.elec_heater and self._turned_on_by_ems.get(self.elec_heater):
+            try:
+                await self._async_control_actuator(
+                    self.elec_heater,
+                    SWITCH_DOMAIN,
+                    SERVICE_TURN_OFF,
+                    STATE_OFF,
+                    "EMS Boiler Controller (Auto->Manual Elec Shutdown)"
+                )
+            except Exception as ex:
+                _LOGGER.warning("Error turning off electric heater on Manual switch: %s", ex)
+            finally:
+                self._turned_on_by_ems[self.elec_heater] = False
 
     async def _async_people_home_changed(self, event) -> None:
         """Handle presence sensor state change."""
@@ -2593,6 +2635,7 @@ class BoilerController:
                     target_heater_state,
                     "EMS Boiler Controller (Electric Heater)"
                 )
+                self._turned_on_by_ems[self.elec_heater] = (target_heater_state == STATE_ON)
 
             # 3. Control Circulation Pump (Strict enforcement)
             if self.pump:
@@ -2649,6 +2692,7 @@ class BoilerController:
                         STATE_ON,
                         "EMS Boiler Controller (Circulation Pump)"
                     )
+                    self._turned_on_by_ems[self.pump] = True
                 else:
                     # Not in pump mode AND CWU is not active -> enforce OFF!
                     await self._async_control_actuator(
@@ -2658,6 +2702,7 @@ class BoilerController:
                         STATE_OFF,
                         "EMS Boiler Controller (Circulation Pump)"
                     )
+                    self._turned_on_by_ems[self.pump] = False
 
             # 4. Control Gas Climate
             if self.gas_climate:
@@ -2670,6 +2715,7 @@ class BoilerController:
                     "EMS Boiler Controller (Gas Climate)",
                     service_data={ATTR_ENTITY_ID: self.gas_climate, "hvac_mode": target_hvac}
                 )
+                self._turned_on_by_ems[self.gas_climate] = (target_hvac == "heat")
                 
                 current_gas = self.hass.states.get(self.gas_climate)
                 if current_gas and current_gas.state == "heat":

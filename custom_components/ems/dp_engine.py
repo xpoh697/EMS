@@ -352,8 +352,10 @@ def run_unified_dp(
                             sum_pv_ahead = sum(s.get("pv_kwh", 0.0) for s in scaled_slots[slot_idx - 1:])
                             max_pre_solar_sell = max((s.get("sell_price", 0.0) for s in pre_solar_slots), default=0.0)
                             cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.01) for s in scaled_slots[slot_idx:])
+                            max_all_sell = max((s.get("sell_price", 0.0) for s in scaled_slots[slot_idx - 1:]), default=0.0)
+                            all_arb_margin = (max_all_sell * config.eta_discharge) - (buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price) - cycle_cost
                             eval_to_pre_solar = (
-                                max_pre_solar_sell >= config.min_discharge_price
+                                (max_pre_solar_sell >= config.min_discharge_price and all_arb_margin < config.min_arbitrage_profit)
                                 or cheaper_future_buy
                                 or sum_pv_ahead >= max(0.0, usable_capacity - usable_energy)
                             )
@@ -799,8 +801,10 @@ def run_unified_dp(
                         sum_pv_ahead = sum(s.get("pv_kwh", 0.0) for s in scaled_slots[slot_idx - 1:])
                         max_pre_solar_sell = max((s.get("sell_price", 0.0) for s in pre_solar_slots), default=0.0)
                         cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.01) for s in scaled_slots[slot_idx:])
+                        max_all_sell = max((s.get("sell_price", 0.0) for s in scaled_slots[slot_idx - 1:]), default=0.0)
+                        all_arb_margin = (max_all_sell * config.eta_discharge) - (buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price) - cycle_cost
                         eval_to_pre_solar = (
-                            max_pre_solar_sell >= config.min_discharge_price
+                            (max_pre_solar_sell >= config.min_discharge_price and all_arb_margin < config.min_arbitrage_profit)
                             or cheaper_future_buy
                             or sum_pv_ahead >= max(0.0, usable_capacity - usable_energy)
                         )
