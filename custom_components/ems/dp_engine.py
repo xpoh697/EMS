@@ -355,9 +355,12 @@ def run_unified_dp(
                             max_all_sell = max((s.get("sell_price", 0.0) for s in scaled_slots[slot_idx - 1:]), default=0.0)
                             all_arb_margin = (max_all_sell * config.eta_discharge) - (buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price) - cycle_cost
                             eval_to_pre_solar = (
-                                (max_pre_solar_sell >= config.min_discharge_price and all_arb_margin < config.min_arbitrage_profit)
-                                or cheaper_future_buy
-                                or sum_pv_ahead >= max(0.0, usable_capacity - usable_energy)
+                                all_arb_margin < config.min_arbitrage_profit
+                                and (
+                                    max_pre_solar_sell >= config.min_discharge_price
+                                    or cheaper_future_buy
+                                    or sum_pv_ahead >= max(0.0, usable_capacity - usable_energy)
+                                )
                             )
                             eval_slots = pre_solar_slots if eval_to_pre_solar else scaled_slots[slot_idx - 1:]
 
@@ -804,9 +807,12 @@ def run_unified_dp(
                         max_all_sell = max((s.get("sell_price", 0.0) for s in scaled_slots[slot_idx - 1:]), default=0.0)
                         all_arb_margin = (max_all_sell * config.eta_discharge) - (buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price) - cycle_cost
                         eval_to_pre_solar = (
-                            (max_pre_solar_sell >= config.min_discharge_price and all_arb_margin < config.min_arbitrage_profit)
-                            or cheaper_future_buy
-                            or sum_pv_ahead >= max(0.0, usable_capacity - usable_energy)
+                            all_arb_margin < config.min_arbitrage_profit
+                            and (
+                                max_pre_solar_sell >= config.min_discharge_price
+                                or cheaper_future_buy
+                                or sum_pv_ahead >= max(0.0, usable_capacity - usable_energy)
+                            )
                         )
                         eval_slots = pre_solar_slots if eval_to_pre_solar else scaled_slots[slot_idx - 1:]
 
