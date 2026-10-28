@@ -63,7 +63,11 @@ class DPConfig:
                 return min_ev
             return min_mo
 
-        # If date is not in last_sell_hour_by_date, but date is not passed, fallback
+        # If date is known and tracked, but has no sales planned:
+        if date and self.last_sell_hour_by_date and date not in self.last_sell_hour_by_date:
+            return min_mo
+
+        # If date is not passed (None) or before sales are tracked (e.g. during Pass 1):
         if date is None:
             if 0 <= hour < 10:
                 return min_mo
@@ -192,7 +196,8 @@ def run_unified_dp(
 
     # Pre-calculate CVCC charge multipliers for all states to optimize loop performance
     current_hour = scaled_slots[0]["hour"] if scaled_slots else 0
-    current_min_soc = config.get_min_soc(current_hour)
+    current_date = scaled_slots[0].get("date") if scaled_slots else None
+    current_min_soc = config.get_min_soc(current_hour, current_date)
     cvcc_multipliers = []
     for s_idx in range(max_energy_idx + 1):
         usable_energy = s_idx * energy_step

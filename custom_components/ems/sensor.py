@@ -2621,7 +2621,9 @@ class EmsDpSensor(SensorEntity):
                     action = "normal"
 
             if idx == 0:
-                slot_min_soc = dp_config.get_min_soc(slot["hour"])
+                slot_min_soc = dp_config.get_min_soc(slot["hour"], slot.get("date"))
+                base_floor_soc = dp_config.battery_min_soc_morning if dp_config.battery_min_soc_morning is not None else float(dp_config.battery_min_soc)
+                effective_min_soc = min(slot_min_soc, base_floor_soc)
                 # Scale pv and consumption to remaining hour fraction for slot 0
                 slot_consumption = (
                     slot.get("consumption_kwh", 0.0)
@@ -2632,13 +2634,13 @@ class EmsDpSensor(SensorEntity):
                 slot_pv_surplus = max(0.0, slot_pv - slot_consumption)
 
                 # Anti-chattering: prevent mid-hour drop from self_consume to idle if house still has load
-                # and battery is safely above slot minimum SOC (prevents micro-arbitrage jitter & fractional load drop)
+                # and battery is safely above minimum SOC (prevents micro-arbitrage jitter & fractional load drop)
                 if (
                     self._last_hour_action == "self_consume"
                     and action == "idle"
                     and now.hour == self._last_action_hour
                     and slot.get("consumption_kwh", 0.0) > 0.01
-                    and soc > (slot_min_soc + 0.5)
+                    and soc > (effective_min_soc + 0.2)
                 ):
                     action = "self_consume"
 
@@ -2648,7 +2650,7 @@ class EmsDpSensor(SensorEntity):
                     self._last_hour_action == "discharge"
                     and action in ("self_consume", "idle", "normal", "solar_export")
                     and now.hour == self._last_action_hour
-                    and soc > (slot_min_soc + 0.5)
+                    and soc > (effective_min_soc + 0.2)
                 ):
                     action = "discharge"
 
@@ -2688,11 +2690,11 @@ class EmsDpSensor(SensorEntity):
                 now_s = now.second
                 rem_sec = (59 - now_m) * 60 + (60 - now_s)
                 if rem_sec < 300 and now.hour == self._last_action_hour:
-                    if self._last_hour_action == "discharge" and soc > (slot_min_soc + 0.5):
+                    if self._last_hour_action == "discharge" and soc > (effective_min_soc + 0.2):
                         action = "discharge"
                     elif self._last_hour_action == "pv_charge" and soc < 99.0:
                         action = "pv_charge"
-                    elif self._last_hour_action == "self_consume" and soc > (slot_min_soc + 0.5):
+                    elif self._last_hour_action == "self_consume" and soc > (effective_min_soc + 0.2):
                         action = "self_consume"
                     elif self._last_hour_action == "grid_charge" and soc < 95.0:
                         action = "grid_charge"
