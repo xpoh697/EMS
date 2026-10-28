@@ -251,17 +251,37 @@ def run_unified_dp(
                     break
                 pre_solar_ahead.append(_f)
             home_needed = (sum(max(0.0, _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0) - _f.get("pv_kwh", 0.0)) for _f in pre_solar_ahead) / (config.eta_discharge if config.eta_discharge > 0.0 else 1.0)) if pre_solar_ahead else 0.0
-            higher_sell_cap = sum(
-                min(config.battery_max_discharge_power, config.battery_capacity)
-                for _f in pre_solar_ahead
-                if _f.get("sell_price", 0.0) > (sell_price + 0.02)
-            ) if pre_solar_ahead else 0.0
-            night_recharge_buys = [_f.get("buy_price", 99.0) for _f in pre_solar_ahead if _f.get("hour", 0) in (22, 23, 0, 1, 2, 3, 4, 5)]
-            max_night_buy = max(night_recharge_buys) if night_recharge_buys else (max((_f.get("buy_price", 0.0) for _f in pre_solar_ahead), default=0.0))
-            min_night_buy = min(night_recharge_buys) if night_recharge_buys else max_night_buy
+
+            # Scan higher sell slots and intermediate recharge costs until end of day
+            higher_sell_slots = []
+            pv_surplus_until_sale = 0.0
+            recharge_buys_until_sale = []
+            for _f in scaled_slots[slot_idx:]:
+                if _f.get("date") != slot.get("date"):
+                    break
+                _f_sell = _f.get("sell_price", 0.0)
+                _f_buy = _f.get("buy_price", 99.0)
+                _f_pv = _f.get("pv_kwh", 0.0)
+                _f_cons = _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0)
+                if _f_sell > (sell_price + 0.02):
+                    higher_sell_slots.append(_f)
+                else:
+                    if _f_pv > _f_cons:
+                        pv_surplus_until_sale += (_f_pv - _f_cons)
+                    recharge_buys_until_sale.append(_f_buy)
+
+            raw_higher_sell_cap = sum(min(config.battery_max_discharge_power, usable_capacity) for _f in higher_sell_slots)
+            net_higher_sell_cap = max(0.0, raw_higher_sell_cap - pv_surplus_until_sale)
+
+            min_intermediate_buy = min(recharge_buys_until_sale) if recharge_buys_until_sale else 99.0
             eff_sell_net = sell_price * config.eta_discharge - cycle_cost
-            recharge_replacement_cost = (min_night_buy / config.eta_charge + cycle_cost) if config.eta_charge > 0.0 else min_night_buy
-            discharge_arbitrage_ok = (eff_sell_net >= recharge_replacement_cost) or (eff_sell_net >= max_night_buy)
+            recharge_replacement_cost = (min_intermediate_buy / config.eta_charge + cycle_cost) if config.eta_charge > 0.0 else min_intermediate_buy
+            required_arb_profit = config.min_arbitrage_profit if config.min_arbitrage_profit > 0.0 else 0.30
+            intermediate_arb_margin = eff_sell_net - recharge_replacement_cost
+            intermediate_arb_ok = intermediate_arb_margin >= required_arb_profit
+
+            higher_sell_cap = 0.0 if intermediate_arb_ok else net_higher_sell_cap
+            discharge_arbitrage_ok = intermediate_arb_ok or (eff_sell_net >= min_intermediate_buy)
 
             for state_idx, current_value in enumerate(dp_n[slot_idx - 1]):
                 if current_value == neg_inf:
@@ -622,17 +642,37 @@ def run_unified_dp(
                     break
                 pre_solar_ahead.append(_f)
         home_needed = (sum(max(0.0, _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0) - _f.get("pv_kwh", 0.0)) for _f in pre_solar_ahead) / (config.eta_discharge if config.eta_discharge > 0.0 else 1.0)) if pre_solar_ahead else 0.0
-        higher_sell_cap = sum(
-            min(config.battery_max_discharge_power, config.battery_capacity)
-            for _f in pre_solar_ahead
-            if _f.get("sell_price", 0.0) > (sell_price + 0.02)
-        ) if pre_solar_ahead else 0.0
-        night_recharge_buys = [_f.get("buy_price", 99.0) for _f in pre_solar_ahead if _f.get("hour", 0) in (22, 23, 0, 1, 2, 3, 4, 5)]
-        max_night_buy = max(night_recharge_buys) if night_recharge_buys else (max((_f.get("buy_price", 0.0) for _f in pre_solar_ahead), default=0.0))
-        min_night_buy = min(night_recharge_buys) if night_recharge_buys else max_night_buy
+
+        higher_sell_slots = []
+        pv_surplus_until_sale = 0.0
+        recharge_buys_until_sale = []
+        if not override:
+            for _f in scaled_slots[slot_idx:]:
+                if _f.get("date") != slot.get("date"):
+                    break
+                _f_sell = _f.get("sell_price", 0.0)
+                _f_buy = _f.get("buy_price", 99.0)
+                _f_pv = _f.get("pv_kwh", 0.0)
+                _f_cons = _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0)
+                if _f_sell > (sell_price + 0.02):
+                    higher_sell_slots.append(_f)
+                else:
+                    if _f_pv > _f_cons:
+                        pv_surplus_until_sale += (_f_pv - _f_cons)
+                    recharge_buys_until_sale.append(_f_buy)
+
+        raw_higher_sell_cap = sum(min(config.battery_max_discharge_power, usable_capacity) for _f in higher_sell_slots)
+        net_higher_sell_cap = max(0.0, raw_higher_sell_cap - pv_surplus_until_sale)
+
+        min_intermediate_buy = min(recharge_buys_until_sale) if recharge_buys_until_sale else 99.0
         eff_sell_net = sell_price * config.eta_discharge - cycle_cost
-        recharge_replacement_cost = (min_night_buy / config.eta_charge + cycle_cost) if config.eta_charge > 0.0 else min_night_buy
-        discharge_arbitrage_ok = (eff_sell_net >= recharge_replacement_cost) or (eff_sell_net >= max_night_buy)
+        recharge_replacement_cost = (min_intermediate_buy / config.eta_charge + cycle_cost) if config.eta_charge > 0.0 else min_intermediate_buy
+        required_arb_profit = config.min_arbitrage_profit if config.min_arbitrage_profit > 0.0 else 0.30
+        intermediate_arb_margin = eff_sell_net - recharge_replacement_cost
+        intermediate_arb_ok = intermediate_arb_margin >= required_arb_profit
+
+        higher_sell_cap = 0.0 if intermediate_arb_ok else net_higher_sell_cap
+        discharge_arbitrage_ok = intermediate_arb_ok or (eff_sell_net >= min_intermediate_buy)
 
         for state_idx, current_value in enumerate(dp[slot_idx - 1]):
             if current_value == neg_inf:
