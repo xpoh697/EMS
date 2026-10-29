@@ -325,7 +325,7 @@ def run_unified_dp(
                         to_grid = max(0.0, ac_exp + pv_kwh - consumption_kwh)
                         grid_imp = max(0.0, consumption_kwh - ac_exp - pv_kwh)
                         if to_grid > 0.0:
-                            if exp < config.min_energy_to_discharge or not can_export:
+                            if exp < config.min_energy_to_discharge or not can_export or not discharge_arbitrage_ok:
                                 continue
                             if is_pre_solar_low_price:
                                 continue
@@ -762,6 +762,8 @@ def run_unified_dp(
                                 blocked = True
                             elif is_pre_solar_low_price:
                                 blocked = True
+                            elif not discharge_arbitrage_ok:
+                                blocked = True
                             else:
                                 req_reserve = (higher_sell_cap + home_needed) if (not discharge_arbitrage_ok and slot_hour < 12) else higher_sell_cap
                                 if req_reserve > 0.0 and (usable_energy - exp) < req_reserve:
@@ -782,7 +784,7 @@ def run_unified_dp(
                         to_grid = max(0.0, ac_exp + pv_kwh - consumption_kwh)
                         grid_imp = max(0.0, consumption_kwh - ac_exp - pv_kwh)
                         if not override and to_grid > 0.0:
-                            if exp < config.min_energy_to_discharge or not can_export:
+                            if exp < config.min_energy_to_discharge or not can_export or not discharge_arbitrage_ok:
                                 continue
                             if is_pre_solar_low_price:
                                 continue
