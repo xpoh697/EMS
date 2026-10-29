@@ -376,7 +376,7 @@ def run_unified_dp(
                                 pre_solar_slots.append(_ps)
                             sum_pv_ahead = sum(s.get("pv_kwh", 0.0) for s in scaled_slots[slot_idx - 1:])
                             max_pre_solar_sell = max((s.get("sell_price", 0.0) for s in pre_solar_slots), default=0.0)
-                            cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.01) for s in scaled_slots[slot_idx:])
+                            cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.01) for s in pre_solar_slots[1:])
                             max_all_sell = max((s.get("sell_price", 0.0) for s in scaled_slots[slot_idx - 1:]), default=0.0)
                             all_arb_margin = (max_all_sell * config.eta_discharge) - (buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price) - cycle_cost
                             eval_to_pre_solar = (
@@ -404,14 +404,21 @@ def run_unified_dp(
                                 if not cheaper_future_buy:
                                     sum_day_home_def = 0.0
                                     sum_pv_ahead = 0.0
+                                    target_date = curr_slot.get("date")
+                                    if curr_slot.get("hour", 0) in (22, 23):
+                                        for _fs in scaled_slots[slot_idx:]:
+                                            if _fs.get("date") != target_date:
+                                                target_date = _fs.get("date")
+                                                break
                                     for f_slot in scaled_slots[slot_idx - 1:]:
-                                        if f_slot.get("date") != curr_slot.get("date"):
+                                        if f_slot.get("date") != curr_slot.get("date") and f_slot.get("date") != target_date:
                                             break
                                         f_pv = f_slot.get("pv_kwh", 0.0)
                                         f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
+                                        f_buy = f_slot.get("buy_price", 0.0)
                                         if f_pv > f_cons:
                                             sum_pv_ahead += (f_pv - f_cons)
-                                        else:
+                                        elif f_buy > eff_stored_cost:
                                             sum_day_home_def += (f_cons - f_pv)
                                     needed_day_deficit = max(0.0, sum_day_home_def - sum_pv_ahead - usable_energy)
                                     space_with_solar_reserve = max(0.0, avail_cap - sum_pv_ahead)
@@ -848,7 +855,7 @@ def run_unified_dp(
                             pre_solar_slots.append(_ps)
                         sum_pv_ahead = sum(s.get("pv_kwh", 0.0) for s in scaled_slots[slot_idx - 1:])
                         max_pre_solar_sell = max((s.get("sell_price", 0.0) for s in pre_solar_slots), default=0.0)
-                        cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.01) for s in scaled_slots[slot_idx:])
+                        cheaper_future_buy = any(s.get("buy_price", 0.0) < (buy_price - 0.01) for s in pre_solar_slots[1:])
                         max_all_sell = max((s.get("sell_price", 0.0) for s in scaled_slots[slot_idx - 1:]), default=0.0)
                         all_arb_margin = (max_all_sell * config.eta_discharge) - (buy_price / config.eta_charge if config.eta_charge > 0.0 else buy_price) - cycle_cost
                         eval_to_pre_solar = (
@@ -876,14 +883,21 @@ def run_unified_dp(
                             if not cheaper_future_buy:
                                 sum_day_home_def = 0.0
                                 sum_pv_ahead = 0.0
+                                target_date = curr_slot.get("date")
+                                if curr_slot.get("hour", 0) in (22, 23):
+                                    for _fs in scaled_slots[slot_idx:]:
+                                        if _fs.get("date") != target_date:
+                                            target_date = _fs.get("date")
+                                            break
                                 for f_slot in scaled_slots[slot_idx - 1:]:
-                                    if f_slot.get("date") != curr_slot.get("date"):
+                                    if f_slot.get("date") != curr_slot.get("date") and f_slot.get("date") != target_date:
                                         break
                                     f_pv = f_slot.get("pv_kwh", 0.0)
                                     f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("ev_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0)
+                                    f_buy = f_slot.get("buy_price", 0.0)
                                     if f_pv > f_cons:
                                         sum_pv_ahead += (f_pv - f_cons)
-                                    else:
+                                    elif f_buy > eff_stored_cost:
                                         sum_day_home_def += (f_cons - f_pv)
                                 needed_day_deficit = max(0.0, sum_day_home_def - sum_pv_ahead - usable_energy)
                                 space_with_solar_reserve = max(0.0, avail_cap - sum_pv_ahead)
