@@ -286,7 +286,7 @@ def run_unified_dp(
             intermediate_arb_ok = intermediate_arb_margin >= required_arb_profit
 
             higher_sell_cap = 0.0 if intermediate_arb_ok else net_higher_sell_cap
-            discharge_arbitrage_ok = intermediate_arb_ok or (eff_sell_net >= min_intermediate_buy)
+            discharge_arbitrage_ok = intermediate_arb_ok
 
             for state_idx, current_value in enumerate(dp_n[slot_idx - 1]):
                 if current_value == neg_inf:
@@ -420,7 +420,7 @@ def run_unified_dp(
                                             sum_pv_ahead += (f_pv - f_cons)
                                         elif f_buy > eff_stored_cost:
                                             sum_day_home_def += (f_cons - f_pv)
-                                    needed_day_deficit = max(0.0, sum_day_home_def - sum_pv_ahead - usable_energy)
+                                    needed_day_deficit = max(0.0, sum_day_home_def + float(min_end_usable or 0.0) - sum_pv_ahead - usable_energy)
                                     space_with_solar_reserve = max(0.0, avail_cap - sum_pv_ahead)
                                     allowed_capacity = max(0.0, min(space_with_solar_reserve, max(pre_solar_needed, needed_day_deficit)))
                                 else:
@@ -684,7 +684,7 @@ def run_unified_dp(
         intermediate_arb_ok = intermediate_arb_margin >= required_arb_profit
 
         higher_sell_cap = 0.0 if intermediate_arb_ok else net_higher_sell_cap
-        discharge_arbitrage_ok = intermediate_arb_ok or (eff_sell_net >= min_intermediate_buy)
+        discharge_arbitrage_ok = intermediate_arb_ok
 
         for state_idx, current_value in enumerate(dp[slot_idx - 1]):
             if current_value == neg_inf:
@@ -899,7 +899,7 @@ def run_unified_dp(
                                         sum_pv_ahead += (f_pv - f_cons)
                                     elif f_buy > eff_stored_cost:
                                         sum_day_home_def += (f_cons - f_pv)
-                                needed_day_deficit = max(0.0, sum_day_home_def - sum_pv_ahead - usable_energy)
+                                needed_day_deficit = max(0.0, sum_day_home_def + float(min_end_usable or 0.0) - sum_pv_ahead - usable_energy)
                                 space_with_solar_reserve = max(0.0, avail_cap - sum_pv_ahead)
                                 allowed_capacity = max(0.0, min(space_with_solar_reserve, max(pre_solar_needed, needed_day_deficit)))
                             else:
