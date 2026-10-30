@@ -94,127 +94,13 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
         override_value = action
 
-        # For grid_charge / discharge: validate and possibly clamp target_soc by battery power
+        # For grid_charge / discharge: validate target_soc within valid range [10.0, 100.0]
         if action in ("grid_charge", "discharge") and target_soc_raw is not None:
-            target_soc = float(target_soc_raw)
-
-            config = entry.data
-            options = entry.options
-
-            bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
-            bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
-            bat_max_power_w = float(options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)))
-            min_bat_soc = 10.0
-
-            # Parse battery capacity (kWh)
-            capacity_kwh = 5.12
-            if bat_capacity_entity_id:
-                cap_state = hass.states.get(bat_capacity_entity_id)
-                if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
-                    try:
-                        capacity_kwh = float(cap_state.state)
-                        unit = cap_state.attributes.get("unit_of_measurement", "")
-                        if unit == "Wh" or capacity_kwh > 100.0:
-                            capacity_kwh = capacity_kwh / 1000.0
-                    except (ValueError, TypeError):
-                        pass
-
-            # Parse current SOC
-            current_soc = 50.0
-            if bat_soc_entity_id:
-                soc_state = hass.states.get(bat_soc_entity_id)
-                if soc_state and soc_state.state not in (None, "unknown", "unavailable"):
-                    try:
-                        val = float(soc_state.state)
-                        if 0.0 <= val <= 100.0:
-                            current_soc = val
-                    except (ValueError, TypeError):
-                        pass
-
-            # Determine start_soc for the target hour
-            now = dt_util.now()
-            today_str = now.strftime("%Y-%m-%d")
-
-            if date_str == today_str and hour == now.hour:
-                # Current hour: use live SOC and remaining time
-                remaining_seconds = (59 - now.minute) * 60 + (60 - now.second)
-                duration_h = max(remaining_seconds / 3600.0, 5.0 / 60.0)  # min 5 minutes
-                start_soc = current_soc
-            else:
-                # Future hour: look up preceding slot SOC from scheduler current_plan
-                duration_h = 1.0
-                start_soc = current_soc  # fallback
-
-                scheduler_state = hass.states.get("sensor.scheduler")
-                if scheduler_state and scheduler_state.attributes:
-                    current_plan = scheduler_state.attributes.get("current_plan", [])
-                    # Find preceding slot: same date if hour > 0, else previous day hour 23
-                    if hour > 0:
-                        pred_date = date_str
-                        pred_hour = hour - 1
-                    else:
-                        from datetime import datetime, timedelta
-                        pred_dt = datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
-                        pred_date = pred_dt.strftime("%Y-%m-%d")
-                        pred_hour = 23
-                    for slot in current_plan:
-                        if slot.get("date") == pred_date and slot.get("hour") == pred_hour:
-                            pred_soc = slot.get("soc")
-                            if pred_soc is not None:
-                                try:
-                                    start_soc = float(pred_soc)
-                                except (ValueError, TypeError):
-                                    pass
-                            break
-
-            # Safety guard
-            safe_capacity = max(capacity_kwh, 0.001)
-            max_power_kw = bat_max_power_w / 1000.0
-
-            # Determine battery charge/discharge efficiency from weekly loss rate
-            weekly_state = hass.states.get("sensor.ems_battery_weekly_loss_rate")
-            weekly_rte = 0.865
-            if weekly_state and weekly_state.state not in (None, "unknown", "unavailable"):
-                try:
-                    weekly_loss_pct = float(weekly_state.state)
-                    weekly_rte = max(0.50, min(1.0, (100.0 - weekly_loss_pct) / 100.0))
-                except (ValueError, TypeError):
-                    weekly_rte = 0.865
-            eta_charge = round(math.sqrt(max(0.50, min(1.0, weekly_rte))), 4)
-            eta_discharge = eta_charge
-
-            # Calculate required power for the desired SOC change with efficiency
-            soc_delta = abs(target_soc - start_soc)
-            if action == "grid_charge":
-                eff = eta_charge if eta_charge > 0 else 1.0
-                achievable_delta = (max_power_kw * duration_h * eff / safe_capacity) * 100.0
-                req_power_kw = (soc_delta / 100.0 * safe_capacity) / (duration_h * eff)
-                if req_power_kw > max_power_kw:
-                    target_soc = round(min(start_soc + achievable_delta, 100.0), 1)
-                    _LOGGER.info(
-                        "set_manual_override: required power %.2f kW exceeds max %.2f kW. "
-                        "Realistic end-of-hour target_soc: %.1f%%",
-                        req_power_kw, max_power_kw, target_soc,
-                    )
-                else:
-                    target_soc = round(target_soc, 1)
-            else:  # discharge
-                eff = eta_discharge if eta_discharge > 0 else 1.0
-                achievable_delta = (max_power_kw * duration_h / (safe_capacity * eff)) * 100.0
-                req_power_kw = (soc_delta / 100.0 * safe_capacity * eff) / duration_h
-                if req_power_kw > max_power_kw:
-                    target_soc = round(max(start_soc - achievable_delta, min_bat_soc), 1)
-                    _LOGGER.info(
-                        "set_manual_override: required power %.2f kW exceeds max %.2f kW. "
-                        "Realistic end-of-hour target_soc: %.1f%%",
-                        req_power_kw, max_power_kw, target_soc,
-                    )
-                else:
-                    target_soc = round(target_soc, 1)
-
-            # Clamp to valid SOC range
-            target_soc = max(min_bat_soc, min(100.0, target_soc))
-            override_value = f"{action}:{target_soc}"
+            try:
+                target_soc = max(10.0, min(100.0, round(float(target_soc_raw), 1)))
+                override_value = f"{action}:{target_soc}"
+            except (ValueError, TypeError):
+                override_value = action
 
         await storage.async_set_override(date_str, hour, override_value)
         _LOGGER.debug("Manual override set via service: %s %02d:00 -> %s", date_str, hour, override_value)
