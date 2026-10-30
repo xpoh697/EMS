@@ -20,7 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EMS from a config entry."""
     import sys, importlib
-    for _sub in ('dp_engine', 'boiler_dp_engine', 'utils', 'storage', 'sensor', 'coordinator'):
+    for _sub in ('dp_engine', 'boiler_dp_engine', 'utils', 'storage', 'sensor', 'coordinator', 'services'):
         _mod_name = f'custom_components.ems.{_sub}'
         if _mod_name in sys.modules:
             try:
