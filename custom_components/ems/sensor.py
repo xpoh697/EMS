@@ -3240,7 +3240,7 @@ class EmsSchedulerSensor(SensorEntity):
                 slot_date = slot.get("date", today_str)
                 slot_override = overrides.get(slot_date, {}).get(str(slot_hour))
 
-                if slot_override:
+                if slot_override and slot_idx == 0:
                     _ov_parts = slot_override.split(":", 1)
                     _ov_act = _ov_parts[0]
                     _ov_target_soc = None
