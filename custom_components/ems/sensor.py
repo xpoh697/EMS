@@ -21,6 +21,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
+    async_call_later,
     async_track_state_change_event,
     async_track_time_change,
 )
@@ -36,6 +37,8 @@ from .const import (
     CONF_TOTAL_GRID_IMPORT,
     CONF_CURRENT_HOUSE_CONSUMPTION,
     CONF_INVERTER_MODES_LIST,
+    CONF_GRID_SENSOR,
+    DEFAULT_GRID_RECOVERY_TIMEOUT_S,
     CONF_CURRENT_PV_GENERATION,
     CONF_PV_GENERATION_TODAY,
     CONF_PV_FORECAST_TODAY,
@@ -2801,6 +2804,11 @@ class EmsSchedulerSensor(SensorEntity):
         self._set_amps: float = 0.0
         self._set_action: str | None = None
         self._set_hour: int = -1
+        self._grid_sensor_id: str | None = None
+        self._grid_outage: bool = False
+        self._grid_outage_start: str | None = None
+        self._grid_recovery_timer_canceler = None
+        self._offgrid_history: list = []
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -2932,6 +2940,9 @@ class EmsSchedulerSensor(SensorEntity):
         # If actual SOC is <= emergency threshold, force bat_emergency
         if soc is not None and soc <= bat_soc_emergency_val:
             return "bat_emergency"
+        # Safety Guard: If grid is lost, force OffGrid mode with highest priority
+        if self._grid_outage:
+            return "OffGrid"
         storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
         overrides = storage.get_overrides()
 
@@ -3307,6 +3318,11 @@ class EmsSchedulerSensor(SensorEntity):
                 if is_high_soc_override and slot_data.get("physical_mode") == "sale_pv_no_bat":
                     slot_data["physical_mode"] = "sale_pv"
 
+            if slot_idx == 0 and self._grid_outage:
+                slot_data["action"] = "OffGrid"
+                slot_data["physical_mode"] = "OffGrid"
+                slot_data["mapping_reason"] = f"EMERGENCY: OffGrid | Grid lost at {self._grid_outage_start}"
+
             dispatched_plan.append(slot_data)
             usable_energy = end_usable
 
@@ -3446,9 +3462,15 @@ class EmsSchedulerSensor(SensorEntity):
             "last_dp_call": last_dp_call,
             "last_override_change": storage.last_override_change,
             "overrides": overrides,
-            "active_override": active_override,
-            "raw_mode": raw_mode,
-            "mapping_reason": mapping_reason,
+            "active_override": "OffGrid" if self._grid_outage else active_override,
+            "raw_mode": "OffGrid" if self._grid_outage else raw_mode,
+            "mapping_reason": f"EMERGENCY: OffGrid | Grid offline since {self._grid_outage_start}" if self._grid_outage else mapping_reason,
+            "grid_sensor": self._grid_sensor_id,
+            "grid_outage": self._grid_outage,
+            "grid_status": "offline" if self._grid_outage else "online",
+            "offgrid_active": self._grid_outage,
+            "offgrid_start": self._grid_outage_start,
+            "offgrid_history": self._offgrid_history,
             "battery_soc": soc,
             "battery_soc_entity": bat_soc_entity_id,
             "profit_entity": "sensor.dp",
@@ -3497,6 +3519,35 @@ class EmsSchedulerSensor(SensorEntity):
             self.hass.bus.async_listen("ems_schedule_updated", self._async_override_changed)
         )
 
+        # Subscribe to Grid Presence Sensor
+        self._grid_sensor_id = options.get(CONF_GRID_SENSOR, config.get(CONF_GRID_SENSOR))
+        if not self._grid_sensor_id and self.hass.states.get("binary_sensor.inverter_grid"):
+            self._grid_sensor_id = "binary_sensor.inverter_grid"
+
+        if self._grid_sensor_id:
+            # Check initial state at startup
+            initial_grid = self.hass.states.get(self._grid_sensor_id)
+            if initial_grid and initial_grid.state == "off":
+                self._grid_outage = True
+                self._grid_outage_start = dt_util.now().isoformat()
+                ems_log(self.hass, _LOGGER, logging.WARNING, f"[OFFGRID START] Grid initially offline via {self._grid_sensor_id} on startup. OffGrid mode active.")
+                inverter_modes_list_id = options.get(CONF_INVERTER_MODES_LIST, config.get(CONF_INVERTER_MODES_LIST))
+                if inverter_modes_list_id:
+                    domain = inverter_modes_list_id.split(".")[0]
+                    self.hass.async_create_task(
+                        self.hass.services.async_call(
+                            domain,
+                            "select_option",
+                            {"entity_id": inverter_modes_list_id, "option": "OffGrid"},
+                            blocking=False,
+                        )
+                    )
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [self._grid_sensor_id], self._async_grid_changed
+                )
+            )
+
         # Subscribe to Battery SOC sensor
         bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
         if bat_soc_entity_id:
@@ -3510,6 +3561,114 @@ class EmsSchedulerSensor(SensorEntity):
         """Handle DP sensor changes."""
         self._update_dynamic_switching()
         self.async_write_ha_state()
+
+    async def _async_grid_changed(self, event) -> None:
+        """Handle grid presence sensor state changes."""
+        new_state = event.data.get("new_state")
+        if not new_state:
+            return
+
+        state_val = new_state.state
+        now_dt = dt_util.now()
+        now_iso = now_dt.isoformat()
+        config = self._entry.data
+        options = self._entry.options
+        inverter_modes_list_id = options.get(CONF_INVERTER_MODES_LIST, config.get(CONF_INVERTER_MODES_LIST))
+
+        if state_val == "off":
+            # Grid lost!
+            if self._grid_recovery_timer_canceler:
+                self._grid_recovery_timer_canceler()
+                self._grid_recovery_timer_canceler = None
+
+            if not self._grid_outage:
+                self._grid_outage = True
+                self._grid_outage_start = now_iso
+                ems_log(
+                    self.hass,
+                    _LOGGER,
+                    logging.WARNING,
+                    f"[OFFGRID START] Grid lost via {self._grid_sensor_id} at {now_iso}! Activating Emergency OffGrid mode.",
+                )
+
+                # Immediately switch inverter_modes_list to OffGrid
+                if inverter_modes_list_id:
+                    domain = inverter_modes_list_id.split(".")[0]
+                    try:
+                        await self.hass.services.async_call(
+                            domain,
+                            "select_option",
+                            {"entity_id": inverter_modes_list_id, "option": "OffGrid"},
+                            blocking=False,
+                        )
+                        ems_log(
+                            self.hass,
+                            _LOGGER,
+                            logging.INFO,
+                            f"[OFFGRID] Immediate switch of {inverter_modes_list_id} to OffGrid dispatched.",
+                        )
+                    except Exception as e:
+                        ems_log(
+                            self.hass,
+                            _LOGGER,
+                            logging.ERROR,
+                            f"[OFFGRID] Failed to switch {inverter_modes_list_id}: {e}",
+                        )
+
+                self.async_write_ha_state()
+
+        elif state_val == "on" and self._grid_outage:
+            # Grid returned - schedule stabilization before clearing offgrid mode
+            ems_log(
+                self.hass,
+                _LOGGER,
+                logging.INFO,
+                f"[OFFGRID RESTORING] Grid returned via {self._grid_sensor_id}. Starting {DEFAULT_GRID_RECOVERY_TIMEOUT_S}s stabilization timer...",
+            )
+
+            async def _finalize_recovery(*_):
+                if self._grid_outage:
+                    start_dt = dt_util.parse_datetime(self._grid_outage_start) if self._grid_outage_start else now_dt
+                    dur_min = round((dt_util.now() - (start_dt or now_dt)).total_seconds() / 60.0, 1)
+                    incident = {
+                        "start": self._grid_outage_start,
+                        "end": dt_util.now().isoformat(),
+                        "duration_min": dur_min,
+                    }
+                    self._offgrid_history.insert(0, incident)
+                    self._offgrid_history = self._offgrid_history[:10]  # keep last 10
+                    self._grid_outage = False
+                    self._grid_outage_start = None
+                    self._grid_recovery_timer_canceler = None
+                    ems_log(
+                        self.hass,
+                        _LOGGER,
+                        logging.INFO,
+                        f"[OFFGRID END] Grid stabilized after {dur_min} min. Restoring normal schedule.",
+                    )
+
+                    # Trigger state update
+                    self.async_write_ha_state()
+
+                    # Also switch inverter_modes_list back to normal mode
+                    if inverter_modes_list_id:
+                        domain = inverter_modes_list_id.split(".")[0]
+                        normal_mode = self.native_value or "sale_pv"
+                        try:
+                            await self.hass.services.async_call(
+                                domain,
+                                "select_option",
+                                {"entity_id": inverter_modes_list_id, "option": normal_mode},
+                                blocking=False,
+                            )
+                        except Exception as e:
+                            ems_log(self.hass, _LOGGER, logging.ERROR, f"Error restoring mode on {inverter_modes_list_id}: {e}")
+
+            if self._grid_recovery_timer_canceler:
+                self._grid_recovery_timer_canceler()
+            self._grid_recovery_timer_canceler = async_call_later(
+                self.hass, DEFAULT_GRID_RECOVERY_TIMEOUT_S, _finalize_recovery
+            )
 
     async def _async_override_changed(self, event) -> None:
         """Handle manual override updates."""

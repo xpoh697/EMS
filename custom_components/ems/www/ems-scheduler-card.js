@@ -23,6 +23,8 @@ const MODE_COLORS = {
   'sale_pv_bat': '#ff4500',        // Orange-Red (Discharge / export bat)
   'buy': '#2196f3',                // Blue (Charge / buy)
   'stop_sale': '#7da882',          // Faded Green (Stop Sale)
+  'OffGrid': '#ff5722',       // Deep Orange / Alert (OffGrid)
+  'offgrid': '#ff5722',
   'bat_emergency': '#e91e63',      // Pink (Emergency)
   'no_pv_sale_no_bat': '#607d8b',  // Blue-Grey (Wait)
   'default': '#727272'
@@ -42,6 +44,8 @@ const MODE_ICONS = {
   'sale_pv_bat': 'mdi:battery-arrow-up',
   'buy': 'mdi:battery-arrow-down',
   'stop_sale': 'mdi:home-lightning-bolt',
+  'OffGrid': 'mdi:transmission-tower-off',
+  'offgrid': 'mdi:transmission-tower-off',
   'bat_emergency': 'mdi:alert-octagon',
   'no_pv_sale_no_bat': 'mdi:clock-outline',
   'default': 'mdi:help-circle'
@@ -53,6 +57,8 @@ const MODE_LABELS = {
   'sale_pv_bat': 'Discharge',
   'buy': 'Charge',
   'stop_sale': 'Stop Sale',
+  'OffGrid': 'OffGrid',
+  'offgrid': 'OffGrid',
   'bat_emergency': 'Emergency',
   'no_pv_sale_no_bat': 'Wait',
   'idel': 'Idle',
@@ -675,6 +681,10 @@ class EmsSchedulerCard extends HTMLElement {
           <ha-icon icon="mdi:airplane"></ha-icon>
           <span>Режим отпуска активирован</span>
         </div>
+        <div id="grid-outage-banner" class="grid-outage-banner hidden">
+          <ha-icon icon="mdi:transmission-tower-off"></ha-icon>
+          <span id="grid-outage-text">ВНИМАНИЕ: СЕТЬ 230В ОТСУТСТВУЕТ! Аварийный режим OffGrid (питание дома от АКБ/СЭС)</span>
+        </div>
 
         <div class="tabs-row">
           <button class="tab-btn active" id="tab-plan-btn">Plan</button>
@@ -1154,7 +1164,25 @@ class EmsSchedulerCard extends HTMLElement {
     this._updateExtraIndicators();
 
     // Vacation Banner
-    const vacationBanner = this.shadowRoot.getElementById('vacation-banner');
+    const gridOutageBanner = this.shadowRoot.getElementById('grid-outage-banner');
+      if (gridOutageBanner) {
+        const isOffgrid = attrs.offgrid_active || attrs.grid_outage || attrs.grid_status === 'offline';
+        if (isOffgrid) {
+          gridOutageBanner.classList.remove('hidden');
+          const statusBadge = this.shadowRoot.getElementById('status-badge');
+          if (statusBadge) {
+            statusBadge.textContent = 'OFFGRID';
+            statusBadge.classList.add('badge-outage');
+          }
+        } else {
+          gridOutageBanner.classList.add('hidden');
+          const statusBadge = this.shadowRoot.getElementById('status-badge');
+          if (statusBadge) {
+            statusBadge.classList.remove('badge-outage');
+          }
+        }
+      }
+      const vacationBanner = this.shadowRoot.getElementById('vacation-banner');
     const isVacation = attrs.vacation_mode === true || (dpState && dpState.attributes && dpState.attributes.vacation_mode === true);
     if (vacationBanner) {
       if (isVacation) {

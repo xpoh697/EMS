@@ -168,7 +168,7 @@ def map_dp_to_physical(
     cheap_cond = f"cheap_ahead={cheap_ahead}"
     reason = f"{price_cond} | {discharge_price_cond} | {pv_cond} | {cheap_cond}"
 
-    if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency"):
+    if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency", "OffGrid", "offgrid"):
         return action, "direct_mapping"
 
     # Direct mapping for idle
@@ -215,7 +215,7 @@ def map_override_to_physical(
     cheap_cond = f"cheap_ahead={cheap_ahead}"
     reason = f"{price_cond} | {discharge_price_cond} | {pv_cond} | {cheap_cond}"
 
-    if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency"):
+    if action in (None, "unknown", "unavailable", "buy", "sale_pv", "sale_pv_bat", "sale_pv_no_bat", "stop_sale", "no_pv_sale_no_bat", "bat_emergency", "OffGrid", "offgrid"):
         return action, "direct_mapping"
 
     if action == "idle":

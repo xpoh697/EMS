@@ -12,12 +12,14 @@ _LOGGER = logging.getLogger(__name__)
 
 import sys
 import importlib
-if "custom_components.ems.services" in sys.modules:
-    try:
-        importlib.reload(sys.modules["custom_components.ems.services"])
-        _LOGGER.info("EMS storage successfully triggered reload of ems.services")
-    except Exception as _e:
-        _LOGGER.warning("Could not reload ems.services: %s", _e)
+for _mod in ("const", "utils", "services", "sensor", "dp_engine"):
+    _full = f"custom_components.ems.{_mod}"
+    if _full in sys.modules:
+        try:
+            importlib.reload(sys.modules[_full])
+            _LOGGER.info("EMS storage successfully triggered reload of %s", _full)
+        except Exception as _e:
+            _LOGGER.warning("Could not reload %s: %s", _full, _e)
 
 STORAGE_VERSION = 1
 STORAGE_KEY = "ems_schedule_{entry_id}"

@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.188"
+VERSION = "0.3.189"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -10,6 +10,8 @@ CONF_TOTAL_GRID_EXPORT = "total_grid_export"
 CONF_TOTAL_GRID_IMPORT = "total_grid_import"
 CONF_CURRENT_HOUSE_CONSUMPTION = "current_house_consumption"
 CONF_INVERTER_MODES_LIST = "inverter_modes_list"
+CONF_GRID_SENSOR = "grid_sensor"
+DEFAULT_GRID_RECOVERY_TIMEOUT_S = 60
 CONF_CURRENT_PV_GENERATION = "current_pv_generation"
 CONF_PV_GENERATION_TODAY = "pv_generation_today"
 CONF_PV_FORECAST_TODAY = "pv_forecast_today"
@@ -109,6 +111,19 @@ class InverterModeClass:
 
 # Глобальный реестр режимов для симуляции и логики
 INVERTER_MODES = {
+    "OffGrid": InverterModeClass(
+        name="OffGrid",
+        pv_to_house=True,
+        charge_from_pv=True,
+        charge_from_grid=False,
+        discharge_to_house=True,
+        discharge_to_grid=False,
+        export_pv_to_grid=False,
+        is_grid_bypass=False,
+        curtail_pv=False,
+        allow_boiler=False,
+        calibration_limit_soc=100.0,
+    ),
     "buy": InverterModeClass(
         name="buy",
         pv_to_house=True,

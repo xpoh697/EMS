@@ -37,7 +37,8 @@
           "statistics_days": "Количество дней истории для усреднения",
           "fallback_consumption": "Фолбэк потребления в час (кВтч)",
           "debug": "Включить отладочное логирование (debug)",
-          "vacation_mode_entity": "Сущность режима отпуска (input_boolean/switch)"
+          "vacation_mode_entity": "Сущность режима отпуска (input_boolean/switch)",
+          "grid_sensor": "Сенсор наличия сети 230В (binary_sensor)"
         }
       },
       "pv_forecast": {

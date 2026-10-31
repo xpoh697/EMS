@@ -37,7 +37,8 @@
           "statistics_days": "Number of history days for averaging",
           "fallback_consumption": "Fallback consumption per hour (kWh)",
           "debug": "Enable debug logging",
-          "vacation_mode_entity": "Vacation Mode Entity (input_boolean/switch)"
+          "vacation_mode_entity": "Vacation Mode Entity (input_boolean/switch)",
+          "grid_sensor": "Grid status sensor (binary_sensor)"
         }
       },
       "pv_forecast": {
