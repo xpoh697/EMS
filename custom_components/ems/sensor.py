@@ -336,6 +336,24 @@ async def async_setup_entry(
                 _LOGGER.debug("EMS Module Reload: reloaded %s successfully", _m)
             except Exception as _ex:
                 _LOGGER.debug("EMS Module Reload: failed to reload %s: %s", _m, _ex)
+    try:
+        from homeassistant.helpers import translation
+        cache = translation._async_get_translations_cache(hass)
+        cdata = getattr(cache, 'cache_data', None)
+        if cdata:
+            cached = getattr(cdata, 'cache', {})
+            loaded = getattr(cdata, 'loaded', {})
+            if isinstance(cached, dict):
+                for lang in list(cached.keys()):
+                    cached[lang] = {}
+            if isinstance(loaded, dict):
+                for lang in list(loaded.keys()):
+                    loaded[lang] = set()
+        for _lang in ('ru', 'en'):
+            await translation.async_get_translations(hass, _lang, 'options', integrations=[DOMAIN])
+        _LOGGER.debug("Refreshed translation cache for %s", DOMAIN)
+    except Exception as _t_err:
+        _LOGGER.debug("Could not refresh translation cache: %s", _t_err)
     config = entry.data
     options = entry.options
 
