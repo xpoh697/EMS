@@ -234,6 +234,50 @@ class EmsSchedulerCard extends HTMLElement {
           50% { transform: translateY(-3px); }
         }
 
+        .grid-outage-banner {
+          background: rgba(244, 67, 54, 0.18);
+          border: 1px solid rgba(244, 67, 54, 0.6);
+          border-radius: 16px;
+          padding: 12px 16px;
+          margin-bottom: 16px;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          color: #ff3b30;
+          font-size: 0.82rem;
+          font-weight: 800;
+          letter-spacing: 0.3px;
+          box-shadow: 0 0 16px rgba(244, 67, 54, 0.35);
+          animation: emergency-pulse 1.2s infinite ease-in-out;
+        }
+        .grid-outage-banner ha-icon {
+          --mdc-icon-size: 22px;
+          color: #ff3b30;
+          animation: icon-pulse 1.2s infinite ease-in-out;
+        }
+        .status-badge.badge-outage {
+          background: rgba(244, 67, 54, 0.2) !important;
+          border-color: #ff3b30 !important;
+          color: #ff3b30 !important;
+          animation: emergency-pulse 1.2s infinite ease-in-out;
+        }
+        @keyframes emergency-pulse {
+          0%, 100% {
+            opacity: 1;
+            border-color: rgba(244, 67, 54, 0.9);
+            box-shadow: 0 0 18px rgba(244, 67, 54, 0.55);
+          }
+          50% {
+            opacity: 0.45;
+            border-color: rgba(244, 67, 54, 0.25);
+            box-shadow: 0 0 4px rgba(244, 67, 54, 0.1);
+          }
+        }
+        @keyframes icon-pulse {
+          0%, 100% { transform: scale(1.1); }
+          50% { transform: scale(0.92); }
+        }
+
         .stats-panel {
           background: rgba(255,255,255,0.02);
           border: 1px solid rgba(255,255,255,0.08);
@@ -1195,12 +1239,21 @@ class EmsSchedulerCard extends HTMLElement {
     // Status Badge
     const badge = this.shadowRoot.getElementById('status-badge');
     if (badge) {
-      const currentVal = stateObj.state;
-      const modeLabel = MODE_LABELS[currentVal] || (currentVal ? currentVal.toUpperCase() : 'UNKNOWN');
-      badge.innerText = modeLabel;
-      const color = MODE_COLORS[currentVal] || MODE_COLORS.default;
-      badge.style.color = color;
-      badge.style.borderColor = color;
+      const isOffgrid = attrs.offgrid_active || attrs.grid_outage || attrs.grid_status === 'offline';
+      if (isOffgrid) {
+        badge.innerText = 'OFFGRID';
+        badge.classList.add('badge-outage');
+        badge.style.color = '#ff3b30';
+        badge.style.borderColor = '#ff3b30';
+      } else {
+        badge.classList.remove('badge-outage');
+        const currentVal = stateObj.state;
+        const modeLabel = MODE_LABELS[currentVal] || (currentVal ? currentVal.toUpperCase() : 'UNKNOWN');
+        badge.innerText = modeLabel;
+        const color = MODE_COLORS[currentVal] || MODE_COLORS.default;
+        badge.style.color = color;
+        badge.style.borderColor = color;
+      }
     }
 
     // Convert current_plan to hourlyData dictionary mapping
