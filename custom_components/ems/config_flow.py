@@ -210,6 +210,20 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 selector.EntitySelectorConfig(domain=["select", "input_select"])
             )
 
+        # Inverter Grid Presence Sensor (Optional / Auto-detect)
+        val_grid = get_value(CONF_GRID_SENSOR)
+        if not val_grid and self.hass.states.get("binary_sensor.inverter_grid"):
+            val_grid = "binary_sensor.inverter_grid"
+
+        if val_grid:
+            schema_dict[vol.Optional(CONF_GRID_SENSOR, default=val_grid)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="binary_sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_GRID_SENSOR)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="binary_sensor")
+            )
+
         # 3. Calculation & Fallback Parameters
         schema_dict[vol.Required(CONF_STATISTICS_DAYS, default=stats_days)] = selector.NumberSelector(
             selector.NumberSelectorConfig(

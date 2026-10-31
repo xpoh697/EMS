@@ -328,6 +328,14 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the EMS sensors from config entry."""
+    import sys, importlib
+    for _m in ('custom_components.ems.const', 'custom_components.ems.config_flow', 'custom_components.ems'):
+        if _m in sys.modules:
+            try:
+                importlib.reload(sys.modules[_m])
+                _LOGGER.debug("EMS Module Reload: reloaded %s successfully", _m)
+            except Exception as _ex:
+                _LOGGER.debug("EMS Module Reload: failed to reload %s: %s", _m, _ex)
     config = entry.data
     options = entry.options
 
