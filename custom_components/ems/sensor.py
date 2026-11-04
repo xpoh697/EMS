@@ -623,6 +623,23 @@ async def async_setup_entry(
         # Check if tomorrow prices are available from Pstryk
         tomorrow_source = "pstryk" if (tomorrow_has_data_buy and any(v != 0.0 for v in hass.data[DOMAIN].get("price_buy_tomorrow", []))) else "none"
 
+        # Check if today prices are available from Pstryk
+        today_source = "pstryk" if (buy_today_has_data and any(v != 0.0 for v in hass.data[DOMAIN].get("price_buy_today", []))) else "none"
+
+        # If Pstryk today is missing, check if PradCast today forecast is configured
+        if today_source != "pstryk" and pradcast_today_sensor_id:
+            prad_state_td = hass.states.get(pradcast_today_sensor_id)
+            if prad_state_td:
+                prad_td, _, has_prad_td, _ = parse_price_sensor(prad_state_td)
+                if has_prad_td and any(v != 0.0 for v in prad_td):
+                    if not any(v != 0.0 for v in hass.data[DOMAIN].get("price_buy_today", [])):
+                        forecast_sell_td = [round(prad_td[h] * 1.23, 6) for h in range(24)]
+                        forecast_buy_td = [round(max(0.0, forecast_sell_td[h] + distribution_fee_fallback), 6) for h in range(24)]
+                        hass.data[DOMAIN]["price_buy_today"] = forecast_buy_td
+                        hass.data[DOMAIN]["price_sell_today"] = forecast_sell_td
+                        buy_today_has_data = True
+                        today_source = "pradcast_forecast"
+
         # If Pstryk tomorrow is missing, check if PradCast tomorrow forecast is configured
         if tomorrow_source != "pstryk" and pradcast_tomorrow_sensor_id:
             prad_state_tmr = hass.states.get(pradcast_tomorrow_sensor_id)
@@ -672,6 +689,7 @@ async def async_setup_entry(
                         f"PradCast Day-Ahead forecast applied for tomorrow: buy={forecast_buy[:3]}..., sell={forecast_sell[:3]}... (source={tomorrow_source})"
                     )
 
+        hass.data[DOMAIN]["today_prices_source"] = today_source
         hass.data[DOMAIN]["tomorrow_prices_source"] = tomorrow_source
         hass.data[DOMAIN]["price_tomorrow_has_data"] = tomorrow_has_data_buy or tomorrow_has_data_sell
 
@@ -3594,9 +3612,11 @@ class EmsSchedulerSensor(SensorEntity):
             "avg_pv_w": round(avg_pv, 1) if avg_pv is not None else None,
             "avg_load_w": round(avg_load, 1) if avg_load is not None else None,
             "pv_load_switch_active": self._dynamic_sale_pv_active,
+            "today_prices_source": self.hass.data.get(DOMAIN, {}).get("today_prices_source", "pstryk"),
+            "today_is_forecast": (self.hass.data.get(DOMAIN, {}).get("today_prices_source") == "pradcast_forecast"),
             "tomorrow_prices_available": self.hass.data.get(DOMAIN, {}).get("price_tomorrow_has_data", False),
             "tomorrow_prices_source": self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source", "none"),
-            "tomorrow_is_forecast": getattr(self, "_tomorrow_is_forecast", False),
+            "tomorrow_is_forecast": (self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source") == "pradcast_forecast"),
             "version": VERSION,
         }
 

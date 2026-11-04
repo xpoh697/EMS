@@ -331,7 +331,32 @@ class EmsSchedulerCard extends HTMLElement {
         .stat-label { font-size: 0.55rem; font-weight: 800; color: var(--secondary-text); text-transform: uppercase; margin-bottom: 2px; display: block; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
         .stat-value { font-size: 0.9rem; font-weight: 800; color: white; line-height: 1.1; pointer-events: none; }
 
-        .section-header { font-size: 0.8rem; font-weight: 900; color: #4dabf5; margin: 12px 0 6px; letter-spacing: 0.05em; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 3px; }
+        .section-header { 
+          display: flex; 
+          align-items: center; 
+          justify-content: space-between; 
+          font-size: 0.8rem; 
+          font-weight: 900; 
+          color: #4dabf5; 
+          margin: 12px 0 6px; 
+          letter-spacing: 0.05em; 
+          border-bottom: 1px solid rgba(255,255,255,0.1); 
+          padding-bottom: 3px; 
+        }
+        .forecast-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 0.65rem;
+          font-weight: 700;
+          letter-spacing: 0.05em;
+          text-transform: uppercase;
+          padding: 1px 7px;
+          border-radius: 4px;
+          background: rgba(33, 150, 243, 0.15);
+          color: #64b5f6;
+          border: 1px solid rgba(100, 181, 246, 0.4);
+        }
         .timeline-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 4px; margin-bottom: 6px; }
         
         .hour-bar {
@@ -1452,6 +1477,11 @@ class EmsSchedulerCard extends HTMLElement {
     const hasTomorrowInPlan = tomorrowStr ? sortedKeys.some(k => k.startsWith(tomorrowStr) && (data[k].buy_price > 0 || data[k].sell_price > 0)) : false;
     const tomorrowPricesAvailable = (stateObj && stateObj.attributes && stateObj.attributes.tomorrow_prices_available === true) || hasTomorrowInPlan;
 
+    const todaySource = (stateObj && stateObj.attributes && stateObj.attributes.today_prices_source) || 'pstryk';
+    const tomorrowSource = (stateObj && stateObj.attributes && stateObj.attributes.tomorrow_prices_source) || 'none';
+    const todayIsPradcast = (todaySource === 'pradcast_forecast') || (stateObj && stateObj.attributes && stateObj.attributes.today_is_forecast === true);
+    const tomorrowIsPradcast = (tomorrowSource === 'pradcast_forecast') || (stateObj && stateObj.attributes && stateObj.attributes.tomorrow_is_forecast === true);
+
     const hexToRgba = (hex, alpha) => {
       const r = parseInt(hex.slice(1, 3), 16);
       const g = parseInt(hex.slice(3, 5), 16);
@@ -1463,7 +1493,7 @@ class EmsSchedulerCard extends HTMLElement {
     const overridesStr = JSON.stringify(
       Object.fromEntries(sortedKeys.map(k => [k, data[k].mode + (data[k].is_manual ? '*' : '')]))
     );
-    const fullCacheKey = currentKeysStr + '|' + overridesStr + '|tmr=' + tomorrowPricesAvailable;
+    const fullCacheKey = currentKeysStr + '|' + overridesStr + '|tmr=' + tomorrowPricesAvailable + '|src=' + todaySource + ',' + tomorrowSource;
     if (container._lastKeys !== fullCacheKey) {
       let html = '';
       let currentDayLabel = '';
@@ -1486,7 +1516,13 @@ class EmsSchedulerCard extends HTMLElement {
 
         if (label !== currentDayLabel) {
           if (currentDayLabel !== '') html += '</div>';
-          html += `<div class="section-header">${label}</div><div class="timeline-grid">`;
+          let badgeHtml = '';
+          if (label === 'TODAY' && todayIsPradcast) {
+            badgeHtml = `<span class="forecast-badge" title="Рассчитано по прогнозу PradCast"><ha-icon icon="mdi:chart-line" style="--mdc-icon-size: 12px;"></ha-icon> PRADCAST</span>`;
+          } else if (label === 'TOMORROW' && tomorrowIsPradcast) {
+            badgeHtml = `<span class="forecast-badge" title="Рассчитано по прогнозу PradCast"><ha-icon icon="mdi:chart-line" style="--mdc-icon-size: 12px;"></ha-icon> PRADCAST</span>`;
+          }
+          html += `<div class="section-header"><span>${label}</span>${badgeHtml}</div><div class="timeline-grid">`;
           currentDayLabel = label;
         }
 
