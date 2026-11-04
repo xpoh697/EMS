@@ -79,7 +79,9 @@
           "min_bat_soc": "Минимальный заряд АКБ (%)",
           "min_bat_soc_evening": "Min bat SOC evening (%)",
           "min_bat_soc_morning": "Min bat SOC morning (%)",
-          "bat_soc_emergency": "Аварийный порог заряда АКБ (%)"
+          "bat_soc_emergency": "Аварийный порог заряда АКБ (%)",
+          "bat_max_charge_power": "Максимальная мощность заряда АКБ (Вт)",
+          "bat_max_discharge_power": "Максимальная мощность разряда АКБ (Вт)"
         }
       },
       "boiler": {

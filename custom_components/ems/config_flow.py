@@ -39,6 +39,10 @@ from .const import (
     CONF_BAT_CAPACITY_ENTITY,
     CONF_BAT_CAPACITY_FALLBACK,
     CONF_BAT_MAX_POWER,
+    CONF_BAT_MAX_CHARGE_POWER,
+    CONF_BAT_MAX_DISCHARGE_POWER,
+    DEFAULT_BAT_MAX_CHARGE_POWER,
+    DEFAULT_BAT_MAX_DISCHARGE_POWER,
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
@@ -397,6 +401,14 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         bat_cycles = self._user_input.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES)
         bat_capacity_fallback = self._user_input.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)
         bat_max_power = self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)
+        bat_max_charge_power = self._user_input.get(
+            CONF_BAT_MAX_CHARGE_POWER,
+            self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)
+        )
+        bat_max_discharge_power = self._user_input.get(
+            CONF_BAT_MAX_DISCHARGE_POWER,
+            self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
+        )
         bat_soc_emergency = self._user_input.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY)
 
         schema_dict = {}
@@ -437,7 +449,15 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             )
         )
 
-        schema_dict[vol.Required(CONF_BAT_MAX_POWER, default=bat_max_power)] = selector.NumberSelector(
+        schema_dict[vol.Required(CONF_BAT_MAX_CHARGE_POWER, default=bat_max_charge_power)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                step=1.0,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        schema_dict[vol.Required(CONF_BAT_MAX_DISCHARGE_POWER, default=bat_max_discharge_power)] = selector.NumberSelector(
             selector.NumberSelectorConfig(
                 min=0.0,
                 step=1.0,
