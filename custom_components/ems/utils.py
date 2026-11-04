@@ -151,6 +151,38 @@ def parse_price_sensor(state_obj) -> tuple[list[float], list[float], bool, bool]
                 except Exception:
                     pass
 
+    # Parse PradCast format: attribute 'prices' with list of {'hour': ..., 'price_kwh': ...}
+    prices_data = attrs.get("prices")
+    if isinstance(prices_data, list):
+        sensor_date_str = str(attrs.get("date", ""))[:10]
+        entity_id = getattr(state_obj, "entity_id", "")
+        
+        if sensor_date_str:
+            is_tomorrow = (sensor_date_str == str(tomorrow_date))
+            is_today = (sensor_date_str == str(today_date))
+        else:
+            is_tomorrow = ("jutro" in entity_id) or ("tomorrow" in entity_id)
+            is_today = ("dzis" in entity_id) or ("today" in entity_id)
+
+        for item in prices_data:
+            if not isinstance(item, dict):
+                continue
+            h = item.get("hour")
+            p = item.get("price_kwh")
+            if p is None and item.get("price") is not None:
+                try:
+                    p = float(item["price"]) / 1000.0
+                except (ValueError, TypeError):
+                    p = None
+            if h is not None and p is not None and 0 <= int(h) < 24:
+                val = round(float(p), 6)
+                if is_tomorrow:
+                    price_tomorrow[int(h)] = val
+                    tomorrow_has_data = True
+                elif is_today:
+                    price_today[int(h)] = val
+                    today_has_data = True
+
     return price_today, price_tomorrow, today_has_data, tomorrow_has_data
 
 def map_dp_to_physical(

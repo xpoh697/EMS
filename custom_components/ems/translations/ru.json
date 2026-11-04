@@ -58,7 +58,10 @@
           "price_buy_sensor": "Сенсор цены покупки электричества",
           "price_sell_sensor": "Сенсор цены продажи электричества",
           "system_cost": "Стоимость системы",
-          "min_sell_price": "Минимальная цена продажи"
+          "min_sell_price": "Минимальная цена продажи",
+          "pradcast_today_sensor": "PradCast: Сенсор цен на сегодня (опционально)",
+          "pradcast_tomorrow_sensor": "PradCast: Сенсор прогноза на завтра (опционально)",
+          "distribution_fee_fallback": "Резервная надбавка дистрибуции (PLN/кВт·ч)"
         }
       },
       "battery_optimization": {

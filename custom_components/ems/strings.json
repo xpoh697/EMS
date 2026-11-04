@@ -58,7 +58,10 @@
           "price_buy_sensor": "Price buy sensor",
           "price_sell_sensor": "Price sell sensor",
           "system_cost": "System cost",
-          "min_sell_price": "Minimum sell price"
+          "min_sell_price": "Minimum sell price",
+          "pradcast_today_sensor": "PradCast: Today prices sensor (optional)",
+          "pradcast_tomorrow_sensor": "PradCast: Tomorrow prices forecast sensor (optional)",
+          "distribution_fee_fallback": "Fallback distribution fee (PLN/kWh)"
         }
       },
       "battery_optimization": {

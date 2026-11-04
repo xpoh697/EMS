@@ -30,6 +30,10 @@ from .const import (
     CONF_PRICE_SELL_SENSOR,
     CONF_SYSTEM_COST,
     CONF_MIN_SELL_PRICE,
+    CONF_PRADCAST_TODAY_SENSOR,
+    CONF_PRADCAST_TOMORROW_SENSOR,
+    CONF_DISTRIBUTION_FEE_FALLBACK,
+    DEFAULT_DISTRIBUTION_FEE_FALLBACK,
     CONF_BAT_PRICE,
     CONF_BAT_CYCLES,
     CONF_BAT_CAPACITY_ENTITY,
@@ -336,6 +340,37 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         schema_dict[vol.Required(CONF_SYSTEM_COST, default=system_cost)] = selector.NumberSelector(
             selector.NumberSelectorConfig(
                 min=0.0,
+                step=0.01,
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        # PradCast Price Sensors - Optional
+        val_prad_today = get_value(CONF_PRADCAST_TODAY_SENSOR)
+        if val_prad_today:
+            schema_dict[vol.Optional(CONF_PRADCAST_TODAY_SENSOR, default=val_prad_today)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_PRADCAST_TODAY_SENSOR)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        val_prad_tomorrow = get_value(CONF_PRADCAST_TOMORROW_SENSOR)
+        if val_prad_tomorrow:
+            schema_dict[vol.Optional(CONF_PRADCAST_TOMORROW_SENSOR, default=val_prad_tomorrow)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+        else:
+            schema_dict[vol.Optional(CONF_PRADCAST_TOMORROW_SENSOR)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            )
+
+        distrib_fallback = float(self._user_input.get(CONF_DISTRIBUTION_FEE_FALLBACK, DEFAULT_DISTRIBUTION_FEE_FALLBACK))
+        schema_dict[vol.Optional(CONF_DISTRIBUTION_FEE_FALLBACK, default=distrib_fallback)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                max=2.0,
                 step=0.01,
                 mode=selector.NumberSelectorMode.BOX
             )

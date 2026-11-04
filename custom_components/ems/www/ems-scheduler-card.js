@@ -1442,16 +1442,15 @@ class EmsSchedulerCard extends HTMLElement {
       return;
     }
 
-    // Read tomorrow prices availability flag from sensor.scheduler attributes
-    const entityId = this._resolveConfigValue('entity', 'sensor.scheduler');
-    const stateObj = entityId ? this._hass.states[entityId] : null;
-    const tomorrowPricesAvailable = stateObj && stateObj.attributes
-      ? (stateObj.attributes.tomorrow_prices_available === true)
-      : false;
-
     const dates = Array.from(new Set(sortedKeys.map(k => k.split(' ')[0]))).sort();
     const todayStr = dates[0];
     const tomorrowStr = dates[1] || '';
+
+    // Read tomorrow prices availability flag from sensor.scheduler attributes or plan data
+    const entityId = this._resolveConfigValue('entity', 'sensor.scheduler');
+    const stateObj = entityId ? this._hass.states[entityId] : null;
+    const hasTomorrowInPlan = tomorrowStr ? sortedKeys.some(k => k.startsWith(tomorrowStr) && (data[k].buy_price > 0 || data[k].sell_price > 0)) : false;
+    const tomorrowPricesAvailable = (stateObj && stateObj.attributes && stateObj.attributes.tomorrow_prices_available === true) || hasTomorrowInPlan;
 
     const hexToRgba = (hex, alpha) => {
       const r = parseInt(hex.slice(1, 3), 16);

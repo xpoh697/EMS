@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.192"
+VERSION = "0.3.193"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -43,6 +43,9 @@ CONF_SYSTEM_COST = "system_cost"
 CONF_MIN_SELL_PRICE = "min_sell_price"
 CONF_MIN_DISCHARGE_PRICE = "min_discharge_price"
 CONF_MIN_ENERGY_TO_DISCHARGE = "min_energy_to_discharge"
+CONF_PRADCAST_TODAY_SENSOR = "pradcast_today_sensor"
+CONF_PRADCAST_TOMORROW_SENSOR = "pradcast_tomorrow_sensor"
+CONF_DISTRIBUTION_FEE_FALLBACK = "distribution_fee_fallback"
 
 # Battery optimization configuration keys
 CONF_BAT_PRICE = "bat_price"
@@ -68,6 +71,7 @@ DEFAULT_DEBUG = False
 
 DEFAULT_SYSTEM_COST = 0.0
 DEFAULT_MIN_SELL_PRICE = 0.0
+DEFAULT_DISTRIBUTION_FEE_FALLBACK = 0.40
 DEFAULT_MIN_DISCHARGE_PRICE = 0.0
 DEFAULT_MIN_ENERGY_TO_DISCHARGE = 0.0
 DEFAULT_BAT_PRICE = 0.0
