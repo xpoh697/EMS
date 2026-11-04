@@ -257,21 +257,24 @@ def run_unified_dp(
                 pre_solar_ahead.append(_f)
             home_needed = (sum(max(0.0, _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0) - _f.get("pv_kwh", 0.0)) for _f in pre_solar_ahead) / (config.eta_discharge if config.eta_discharge > 0.0 else 1.0)) if pre_solar_ahead else 0.0
 
-            # Scan higher sell slots and intermediate recharge costs until end of day
+            # Scan higher sell slots and intermediate recharge costs through the contiguous night
             higher_sell_slots = []
             pv_surplus_until_sale = 0.0
             recharge_buys_until_sale = []
             for _f in scaled_slots[slot_idx:]:
+                # Night continues across midnight until next morning solar window
                 if _f.get("date") != slot.get("date"):
-                    break
+                    if _f.get("pv_kwh", 0.0) > 0.5 or _f.get("hour", 0) >= 10:
+                        break
                 _f_sell = _f.get("sell_price", 0.0)
                 _f_buy = _f.get("buy_price", 99.0)
                 _f_pv = _f.get("pv_kwh", 0.0)
                 _f_cons = _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0)
                 if _f_sell > (sell_price + 0.02):
-                    higher_sell_slots.append(_f)
+                    if _f.get("date") == slot.get("date"):
+                        higher_sell_slots.append(_f)
                 else:
-                    if _f_pv > _f_cons:
+                    if _f.get("date") == slot.get("date") and _f_pv > _f_cons:
                         pv_surplus_until_sale += (_f_pv - _f_cons)
                     recharge_buys_until_sale.append(_f_buy)
 
@@ -660,16 +663,19 @@ def run_unified_dp(
         recharge_buys_until_sale = []
         if not override:
             for _f in scaled_slots[slot_idx:]:
+                # Night continues across midnight until next morning solar window
                 if _f.get("date") != slot.get("date"):
-                    break
+                    if _f.get("pv_kwh", 0.0) > 0.5 or _f.get("hour", 0) >= 10:
+                        break
                 _f_sell = _f.get("sell_price", 0.0)
                 _f_buy = _f.get("buy_price", 99.0)
                 _f_pv = _f.get("pv_kwh", 0.0)
                 _f_cons = _f.get("consumption_kwh", 0.0) + _f.get("ev_kwh", 0.0) + _f.get("planned_boiler_kwh", 0.0)
                 if _f_sell > (sell_price + 0.02):
-                    higher_sell_slots.append(_f)
+                    if _f.get("date") == slot.get("date"):
+                        higher_sell_slots.append(_f)
                 else:
-                    if _f_pv > _f_cons:
+                    if _f.get("date") == slot.get("date") and _f_pv > _f_cons:
                         pv_surplus_until_sale += (_f_pv - _f_cons)
                     recharge_buys_until_sale.append(_f_buy)
 
