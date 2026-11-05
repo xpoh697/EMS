@@ -2572,6 +2572,9 @@ class EmsDpSensor(SensorEntity):
             live_eta_charge = 0.930
             live_eta_discharge = 0.930
 
+        tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")
+        tomorrow_is_forecast = (tomorrow_source == "pradcast_forecast")
+
         dp_config = DPConfig(
             min_sell_price=min_sell_price,
             min_discharge_price=min_discharge_price,
@@ -2586,6 +2589,7 @@ class EmsDpSensor(SensorEntity):
             min_arbitrage_profit=min_arbitrage_profit,
             eta_charge=live_eta_charge,
             eta_discharge=live_eta_discharge,
+            tomorrow_is_forecast=tomorrow_is_forecast,
         )
 
         if boiler_average_today is None:
@@ -2640,6 +2644,7 @@ class EmsDpSensor(SensorEntity):
                         "eta_charge": dp_config.eta_charge,
                         "eta_discharge": dp_config.eta_discharge,
                         "last_sell_hour_by_date": getattr(dp_config, 'last_sell_hour_by_date', {}),
+                        "tomorrow_is_forecast": getattr(dp_config, 'tomorrow_is_forecast', False),
                     },
                     "slots": math_slots,
                 }, _f, indent=2)

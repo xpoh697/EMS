@@ -40,6 +40,7 @@ class DPConfig:
     eta_charge: float = 1.0
     eta_discharge: float = 1.0
     last_sell_hour_by_date: dict = field(default_factory=dict)
+    tomorrow_is_forecast: bool = False
 
     def get_min_soc(self, hour: int, date: str | None = None) -> float:
         """Get the hourly minimum battery SOC based on the 12:00 reference point.
@@ -157,14 +158,13 @@ def run_unified_dp(
     # Clone slots to avoid mutating input objects (and scale the first slot)
     scaled_slots = [dict(s) for s in slots]
     today_date = slots[0].get("date") if slots else None
-    if today_date:
+    if today_date and getattr(config, "tomorrow_is_forecast", False):
         for s in scaled_slots:
             if s.get("date") != today_date and s.get("hour", 0) >= 10:
-                # 15% uncertainty discount for future day slots (from 08:00 onwards)
-                # to prevent withholding energy today for marginal speculative savings tomorrow,
-                # while keeping tonight's immediate night horizon (00:00..07:00) at real tariffs.
-                # Only discount speculative future sell revenue to avoid withholding energy today.
-                # Never discount buy_price so that true night vs day tariffs are evaluated accurately.
+                # 15% uncertainty discount for future day slots (from 10:00 onwards)
+                # applied ONLY when future prices are speculative forecasts (pradcast_forecast)
+                # to prevent withholding energy today for speculative savings tomorrow.
+                # Never applied to confirmed Day-Ahead market tariffs (TGE/PSE).
                 if "sell_price" in s:
                     s["sell_price"] = s["sell_price"] * 0.85
 
