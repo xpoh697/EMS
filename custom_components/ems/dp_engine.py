@@ -425,7 +425,7 @@ def run_unified_dp(
                                             sum_day_home_def += (f_cons - f_pv)
                                     needed_day_deficit = max(0.0, sum_day_home_def + float(min_end_usable or 0.0) - sum_pv_ahead - usable_energy)
                                     space_with_solar_reserve = max(0.0, avail_cap - sum_pv_ahead)
-                                    allowed_capacity = max(0.0, min(space_with_solar_reserve, max(pre_solar_needed, needed_day_deficit)))
+                                    allowed_capacity = max(pre_solar_needed, space_with_solar_reserve)
                                 else:
                                     allowed_capacity = max(0.0, pre_solar_needed)
                                 max_gc = min(max_gc, allowed_capacity)
@@ -909,7 +909,7 @@ def run_unified_dp(
                                         sum_day_home_def += (f_cons - f_pv)
                                 needed_day_deficit = max(0.0, sum_day_home_def + float(min_end_usable or 0.0) - sum_pv_ahead - usable_energy)
                                 space_with_solar_reserve = max(0.0, avail_cap - sum_pv_ahead)
-                                allowed_capacity = max(0.0, min(space_with_solar_reserve, max(pre_solar_needed, needed_day_deficit)))
+                                allowed_capacity = max(pre_solar_needed, space_with_solar_reserve)
                             else:
                                 allowed_capacity = max(0.0, pre_solar_needed)
                             max_gc = min(max_gc, allowed_capacity)
