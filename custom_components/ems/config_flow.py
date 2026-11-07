@@ -389,6 +389,8 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         """Handle the Battery optimization settings step."""
         if user_input is not None:
             self._user_input.update(user_input)
+            if not self._user_input.get(CONF_BAT_CAPACITY_ENTITY):
+                self._user_input.pop(CONF_BAT_CAPACITY_ENTITY, None)
             return self.async_create_entry(title="", data=self._user_input)
 
         def get_value(key):
@@ -430,16 +432,11 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             )
         )
 
-        # 2. Bat Capacity (entity) - Required
+        # 2. Bat Capacity (entity) - Optional
         val_cap = get_value(CONF_BAT_CAPACITY_ENTITY)
-        if val_cap:
-            schema_dict[vol.Required(CONF_BAT_CAPACITY_ENTITY, default=val_cap)] = selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
-            )
-        else:
-            schema_dict[vol.Required(CONF_BAT_CAPACITY_ENTITY)] = selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
-            )
+        schema_dict[vol.Optional(CONF_BAT_CAPACITY_ENTITY, description={"suggested_value": val_cap} if val_cap else {})] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        )
 
         schema_dict[vol.Required(CONF_BAT_CAPACITY_FALLBACK, default=bat_capacity_fallback)] = selector.NumberSelector(
             selector.NumberSelectorConfig(

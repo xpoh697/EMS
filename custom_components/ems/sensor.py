@@ -395,7 +395,10 @@ async def async_setup_entry(
     # Battery optimization settings
     bat_price = options.get(CONF_BAT_PRICE, config.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE))
     bat_cycles = options.get(CONF_BAT_CYCLES, config.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES))
+    bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
     bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+    if bat_capacity_entity_id in ("sensor.inverter_battery_capacity", ""):
+        bat_capacity_entity_id = None
     bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
     bat_max_charge_power = float(options.get(
         CONF_BAT_MAX_CHARGE_POWER,
@@ -466,7 +469,7 @@ async def async_setup_entry(
 
     # Log errors or info for Battery optimization sensors
     if not bat_capacity_entity_id:
-        ems_log(hass, _LOGGER, logging.ERROR, "Battery capacity entity is not configured in settings!")
+        ems_log(hass, _LOGGER, logging.INFO, f"Battery capacity entity not set, using fallback: {bat_capacity_fallback} kWh")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Battery capacity entity configured successfully: {bat_capacity_entity_id}")
 
@@ -494,7 +497,7 @@ async def async_setup_entry(
         bat_capacity_fallback = float(entry.options.get(CONF_BAT_CAPACITY_FALLBACK, entry.data.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
         
         # Start with cached capacity or config fallback
-        capacity = hass.data.get(DOMAIN, {}).get("last_known_capacity", bat_capacity_fallback)
+        capacity = hass.data.get(DOMAIN, {}).get("last_known_capacity", bat_capacity_fallback) if bat_capacity_entity_id else bat_capacity_fallback
 
         if bat_capacity_entity_id:
             cap_state = hass.states.get(bat_capacity_entity_id)
@@ -514,8 +517,10 @@ async def async_setup_entry(
                 except (ValueError, TypeError):
                     pass
 
-        if capacity <= 0.0:
+        if capacity <= 0.0 or not bat_capacity_entity_id:
             capacity = bat_capacity_fallback
+            if DOMAIN in hass.data:
+                hass.data[DOMAIN]["last_known_capacity"] = bat_capacity_fallback
 
         # Calculate degradation
         degradation = calculate_battery_degradation(bat_price, bat_cycles, capacity)
@@ -776,7 +781,7 @@ async def async_setup_entry(
             )
         )
 
-    if bat_soc_entity_id and bat_capacity_entity_id:
+    if bat_soc_entity_id:
         entities.append(
             EmsDpSensor(
                 entry.entry_id,
@@ -826,7 +831,7 @@ async def async_setup_entry(
             entry,
         )
     )
-    if bat_soc_entity_id and bat_capacity_entity_id:
+    if bat_soc_entity_id:
         entities.append(
             EmsBoilerDpSensor(
                 entry.entry_id,
@@ -2048,7 +2053,6 @@ class EmsDpSensor(SensorEntity):
                 CONF_PV_FORECAST_TOMORROW,
                 CONF_PRICE_BUY_SENSOR,
                 CONF_PRICE_SELL_SENSOR,
-                CONF_BAT_CAPACITY_ENTITY,
                 CONF_BAT_SOC_ENTITY,
             ]
             for key in required_keys:
@@ -2067,6 +2071,8 @@ class EmsDpSensor(SensorEntity):
 
             total_load_consumption_id = options.get(CONF_TOTAL_LOAD_CONSUMPTION, config.get(CONF_TOTAL_LOAD_CONSUMPTION))
             bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+            if bat_capacity_entity_id in ("sensor.inverter_battery_capacity", ""):
+                bat_capacity_entity_id = None
             bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
             bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
 
@@ -2114,7 +2120,7 @@ class EmsDpSensor(SensorEntity):
 
             # Parse capacity with fallback
             bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
-            capacity = self._last_known_capacity if self._last_known_capacity != 15.0 else bat_capacity_fallback
+            capacity = self._last_known_capacity if (self._last_known_capacity != 15.0 and bat_capacity_entity_id) else bat_capacity_fallback
             cap_state = self.hass.states.get(bat_capacity_entity_id) if bat_capacity_entity_id else None
             if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
                 try:
@@ -2134,7 +2140,7 @@ class EmsDpSensor(SensorEntity):
                         f"Battery capacity sensor '{bat_capacity_entity_id}' has non-numeric state '{cap_state.state}'. Using fallback: {capacity} kWh."
                     )
             else:
-                capacity = self.hass.data[DOMAIN].get("last_known_capacity", capacity)
+                capacity = self.hass.data[DOMAIN].get("last_known_capacity", capacity) if bat_capacity_entity_id else bat_capacity_fallback
 
             # Parse current SOC
             soc = 50.0
@@ -3218,6 +3224,8 @@ class EmsSchedulerSensor(SensorEntity):
         )
 
         bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
+        if bat_capacity_entity_id in ("sensor.inverter_battery_capacity", ""):
+            bat_capacity_entity_id = None
         bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
         bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
         min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
@@ -3248,7 +3256,7 @@ class EmsSchedulerSensor(SensorEntity):
 
         # Parse capacity with fallback
         bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
-        capacity = self.hass.data[DOMAIN].get("last_known_capacity", bat_capacity_fallback)
+        capacity = self.hass.data[DOMAIN].get("last_known_capacity", bat_capacity_fallback) if bat_capacity_entity_id else bat_capacity_fallback
         if bat_capacity_entity_id:
             cap_state = self.hass.states.get(bat_capacity_entity_id)
             if cap_state and cap_state.state not in (None, "unknown", "unavailable"):
@@ -3448,6 +3456,7 @@ class EmsSchedulerSensor(SensorEntity):
                             p_w = round(min(bat_max_charge_power * cvcc_m, max(600.0, req_p_w)), 1)
                             slot_data["power_w"] = p_w
                             slot_data["current_a"] = round(p_w / safe_voltage, 1)
+                            slot_data["target_soc"] = _target_soc
 
                             if slot_idx == 0 and soc is not None:
                                 chg_kwh = (p_w / 1000.0) * rem_fraction * eff_chg
@@ -3467,6 +3476,7 @@ class EmsSchedulerSensor(SensorEntity):
                             p_w = round(min(bat_max_discharge_power, max(600.0, req_p_w)), 1)
                             slot_data["power_w"] = p_w
                             slot_data["current_a"] = round(p_w / safe_voltage, 1)
+                            slot_data["target_soc"] = _target_soc
 
                             if slot_idx == 0 and soc is not None:
                                 dis_kwh = (p_w / 1000.0) * rem_fraction / eff_dis
@@ -3622,7 +3632,7 @@ class EmsSchedulerSensor(SensorEntity):
             current_amps = self._set_amps
             current_slot["power_w"] = self._set_power_w
             current_slot["current_a"] = self._set_amps
-            current_target_soc = current_slot.get("soc", soc)
+            current_target_soc = current_slot.get("target_soc", current_slot.get("soc", soc))
 
         avg_pv = self._avg_buffer(self._pv_buffer)
         avg_load = self._avg_buffer(self._load_buffer)
