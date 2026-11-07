@@ -399,15 +399,15 @@ async def async_setup_entry(
     bat_capacity_entity_id = options.get(CONF_BAT_CAPACITY_ENTITY, config.get(CONF_BAT_CAPACITY_ENTITY))
     if bat_capacity_entity_id in ("sensor.inverter_battery_capacity", ""):
         bat_capacity_entity_id = None
-    bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
     bat_max_charge_power = float(options.get(
         CONF_BAT_MAX_CHARGE_POWER,
-        config.get(CONF_BAT_MAX_CHARGE_POWER, options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)))
+        config.get(CONF_BAT_MAX_CHARGE_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)
     ))
     bat_max_discharge_power = float(options.get(
         CONF_BAT_MAX_DISCHARGE_POWER,
-        config.get(CONF_BAT_MAX_DISCHARGE_POWER, options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)))
+        config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
     ))
+    bat_max_power = max(bat_max_charge_power, bat_max_discharge_power)
     bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
     bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
     bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
@@ -2103,15 +2103,15 @@ class EmsDpSensor(SensorEntity):
             fallback_consumption = options.get(CONF_FALLBACK_CONSUMPTION, config.get(CONF_FALLBACK_CONSUMPTION, DEFAULT_FALLBACK_CONSUMPTION))
             min_sell_price = storage.min_sell_price
             min_discharge_price = storage.min_discharge_price
-            bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
             bat_max_charge_power = float(options.get(
                 CONF_BAT_MAX_CHARGE_POWER,
-                config.get(CONF_BAT_MAX_CHARGE_POWER, options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)))
+                config.get(CONF_BAT_MAX_CHARGE_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)
             ))
             bat_max_discharge_power = float(options.get(
                 CONF_BAT_MAX_DISCHARGE_POWER,
-                config.get(CONF_BAT_MAX_DISCHARGE_POWER, options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)))
+                config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
             ))
+            bat_max_power = max(bat_max_charge_power, bat_max_discharge_power)
             min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
             min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
             current_hour = dt_util.now().hour
@@ -3232,21 +3232,15 @@ class EmsSchedulerSensor(SensorEntity):
         except (ValueError, TypeError):
             bat_soc_emergency_val = DEFAULT_BAT_SOC_EMERGENCY
 
-        # Retrieve battery max power from config/options
-        bat_max_power = options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER))
-        try:
-            bat_max_power = float(bat_max_power)
-        except (ValueError, TypeError):
-            bat_max_power = DEFAULT_BAT_MAX_POWER
-
         bat_max_charge_power = float(options.get(
             CONF_BAT_MAX_CHARGE_POWER,
-            config.get(CONF_BAT_MAX_CHARGE_POWER, options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)))
+            config.get(CONF_BAT_MAX_CHARGE_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)
         ))
         bat_max_discharge_power = float(options.get(
             CONF_BAT_MAX_DISCHARGE_POWER,
-            config.get(CONF_BAT_MAX_DISCHARGE_POWER, options.get(CONF_BAT_MAX_POWER, config.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)))
+            config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
         ))
+        bat_max_power = max(bat_max_charge_power, bat_max_discharge_power)
 
         # Parse capacity with fallback
         bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
@@ -3357,7 +3351,12 @@ class EmsSchedulerSensor(SensorEntity):
                 # Normalize first slot energy to full-hour rate for power display
                 if slot_idx == 0 and remaining_hour_fraction < 1.0:
                     energy_for_power = energy / remaining_hour_fraction
-                    energy_for_power = min(energy_for_power, bat_max_power / 1000.0)
+                    if action in ("discharge", "self_consume"):
+                        energy_for_power = min(energy_for_power, bat_max_discharge_power / 1000.0)
+                    elif action in ("grid_charge", "pv_charge"):
+                        energy_for_power = min(energy_for_power, bat_max_charge_power / 1000.0)
+                    else:
+                        energy_for_power = min(energy_for_power, max(bat_max_charge_power, bat_max_discharge_power) / 1000.0)
                 else:
                     energy_for_power = energy
 

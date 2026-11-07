@@ -391,6 +391,10 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             self._user_input.update(user_input)
             if not self._user_input.get(CONF_BAT_CAPACITY_ENTITY):
                 self._user_input.pop(CONF_BAT_CAPACITY_ENTITY, None)
+            # Synchronize legacy bat_max_power with max(charge, discharge)
+            chg = float(self._user_input.get(CONF_BAT_MAX_CHARGE_POWER, DEFAULT_BAT_MAX_CHARGE_POWER))
+            dis = float(self._user_input.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER))
+            self._user_input[CONF_BAT_MAX_POWER] = max(chg, dis)
             return self.async_create_entry(title="", data=self._user_input)
 
         def get_value(key):
