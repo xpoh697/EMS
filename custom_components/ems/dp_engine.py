@@ -289,7 +289,8 @@ def run_unified_dp(
             intermediate_arb_ok = intermediate_arb_margin >= required_arb_profit
 
             higher_sell_cap = 0.0 if intermediate_arb_ok else net_higher_sell_cap
-            discharge_arbitrage_ok = intermediate_arb_ok
+            base_recharge_cost = (min_day_buy / config.eta_charge + cycle_cost) if config.eta_charge > 0.0 else min_day_buy
+            discharge_arbitrage_ok = (eff_sell_net - base_recharge_cost) >= required_arb_profit
 
             for state_idx, current_value in enumerate(dp_n[slot_idx - 1]):
                 if current_value == neg_inf:
@@ -696,7 +697,8 @@ def run_unified_dp(
         intermediate_arb_ok = intermediate_arb_margin >= required_arb_profit
 
         higher_sell_cap = 0.0 if intermediate_arb_ok else net_higher_sell_cap
-        discharge_arbitrage_ok = intermediate_arb_ok
+        base_recharge_cost = (min_day_buy / config.eta_charge + cycle_cost) if config.eta_charge > 0.0 else min_day_buy
+        discharge_arbitrage_ok = (eff_sell_net - base_recharge_cost) >= required_arb_profit
 
         for state_idx, current_value in enumerate(dp[slot_idx - 1]):
             if current_value == neg_inf:
