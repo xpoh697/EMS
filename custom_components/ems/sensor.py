@@ -60,7 +60,6 @@ from .const import (
     CONF_BAT_CYCLES,
     CONF_BAT_CAPACITY_ENTITY,
     CONF_BAT_CAPACITY_FALLBACK,
-    CONF_BAT_MAX_POWER,
     CONF_BAT_MAX_CHARGE_POWER,
     CONF_BAT_MAX_DISCHARGE_POWER,
     DEFAULT_BAT_MAX_CHARGE_POWER,
@@ -82,7 +81,6 @@ from .const import (
     DEFAULT_BAT_PRICE,
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_CAPACITY_FALLBACK,
-    DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
     DEFAULT_MIN_BAT_SOC_EVENING,
     DEFAULT_MIN_BAT_SOC_MORNING,
@@ -407,7 +405,6 @@ async def async_setup_entry(
         CONF_BAT_MAX_DISCHARGE_POWER,
         config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
     ))
-    bat_max_power = max(bat_max_charge_power, bat_max_discharge_power)
     bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
     bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
     bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
@@ -2111,7 +2108,6 @@ class EmsDpSensor(SensorEntity):
                 CONF_BAT_MAX_DISCHARGE_POWER,
                 config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
             ))
-            bat_max_power = max(bat_max_charge_power, bat_max_discharge_power)
             min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
             min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
             current_hour = dt_util.now().hour
@@ -3240,7 +3236,6 @@ class EmsSchedulerSensor(SensorEntity):
             CONF_BAT_MAX_DISCHARGE_POWER,
             config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
         ))
-        bat_max_power = max(bat_max_charge_power, bat_max_discharge_power)
 
         # Parse capacity with fallback
         bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
@@ -3398,7 +3393,7 @@ class EmsSchedulerSensor(SensorEntity):
                 slot_min_bat_soc = min_bat_soc_morning
 
             # If action is discharge but calculated power dropped to 0 (e.g. at end-of-hour discrete step),
-            # hold bat_max_power as long as SOC is above cutoff
+            # hold max discharge power as long as SOC is above cutoff
             if action == "discharge" and power_w <= 0.0 and soc is not None and soc > (slot_min_bat_soc + 0.5):
                 power_w = round(bat_max_discharge_power, 1)
                 current_a = round(power_w / safe_voltage, 1)

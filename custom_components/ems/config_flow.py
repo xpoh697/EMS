@@ -38,7 +38,6 @@ from .const import (
     CONF_BAT_CYCLES,
     CONF_BAT_CAPACITY_ENTITY,
     CONF_BAT_CAPACITY_FALLBACK,
-    CONF_BAT_MAX_POWER,
     CONF_BAT_MAX_CHARGE_POWER,
     CONF_BAT_MAX_DISCHARGE_POWER,
     DEFAULT_BAT_MAX_CHARGE_POWER,
@@ -67,7 +66,6 @@ from .const import (
     DEFAULT_BAT_PRICE,
     DEFAULT_BAT_CYCLES,
     DEFAULT_BAT_CAPACITY_FALLBACK,
-    DEFAULT_BAT_MAX_POWER,
     DEFAULT_MIN_BAT_SOC,
     DEFAULT_BAT_SOC_EMERGENCY,
     DEFAULT_THERMOSTAT_SET_TEMP,
@@ -391,10 +389,6 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             self._user_input.update(user_input)
             if not self._user_input.get(CONF_BAT_CAPACITY_ENTITY):
                 self._user_input.pop(CONF_BAT_CAPACITY_ENTITY, None)
-            # Synchronize legacy bat_max_power with max(charge, discharge)
-            chg = float(self._user_input.get(CONF_BAT_MAX_CHARGE_POWER, DEFAULT_BAT_MAX_CHARGE_POWER))
-            dis = float(self._user_input.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER))
-            self._user_input[CONF_BAT_MAX_POWER] = max(chg, dis)
             return self.async_create_entry(title="", data=self._user_input)
 
         def get_value(key):
@@ -406,15 +400,8 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         bat_price = self._user_input.get(CONF_BAT_PRICE, DEFAULT_BAT_PRICE)
         bat_cycles = self._user_input.get(CONF_BAT_CYCLES, DEFAULT_BAT_CYCLES)
         bat_capacity_fallback = self._user_input.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)
-        bat_max_power = self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_POWER)
-        bat_max_charge_power = self._user_input.get(
-            CONF_BAT_MAX_CHARGE_POWER,
-            self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)
-        )
-        bat_max_discharge_power = self._user_input.get(
-            CONF_BAT_MAX_DISCHARGE_POWER,
-            self._user_input.get(CONF_BAT_MAX_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
-        )
+        bat_max_charge_power = self._user_input.get(CONF_BAT_MAX_CHARGE_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)
+        bat_max_discharge_power = self._user_input.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
         bat_soc_emergency = self._user_input.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY)
 
         schema_dict = {}

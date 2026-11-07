@@ -72,7 +72,6 @@
           "bat_cycles": "Battery cycles",
           "bat_capacity_entity": "Battery capacity sensor (entity)",
           "bat_capacity_fallback": "Battery capacity fallback (kWh)",
-          "bat_max_power": "Battery max power (W)",
           "bat_cur_power_entity": "Battery current power sensor (entity)",
           "bat_soc_entity": "Battery State of Charge (SOC) sensor (entity)",
           "bat_voltage": "Battery voltage sensor (entity)",

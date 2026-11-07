@@ -72,7 +72,6 @@
           "bat_cycles": "Количество циклов АКБ",
           "bat_capacity_entity": "Сенсор емкости АКБ",
           "bat_capacity_fallback": "Резервная емкость АКБ (кВтч)",
-          "bat_max_power": "Максимальная мощность АКБ (Вт)",
           "bat_cur_power_entity": "Сенсор текущей мощности АКБ",
           "bat_soc_entity": "Сенсор уровня заряда АКБ (SOC)",
           "bat_voltage": "Сенсор напряжения АКБ",
