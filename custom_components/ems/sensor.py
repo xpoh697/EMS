@@ -2680,13 +2680,7 @@ class EmsDpSensor(SensorEntity):
             # hours, re-run with updated last_sell_hour_by_date so hours after the
             # last sell use the lower morning limit (allows deeper self-consumption).
             if (dp_config.battery_min_soc_evening or 0) > (dp_config.battery_min_soc_morning or 0):
-                _lsh: dict[str, int] = {}
-                for _d in dis_h:
-                    _dd = _d.get("date", "")
-                    _dh = _d.get("hour", 0)
-                    if _dh >= 12:
-                        if _dd not in _lsh or _dh > _lsh[_dd]:
-                            _lsh[_dd] = _dh
+                _lsh = stats.get("last_sell_hour_by_date", {})
                 if _lsh != dp_config.last_sell_hour_by_date:
                     dp_config.last_sell_hour_by_date = _lsh
                     (
@@ -3411,8 +3405,7 @@ class EmsSchedulerSensor(SensorEntity):
                 current_a = round(power_w / safe_voltage, 1)
 
             # Calculate SOC at the end of the hour based on continuous physical battery energy
-            end_soc = (current_physical_kwh / safe_capacity) * 100.0
-            end_soc = max(slot_min_bat_soc, min(100.0, end_soc))
+            end_soc = max(0.0, min(100.0, (current_physical_kwh / safe_capacity) * 100.0))
 
             slot_soc = soc if (slot_idx == 0 and soc is not None) else end_soc
             slot_data = {

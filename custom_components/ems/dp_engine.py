@@ -68,8 +68,8 @@ class DPConfig:
         if date and self.last_sell_hour_by_date and date not in self.last_sell_hour_by_date:
             return min_mo
 
-        # If date is not passed (None) or before sales are tracked (e.g. during Pass 1):
-        if date is None:
+        # Before sales are tracked (e.g. during Pass 1) or date is None:
+        if date is None or not self.last_sell_hour_by_date:
             if 0 <= hour < 10:
                 return min_mo
             return min_ev
@@ -604,6 +604,12 @@ def run_unified_dp(
         slot_min_soc = config.get_min_soc(slot.get("hour", 0), slot.get("date"))
         min_usable_allowed = config.battery_capacity * max(0.0, slot_min_soc - config.battery_min_soc) / 100.0
         min_slot_idx = int(round(min_usable_allowed / energy_step))
+
+        # ACT_DIS (grid discharge/sale) must NEVER breach battery_min_soc_evening in afternoon/evening hours
+        evening_min = config.battery_min_soc_evening if config.battery_min_soc_evening is not None else float(config.battery_min_soc)
+        dis_min_soc = max(slot_min_soc, evening_min) if slot_hour >= 12 else slot_min_soc
+        min_dis_usable = config.battery_capacity * max(0.0, dis_min_soc - config.battery_min_soc) / 100.0
+        min_dis_slot_idx = int(round(min_dis_usable / energy_step))
         override = slot.get("override")
         # Parse override: may be "action" or "action:target_soc"
         override_action = None
@@ -776,7 +782,7 @@ def run_unified_dp(
                                     blocked = True
                                 elif (usable_energy - exp) < home_needed and not discharge_arbitrage_ok:
                                     blocked = True
-                        if not blocked and (override or nsi >= min_slot_idx):
+                        if not blocked and (override or nsi >= min_dis_slot_idx):
                             _update(nsi, sell_price * to_grid - cycle_cost * exp - buy_price * grid_imp, ACT_DIS, exp)
                 else:
                     min_ei = 1
@@ -784,7 +790,7 @@ def run_unified_dp(
                     for ei in range(min_ei, max_ei + 1):
                         exp = ei * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy - exp) / energy_step))))
-                        if not override and nsi < min_slot_idx:
+                        if not override and nsi < min_dis_slot_idx:
                             continue
                         ac_exp = exp * config.eta_discharge
                         to_grid = max(0.0, ac_exp + pv_kwh - consumption_kwh)
@@ -1166,7 +1172,7 @@ def run_unified_dp(
             if _ls_hour >= 12:
                 if _ls_date not in _lsh or _ls_hour > _lsh[_ls_date]:
                     _lsh[_ls_date] = _ls_hour
-    config.last_sell_hour_by_date = _lsh
+    # Do not mutate config.last_sell_hour_by_date in-place so caller can compare against prior state
 
     for slot, act, amount in zip(scaled_slots, types_by_slot, amounts_by_slot, strict=False):
         start_usable = usable_energy
@@ -1331,4 +1337,5 @@ def run_unified_dp(
         "best_value": round(best_total_value, 2),
         "end_usable_kwh": round(usable_energy, 2),
         "expected_trajectory": expected_trajectory,
+        "last_sell_hour_by_date": _lsh,
     }
