@@ -112,6 +112,23 @@ To track and report load energy consumption dynamically, the integration provide
   - Checks if the day of the month has changed relative to `last_day` to reset `today` to 24 zeros.
   - Periodically queries the database averages once a day at midnight.
 
+### `EmsPvToBatteryTodaySensor` & `EmsBatteryToGridTodaySensor`
+- **Entity IDs**:
+  - `sensor.ems_pv_to_battery_today` (Заряд АКБ от солнечных панелей за день)
+  - `sensor.ems_battery_to_grid_today` (Продажа из АКБ в сеть за день)
+- **Unit of Measurement**: `kWh`
+- **Device Class**: `energy`
+- **State Class**: `total_increasing`
+- **Purpose**: Real-time integration and physical tracking of specific energy flows between solar DC bus, battery, house load, and grid export.
+- **Attributes**:
+  - `history_7_days`: Array of completed daily totals for the last 7 calendar days: `[{"date": "YYYY-MM-DD", "kwh": float}, ...]`.
+  - `total_7_days_kwh`: Cumulative energy over the last 7 days.
+  - `average_daily_kwh`: Rolling 7-day daily average in kWh.
+  - `current_power_w`: Current instantaneous power flow in Watts.
+- **Persistence & Midnight Routine**:
+  - Implements `RestoreSensor` to preserve accumulated day energy and 7-day history across Home Assistant restarts.
+  - Automatically archives completed daily total to `history_7_days` and resets today's accumulator at 00:00:00 midnight.
+
 ## 8. Logging Utility (Утилита логирования)
 To provide user-controlled debugging info, the integration implements a conditional logger in `custom_components/ems/utils.py`.
 

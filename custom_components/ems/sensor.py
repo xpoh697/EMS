@@ -872,6 +872,33 @@ async def async_setup_entry(
     conversion_loss_sensor.set_weekly_sensor(weekly_loss_sensor)
     entities.append(weekly_loss_sensor)
 
+    # Daily energy accounting sensors (PV to battery & Battery to grid)
+    pv_to_bat_sensor = EmsPvToBatteryTodaySensor(
+        entry.entry_id,
+        entry.title,
+    )
+    entities.append(pv_to_bat_sensor)
+
+    bat_to_grid_sensor = EmsBatteryToGridTodaySensor(
+        entry.entry_id,
+        entry.title,
+    )
+    entities.append(bat_to_grid_sensor)
+
+    daily_coordinator = EmsDailyEnergyAccountingCoordinator(
+        hass,
+        pv_to_bat_sensor,
+        bat_to_grid_sensor,
+        pv_power_id=options.get(CONF_CURRENT_PV_GENERATION, config.get(CONF_CURRENT_PV_GENERATION)),
+        bat_power_id=options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY)),
+        load_power_id=options.get(CONF_CURRENT_HOUSE_CONSUMPTION, config.get(CONF_CURRENT_HOUSE_CONSUMPTION)),
+        grid_power_id="sensor.inverter_grid_power",
+        bat_charge_today_id=options.get(CONF_BAT_CHARGE_TODAY_ENTITY, config.get(CONF_BAT_CHARGE_TODAY_ENTITY)),
+        grid_export_today_id="sensor.inverter_today_energy_export",
+    )
+    daily_coordinator.async_start()
+    entry.async_on_unload(daily_coordinator.async_stop)
+
     if entities:
         async_add_entities(entities)
 
@@ -6138,3 +6165,261 @@ class EmsWeeklyLossRateSensor(RestoreSensor, SensorEntity):
             self.hass.data[DOMAIN]["weekly_charge_efficiency"] = one_way
             self.hass.data[DOMAIN]["weekly_discharge_efficiency"] = one_way
 
+
+
+
+class EmsDailyEnergyFlowSensorBase(RestoreSensor, SensorEntity):
+    """Base sensor for tracking daily energy flow with 7-day history."""
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+        unique_suffix: str,
+        name: str,
+        entity_id: str,
+        icon: str,
+    ) -> None:
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._attr_name = name
+        self._attr_unique_id = f"{entry_id}_{unique_suffix}"
+        self.entity_id = entity_id
+        self._attr_icon = icon
+
+        self._today_kwh: float = 0.0
+        self._current_power_w: float = 0.0
+        self._last_update_ts: float | None = None
+        self._last_state_write_ts: float = 0.0
+        self._last_state_write_kwh: float = 0.0
+        self._last_reset_day: int = dt_util.now().day
+        self._history_7d: list[dict[str, Any]] = []
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        return round(self._today_kwh, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        tot = sum(d.get("kwh", 0.0) for d in self._history_7d)
+        avg = tot / max(1, len(self._history_7d)) if self._history_7d else 0.0
+        return {
+            "current_power_w": round(self._current_power_w, 1),
+            "history_7_days": self._history_7d,
+            "total_7_days_kwh": round(tot, 2),
+            "average_daily_kwh": round(avg, 2),
+            "last_reset_day": self._last_reset_day,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state not in (None, "unknown", "unavailable"):
+            try:
+                self._today_kwh = float(last_state.state)
+                self._last_state_write_kwh = self._today_kwh
+            except (ValueError, TypeError):
+                self._today_kwh = 0.0
+
+        if last_state and last_state.attributes:
+            hist = last_state.attributes.get("history_7_days")
+            if isinstance(hist, list):
+                self._history_7d = [
+                    {"date": str(d.get("date")), "kwh": float(d.get("kwh", 0.0))}
+                    for d in hist if isinstance(d, dict) and "date" in d
+                ][-7:]
+            self._last_reset_day = last_state.attributes.get("last_reset_day", dt_util.now().day)
+
+        # Midnight reset check if restarted on another day
+        now = dt_util.now()
+        if now.day != self._last_reset_day:
+            self._archive_and_reset(now)
+
+        self.async_on_remove(
+            async_track_time_change(self.hass, self._handle_midnight, hour=0, minute=0, second=0)
+        )
+
+    @callback
+    def _handle_midnight(self, now) -> None:
+        self._archive_and_reset(now)
+        self.async_write_ha_state()
+
+    def _archive_and_reset(self, now) -> None:
+        yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        self._history_7d = [d for d in self._history_7d if d.get("date") != yesterday_str]
+        self._history_7d.append({
+            "date": yesterday_str,
+            "kwh": round(self._today_kwh, 2),
+        })
+        if len(self._history_7d) > 7:
+            self._history_7d = self._history_7d[-7:]
+        self._today_kwh = 0.0
+        self._last_reset_day = now.day
+        self._last_state_write_kwh = 0.0
+        self._last_update_ts = None
+
+    def add_power_sample(self, power_w: float, now_ts: float, cap_max_kwh: float | None = None) -> None:
+        self._current_power_w = power_w
+        if self._last_update_ts is not None:
+            dt_s = now_ts - self._last_update_ts
+            if 0 < dt_s <= 30.0 and power_w > 0.0:
+                delta_kwh = (power_w * dt_s) / 3600000.0
+                self._today_kwh += delta_kwh
+                if cap_max_kwh is not None and cap_max_kwh > 0.0:
+                    self._today_kwh = min(self._today_kwh, cap_max_kwh)
+
+        self._last_update_ts = now_ts
+
+        # Throttle state writes: every 0.01 kWh change or every 30 seconds
+        if (self._today_kwh - self._last_state_write_kwh >= 0.01) or (now_ts - self._last_state_write_ts >= 30.0):
+            self._last_state_write_ts = now_ts
+            self._last_state_write_kwh = self._today_kwh
+            if self.hass:
+                self.async_write_ha_state()
+
+
+class EmsPvToBatteryTodaySensor(EmsDailyEnergyFlowSensorBase):
+    """Sensor tracking daily energy charged into battery from solar PV."""
+
+    def __init__(self, entry_id: str, device_name: str) -> None:
+        super().__init__(
+            entry_id=entry_id,
+            device_name=device_name,
+            unique_suffix="pv_to_battery_today",
+            name="PV to Battery Today",
+            entity_id="sensor.ems_pv_to_battery_today",
+            icon="mdi:solar-power-variant",
+        )
+
+
+class EmsBatteryToGridTodaySensor(EmsDailyEnergyFlowSensorBase):
+    """Sensor tracking daily energy discharged from battery to grid."""
+
+    def __init__(self, entry_id: str, device_name: str) -> None:
+        super().__init__(
+            entry_id=entry_id,
+            device_name=device_name,
+            unique_suffix="battery_to_grid_today",
+            name="Battery to Grid Today",
+            entity_id="sensor.ems_battery_to_grid_today",
+            icon="mdi:transmission-tower-export",
+        )
+
+
+class EmsDailyEnergyAccountingCoordinator:
+    """Coordinates power measurement and integration for daily PV-to-battery and Battery-to-grid sensors."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        pv_sensor: EmsPvToBatteryTodaySensor,
+        grid_sensor: EmsBatteryToGridTodaySensor,
+        pv_power_id: str | None,
+        bat_power_id: str | None,
+        load_power_id: str | None,
+        grid_power_id: str | None,
+        bat_charge_today_id: str | None = None,
+        grid_export_today_id: str | None = None,
+    ) -> None:
+        self._hass = hass
+        self._pv_sensor = pv_sensor
+        self._grid_sensor = grid_sensor
+        self._pv_power_id = pv_power_id
+        self._bat_power_id = bat_power_id
+        self._load_power_id = load_power_id
+        self._grid_power_id = grid_power_id
+        self._bat_charge_today_id = bat_charge_today_id
+        self._grid_export_today_id = grid_export_today_id
+        self._unsub: list = []
+
+    def _get_float(self, entity_id: str | None, default: float | None = 0.0) -> float | None:
+        if not entity_id or not self._hass:
+            return default
+        state = self._hass.states.get(entity_id)
+        if not state or state.state in (None, "unknown", "unavailable"):
+            return default
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return default
+
+    def async_start(self) -> None:
+        # Resolve grid power sensor fallback if not explicit
+        if not self._grid_power_id or not self._hass.states.get(self._grid_power_id):
+            if self._hass.states.get("sensor.inverter_grid_power"):
+                self._grid_power_id = "sensor.inverter_grid_power"
+            elif self._hass.states.get("sensor.grid_usage"):
+                self._grid_power_id = "sensor.grid_usage"
+
+        if not self._grid_export_today_id or not self._hass.states.get(self._grid_export_today_id):
+            if self._hass.states.get("sensor.inverter_today_energy_export"):
+                self._grid_export_today_id = "sensor.inverter_today_energy_export"
+
+        watch = [e for e in [self._pv_power_id, self._bat_power_id, self._load_power_id, self._grid_power_id] if e]
+        if watch:
+            self._unsub.append(
+                async_track_state_change_event(self._hass, watch, self._handle_power_update)
+            )
+        # Initial run
+        self._handle_power_update()
+
+    def async_stop(self) -> None:
+        for unsub in self._unsub:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._unsub.clear()
+
+    @callback
+    def _handle_power_update(self, event=None) -> None:
+        import time
+        now_ts = time.time()
+        p_pv = max(0.0, float(self._get_float(self._pv_power_id, 0.0) or 0.0))
+        p_bat = float(self._get_float(self._bat_power_id, 0.0) or 0.0)
+        p_load = max(0.0, float(self._get_float(self._load_power_id, 0.0) or 0.0))
+
+        # Grid power: negative = export, positive = import
+        p_grid_val = self._get_float(self._grid_power_id, None)
+        if p_grid_val is not None:
+            p_grid = float(p_grid_val)
+        else:
+            # Power balance fallback: Grid = Load - PV - Battery
+            p_grid = p_load - p_pv - p_bat
+
+        p_bat_chg = max(0.0, -p_bat)
+        p_bat_dis = max(0.0, p_bat)
+        p_grid_exp = max(0.0, -p_grid)
+        p_grid_imp = max(0.0, p_grid)
+
+        # 1. PV to Battery
+        load_deficit_covered_by_grid = min(p_load, p_grid_imp)
+        load_covered_by_pv = max(0.0, p_load - load_deficit_covered_by_grid)
+        pv_avail = max(0.0, p_pv - load_covered_by_pv)
+        p_pv_to_bat = min(p_bat_chg, pv_avail)
+
+        # 2. Battery to Grid
+        pv_surplus = max(0.0, p_pv - p_load)
+        export_from_bat = max(0.0, p_grid_exp - pv_surplus)
+        p_bat_to_grid = min(p_bat_dis, export_from_bat)
+
+        cap_chg = self._get_float(self._bat_charge_today_id, None)
+        cap_exp = self._get_float(self._grid_export_today_id, None)
+
+        self._pv_sensor.add_power_sample(p_pv_to_bat, now_ts, cap_chg)
+        self._grid_sensor.add_power_sample(p_bat_to_grid, now_ts, cap_exp)
