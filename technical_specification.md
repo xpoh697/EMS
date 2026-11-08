@@ -36,6 +36,7 @@ To ensure flexibility and modular configuration, the integration must implement:
         - **Bat capacity (entity)** (Сенсор емкости АКБ): energy capacity sensor (domain: sensor) [Required]
         - **Bat max charge power** (Максимальная мощность заряда АКБ): decimal numeric value (default: 3000.0) [Required]
         - **Bat max discharge power** (Максимальная мощность разряда АКБ): decimal numeric value (default: 3000.0) [Required]
+        - **Max daily battery discharge** (Лимит суточной продажи из АКБ в сеть): decimal numeric value (default: 0.0, 0 = no sale) [Required]
         - **Bat SOC (entity)** (Сенсор уровня заряда АКБ / SOC): state of charge percentage sensor (domain: sensor) [Required]
         - **Bat cur power (entity)** (Сенсор текущей мощности АКБ): power sensor (domain: sensor) [Optional]
         - **Bat voltage (entity)** (Сенсор напряжения АКБ): voltage sensor (domain: sensor) [Required]

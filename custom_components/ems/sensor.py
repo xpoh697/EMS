@@ -62,8 +62,10 @@ from .const import (
     CONF_BAT_CAPACITY_FALLBACK,
     CONF_BAT_MAX_CHARGE_POWER,
     CONF_BAT_MAX_DISCHARGE_POWER,
+    CONF_MAX_DAILY_DISCHARGE_KWH,
     DEFAULT_BAT_MAX_CHARGE_POWER,
     DEFAULT_BAT_MAX_DISCHARGE_POWER,
+    DEFAULT_MAX_DAILY_DISCHARGE_KWH,
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
@@ -404,6 +406,10 @@ async def async_setup_entry(
     bat_max_discharge_power = float(options.get(
         CONF_BAT_MAX_DISCHARGE_POWER,
         config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
+    ))
+    max_daily_discharge_kwh = float(options.get(
+        CONF_MAX_DAILY_DISCHARGE_KWH,
+        config.get(CONF_MAX_DAILY_DISCHARGE_KWH, DEFAULT_MAX_DAILY_DISCHARGE_KWH)
     ))
     bat_cur_power_entity_id = options.get(CONF_BAT_CUR_POWER_ENTITY, config.get(CONF_BAT_CUR_POWER_ENTITY))
     bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
@@ -2135,6 +2141,10 @@ class EmsDpSensor(SensorEntity):
                 CONF_BAT_MAX_DISCHARGE_POWER,
                 config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
             ))
+            max_daily_discharge_kwh = float(getattr(storage, "max_daily_discharge_kwh", options.get(
+                CONF_MAX_DAILY_DISCHARGE_KWH,
+                config.get(CONF_MAX_DAILY_DISCHARGE_KWH, DEFAULT_MAX_DAILY_DISCHARGE_KWH)
+            )))
             min_bat_soc_evening = float(getattr(storage, "min_bat_soc_evening", 15.0))
             min_bat_soc_morning = float(getattr(storage, "min_bat_soc_morning", 15.0))
             current_hour = dt_util.now().hour
@@ -2385,6 +2395,13 @@ class EmsDpSensor(SensorEntity):
             overrides = storage.get_overrides()
 
             self._reactive_debounce_time = now
+            already_sold_today = 0.0
+            sold_state = self.hass.states.get("sensor.ems_battery_to_grid_today")
+            if sold_state and sold_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    already_sold_today = float(sold_state.state)
+                except (ValueError, TypeError):
+                    already_sold_today = 0.0
             import functools
             func = functools.partial(
                 self._calculate_strategy_sync,
@@ -2415,6 +2432,8 @@ class EmsDpSensor(SensorEntity):
                 min_bat_soc_evening=min_bat_soc_evening,
                 min_bat_soc_morning=min_bat_soc_morning,
                 min_arbitrage_profit=storage.min_arbitrage_profit,
+                max_daily_discharge_kwh=max_daily_discharge_kwh,
+                already_sold_today=already_sold_today,
             )
             result = await self.hass.async_add_executor_job(func)
 
@@ -2496,6 +2515,8 @@ class EmsDpSensor(SensorEntity):
         min_bat_soc_evening: float | None = None,
         min_bat_soc_morning: float | None = None,
         min_arbitrage_profit: float = 0.0,
+        max_daily_discharge_kwh: float = 0.0,
+        already_sold_today: float = 0.0,
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
         import importlib
@@ -2604,6 +2625,13 @@ class EmsDpSensor(SensorEntity):
         tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")
         tomorrow_is_forecast = (tomorrow_source == "pradcast_forecast")
 
+        # Calculate remaining daily discharge budget
+        rem_today = max(0.0, max_daily_discharge_kwh - already_sold_today) if max_daily_discharge_kwh > 0.0 else 0.0
+        remaining_daily_discharge = {
+            today_str: rem_today,
+            tomorrow_str: max_daily_discharge_kwh,
+        }
+
         dp_config = DPConfig(
             min_sell_price=min_sell_price,
             min_discharge_price=min_discharge_price,
@@ -2612,13 +2640,15 @@ class EmsDpSensor(SensorEntity):
             battery_min_soc=int(round(base_min_soc)),
             battery_capacity=capacity,
             min_energy_to_discharge=min_energy_to_discharge,
-            disable_discharge=False,
             battery_min_soc_evening=min_bat_soc_evening,
             battery_min_soc_morning=min_bat_soc_morning,
             min_arbitrage_profit=min_arbitrage_profit,
             eta_charge=live_eta_charge,
             eta_discharge=live_eta_discharge,
             tomorrow_is_forecast=tomorrow_is_forecast,
+            max_daily_discharge_kwh=max_daily_discharge_kwh,
+            remaining_daily_discharge=remaining_daily_discharge,
+            disable_discharge=(max_daily_discharge_kwh == 0.0),
         )
 
         if boiler_average_today is None:
@@ -3263,6 +3293,10 @@ class EmsSchedulerSensor(SensorEntity):
             CONF_BAT_MAX_DISCHARGE_POWER,
             config.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
         ))
+        max_daily_discharge_kwh = float(getattr(storage, "max_daily_discharge_kwh", options.get(
+            CONF_MAX_DAILY_DISCHARGE_KWH,
+            config.get(CONF_MAX_DAILY_DISCHARGE_KWH, DEFAULT_MAX_DAILY_DISCHARGE_KWH)
+        )))
 
         # Parse capacity with fallback
         bat_capacity_fallback = float(options.get(CONF_BAT_CAPACITY_FALLBACK, config.get(CONF_BAT_CAPACITY_FALLBACK, DEFAULT_BAT_CAPACITY_FALLBACK)))
@@ -3511,6 +3545,20 @@ class EmsSchedulerSensor(SensorEntity):
 
                 if is_high_soc_override and slot_data.get("physical_mode") == "sale_pv_no_bat":
                     slot_data["physical_mode"] = "sale_pv"
+
+            # Enforce daily battery discharge limit on active slot
+            if slot_idx == 0 and slot_data.get('action') == 'discharge':
+                cur_sold = 0.0
+                _sold_st = self.hass.states.get('sensor.ems_battery_to_grid_today')
+                if _sold_st and _sold_st.state not in (None, 'unknown', 'unavailable'):
+                    try:
+                        cur_sold = float(_sold_st.state)
+                    except (ValueError, TypeError):
+                        cur_sold = 0.0
+                if max_daily_discharge_kwh == 0.0 or (max_daily_discharge_kwh > 0.0 and cur_sold >= max_daily_discharge_kwh):
+                    slot_data['action'] = 'self_consume'
+                    slot_data['physical_mode'] = 'sale_pv'
+                    slot_data['mapping_reason'] = f'daily_battery_discharge_limit_reached: {cur_sold:.2f} >= {max_daily_discharge_kwh:.2f} kWh'
 
             if slot_idx == 0 and self._grid_outage:
                 slot_data["action"] = "OffGrid"

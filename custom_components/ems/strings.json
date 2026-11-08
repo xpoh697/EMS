@@ -83,7 +83,8 @@
           "min_bat_soc_morning": "Min bat SOC morning (%)",
           "bat_soc_emergency": "Emergency battery SOC threshold (%)",
           "bat_max_charge_power": "Battery max charge power (W)",
-          "bat_max_discharge_power": "Battery max discharge power (W)"
+          "bat_max_discharge_power": "Battery max discharge power (W)",
+          "max_daily_discharge_kwh": "Daily battery sale limit (kWh, 0 = no sale)"
         }
       },
       "boiler": {

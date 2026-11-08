@@ -41,6 +41,8 @@ class DPConfig:
     eta_discharge: float = 1.0
     last_sell_hour_by_date: dict = field(default_factory=dict)
     tomorrow_is_forecast: bool = False
+    max_daily_discharge_kwh: float = 0.0
+    remaining_daily_discharge: dict = field(default_factory=dict)
 
     def get_min_soc(self, hour: int, date: str | None = None) -> float:
         """Get the hourly minimum battery SOC based on the 12:00 reference point.
@@ -120,6 +122,7 @@ def run_unified_dp(
     min_end_usable: float,
     config: DPConfig,
     remaining_hour_fraction: float = 1.0,
+    _is_second_pass: bool = False,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -318,6 +321,8 @@ def run_unified_dp(
                     if slot_idx == 1 and remaining_hour_fraction < 1.0:
                         max_discharge_power *= remaining_hour_fraction
                     max_exp = min(max_discharge_power, usable_energy)
+                    if 'max_discharge_energy' in slot:
+                        max_exp = min(max_exp, float(slot['max_discharge_energy']))
                     min_ei = 1
                     max_ei = int(round(max_exp / energy_step))
                     for ei in range(min_ei, max_ei + 1):
@@ -726,6 +731,8 @@ def run_unified_dp(
                     if slot_idx == 1 and remaining_hour_fraction < 1.0:
                         max_discharge_power *= remaining_hour_fraction
                     max_exp = min(max_discharge_power, usable_energy)
+                    if 'max_discharge_energy' in slot:
+                        max_exp = min(max_exp, float(slot['max_discharge_energy']))
                     max_possible_dis_steps = int(round(max_exp / energy_step))
                     expected_nsi = max(target_nsi, state_idx - max_possible_dis_steps)
 
@@ -760,6 +767,8 @@ def run_unified_dp(
                 if slot_idx == 1 and remaining_hour_fraction < 1.0:
                     max_discharge_power *= remaining_hour_fraction
                 max_exp = min(max_discharge_power, usable_energy)
+                if 'max_discharge_energy' in slot:
+                    max_exp = min(max_exp, float(slot['max_discharge_energy']))
                 
                 if target_nsi is not None:
                     max_possible_dis_steps = int(round(max_exp / energy_step))
@@ -1092,6 +1101,56 @@ def run_unified_dp(
         state_idx = prev_state[slot_idx][state_idx]
         if state_idx < 0:
             break
+
+    # Enforce daily battery discharge limit across calendar days via two-stage allocation
+    if config.max_daily_discharge_kwh > 0.0 and not _is_second_pass:
+        dis_by_date: dict[str, list[int]] = {}
+        for s_idx in range(n_slots):
+            if types_by_slot[s_idx] == ACT_DIS:
+                d_str = scaled_slots[s_idx].get("date")
+                if d_str:
+                    dis_by_date.setdefault(d_str, []).append(s_idx)
+
+        needs_re_run = False
+        slot_caps: dict[int, float] = {}
+        for d_str, s_indices in dis_by_date.items():
+            daily_cap = config.remaining_daily_discharge.get(d_str, config.max_daily_discharge_kwh)
+            tot_exp = sum(amounts_by_slot[idx] for idx in s_indices)
+            if tot_exp > (daily_cap + 1e-4):
+                needs_re_run = True
+                # Cap ALL sell-eligible slots on this date so non-budgeted slots cannot discharge
+                all_date_indices = [
+                    idx for idx in range(n_slots)
+                    if scaled_slots[idx].get("date") == d_str
+                    and scaled_slots[idx].get("sell_price", 0.0) >= config.min_discharge_price
+                    and scaled_slots[idx].get("sell_price", 0.0) > 0
+                ]
+                sorted_idx = sorted(all_date_indices, key=lambda idx: scaled_slots[idx].get("sell_price", 0.0), reverse=True)
+                rem_budget = daily_cap
+                for idx in sorted_idx:
+                    alloc = min(config.battery_max_discharge_power, rem_budget)
+                    slot_caps[idx] = round(alloc, 2)
+                    rem_budget = max(0.0, rem_budget - alloc)
+
+        if needs_re_run:
+            new_scaled_slots = [dict(s) for s in scaled_slots]
+            for idx, cap_val in slot_caps.items():
+                new_scaled_slots[idx]["max_discharge_energy"] = cap_val
+            _LOGGER.debug(
+                "EMS DP: Daily battery export exceeded budget. Capped %d slots and re-running DP.",
+                len(slot_caps)
+            )
+            return run_unified_dp(
+                new_scaled_slots,
+                current_usable,
+                usable_capacity,
+                cycle_cost,
+                terminal_value_per_kwh,
+                min_end_usable,
+                config,
+                remaining_hour_fraction,
+                _is_second_pass=True,
+            )
 
     # --- DEBUG: log full DP trajectory after backtracking ---
     _ACT_NAMES = {

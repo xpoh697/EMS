@@ -31,6 +31,7 @@ async def async_setup_entry(
         EmsBoilerHeatingEndHourNumber(entry.entry_id, entry.title, storage),
         EmsBoilerAutoTempLimitNumber(entry.entry_id, entry.title, storage),
         EmsMinArbitrageProfitNumber(entry.entry_id, entry.title, storage),
+        EmsMaxDailyDischargeNumber(entry.entry_id, entry.title, storage),
     ])
 
 
@@ -445,3 +446,49 @@ class EmsMinArbitrageProfitNumber(NumberEntity):
         # Fire event to trigger immediate DP recalculation
         self.hass.bus.async_fire("ems_schedule_updated")
 
+
+
+class EmsMaxDailyDischargeNumber(NumberEntity):
+    """EMS Maximum Daily Battery Discharge number entity."""
+
+    _attr_has_entity_name = True
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 100.0
+    _attr_native_step = 0.5
+    _attr_mode = NumberMode.BOX
+    _attr_icon = "mdi:battery-arrow-up-outline"
+    _attr_native_unit_of_measurement = "kWh"
+
+    def __init__(self, entry_id: str, device_name: str, storage: Any) -> None:
+        """Initialize the number entity."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._storage = storage
+        self._attr_name = "Max daily battery discharge"
+        self._attr_unique_id = f"{entry_id}_max_daily_discharge_kwh"
+        self.entity_id = "number.ems_max_daily_discharge_kwh"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float:
+        """Return the current max daily battery discharge."""
+        return float(getattr(self._storage, "max_daily_discharge_kwh", 0.0))
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the max daily battery discharge value."""
+        clamped_value = float(max(self.native_min_value, min(value, self.native_max_value)))
+        self._storage.max_daily_discharge_kwh = clamped_value
+        await self._storage.async_save()
+        self.async_write_ha_state()
+        # Fire event to trigger immediate DP recalculation
+        self.hass.bus.async_fire("ems_schedule_updated")
