@@ -94,6 +94,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register options update listener to reload when settings change
     entry.async_on_unload(entry.add_update_listener(async_update_options_listener))
     
+    # Ensure any leftover platforms from an aborted/timed-out setup are cleanly unloaded
+    try:
+        await hass.config_entries.async_unload_platforms(entry, ["sensor", "number", "select"])
+    except Exception as err:
+        _LOGGER.debug("Non-critical error during cleanup of stale platforms: %s", err)
+
     # Forward entry setups to platforms
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "number", "select"])
     
