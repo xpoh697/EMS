@@ -353,8 +353,6 @@ def run_unified_dp(
                         max_charge_power *= remaining_hour_fraction
                     max_pvc = min(pv_surplus, avail_cap, max_charge_power)
                     steps = int((max_pvc + 1e-6) / energy_step)
-                    if steps == 0 and slot_idx == 1 and remaining_hour_fraction < 1.0 and pv_surplus > 0.001:
-                        steps = 1
                     for ci in range(1, steps + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
@@ -827,8 +825,6 @@ def run_unified_dp(
                 
                 if target_nsi is not None:
                     max_possible_chg_steps = int((max_pvc + 1e-6) / energy_step)
-                    if max_possible_chg_steps == 0 and slot_idx == 1 and remaining_hour_fraction < 1.0 and pv_surplus > 0.001:
-                        max_possible_chg_steps = 1
                     desired_chg_steps = min(target_nsi - state_idx, max_possible_chg_steps)
                     min_ci = max(1, int(round(config.min_energy_to_discharge / energy_step))) if config.min_energy_to_discharge > 0 else 1
                     if desired_chg_steps >= min_ci:
@@ -839,8 +835,6 @@ def run_unified_dp(
                         _update(nsi, reward, ACT_PV_CHARGE, chg)
                 elif override_action:
                     chg_steps = int((max_pvc + 1e-6) / energy_step)
-                    if chg_steps == 0 and slot_idx == 1 and remaining_hour_fraction < 1.0 and pv_surplus > 0.001:
-                        chg_steps = 1
                     if chg_steps >= 1:
                         chg = chg_steps * energy_step
                         nsi = min(max_energy_idx, max(0, state_idx + chg_steps))
@@ -849,8 +843,6 @@ def run_unified_dp(
                         _update(nsi, reward, ACT_PV_CHARGE, chg)
                 else:
                     steps = int((max_pvc + 1e-6) / energy_step)
-                    if steps == 0 and slot_idx == 1 and remaining_hour_fraction < 1.0 and pv_surplus > 0.001:
-                        steps = 1
                     for ci in range(1, steps + 1):
                         chg = ci * energy_step
                         nsi = min(max_energy_idx, max(0, int(round((usable_energy + chg) / energy_step))))
