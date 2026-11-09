@@ -2819,12 +2819,14 @@ class EmsDpSensor(SensorEntity):
                 action = "paid_import"
                 energy = pim_keys[key].get("planned_grid_import_kwh", 0.0)
             else:
+                slot_rem_frac = remaining_hour_fraction if idx == 0 else 1.0
                 total_consumption = (
                     slot.get("consumption_kwh", 0.0)
                     + slot.get("ev_kwh", 0.0)
                     + slot.get("planned_boiler_kwh", 0.0)
-                )
-                pv_surplus = max(0.0, slot.get("pv_kwh", 0.0) - total_consumption)
+                ) * slot_rem_frac
+                effective_pv = slot.get("pv_kwh", 0.0) * slot_rem_frac
+                pv_surplus = max(0.0, effective_pv - total_consumption)
                 if pv_surplus > 0.1:
                     action = "solar_export"
                     solar_export_hours.append({
@@ -2832,7 +2834,7 @@ class EmsDpSensor(SensorEntity):
                         "hour": slot["hour"],
                         "pv_kwh": round(pv_surplus, 2),
                     })
-                elif slot.get("pv_kwh", 0.0) > 0.05:
+                elif effective_pv > 0.05:
                     action = "normal"
 
             if idx == 0:
@@ -2899,12 +2901,23 @@ class EmsDpSensor(SensorEntity):
                     if soc >= 92.0 or net_grid_needed < 0.5:
                         action = "pv_charge"
 
-                # End-of-hour lock: if within 300s of the hour boundary and same hour,
+                # Anti-chattering for pv_charge: prevent mid-hour drop to solar_export/idle/normal
+                # when pv_charge was active in this hour and battery is not fully saturated
+                if (
+                    self._last_hour_action == "pv_charge"
+                    and action in ("solar_export", "idle", "normal")
+                    and now.hour == self._last_action_hour
+                    and soc < 99.0
+                    and not slot.get("override")
+                ):
+                    action = "pv_charge"
+
+                # End-of-hour lock: if within 900s of the hour boundary and same hour,
                 # prevent transient drop or premature cutoff if battery is within safe limits
                 now_m = now.minute
                 now_s = now.second
                 rem_sec = (59 - now_m) * 60 + (60 - now_s)
-                if rem_sec < 300 and now.hour == self._last_action_hour:
+                if rem_sec < 900 and now.hour == self._last_action_hour and not slot.get("override"):
                     if self._last_hour_action == "discharge" and soc > (effective_min_soc + 0.2):
                         action = "discharge"
                     elif self._last_hour_action == "pv_charge" and soc < 99.0:
