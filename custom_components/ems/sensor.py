@@ -877,6 +877,7 @@ async def async_setup_entry(
     )
     conversion_loss_sensor.set_weekly_sensor(weekly_loss_sensor)
     entities.append(weekly_loss_sensor)
+    hass.data[DOMAIN][entry.entry_id]["weekly_loss_sensor"] = weekly_loss_sensor
 
     # Daily energy accounting sensors (PV to battery & Battery to grid)
     pv_to_bat_sensor = EmsPvToBatteryTodaySensor(
@@ -6170,6 +6171,16 @@ class EmsWeeklyLossRateSensor(RestoreSensor, SensorEntity):
         self.async_write_ha_state()
         self._publish_to_domain()
 
+    def clear_history(self, target_date: str | None = None) -> None:
+        """Clear all daily history or remove a specific date."""
+        if target_date:
+            self._history_7d = [d for d in self._history_7d if d.get("date") != target_date]
+        else:
+            self._history_7d = []
+        self._recalculate_weekly()
+        self._publish_to_domain()
+        self.async_write_ha_state()
+
     def record_day(self, date_str: str, input_kwh: float, losses_kwh: float) -> None:
         """Called by conversion sensor at midnight with completed day results."""
         if input_kwh < 1.0:
@@ -6189,6 +6200,7 @@ class EmsWeeklyLossRateSensor(RestoreSensor, SensorEntity):
         self._publish_to_domain()
 
     def _recalculate_weekly(self) -> None:
+        MAX_PLAUSIBLE_LOSS_PCT = 25.0
         if not self._history_7d:
             if getattr(self._conversion_sensor, "_total_losses_pct", 0.0) > 0.0:
                 self._weekly_loss_pct = self._conversion_sensor._total_losses_pct
@@ -6199,7 +6211,22 @@ class EmsWeeklyLossRateSensor(RestoreSensor, SensorEntity):
             self._total_losses_7d_kwh = 0.0
             return
 
-        valid_days = [d for d in self._history_7d if float(d.get("input_kwh", 0.0)) >= 1.0]
+        valid_days = []
+        for d in self._history_7d:
+            inp = float(d.get("input_kwh", 0.0))
+            loss = float(d.get("loss_pct", 0.0))
+            if inp < 1.0:
+                continue
+            if loss > MAX_PLAUSIBLE_LOSS_PCT or loss < 0.0:
+                _LOGGER.warning(
+                    "EMS: Discarded battery efficiency outlier on %s: loss_pct=%.1f%% (> %.1f%%)",
+                    d.get("date"),
+                    loss,
+                    MAX_PLAUSIBLE_LOSS_PCT,
+                )
+                continue
+            valid_days.append(d)
+
         if not valid_days:
             self._weekly_loss_pct = 13.5
             self._weekly_rte_pct = 86.5

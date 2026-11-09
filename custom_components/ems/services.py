@@ -28,6 +28,11 @@ SERVICE_CLEAR_ALL_OVERRIDES = "clear_all_overrides"
 SERVICE_START_CALIBRATION = "start_calibration"
 SERVICE_RESET_CALIBRATION = "reset_calibration"
 SERVICE_RESET_PV_FACTOR = "reset_pv_factor"
+SERVICE_RESET_EFFICIENCY_HISTORY = "reset_battery_efficiency_history"
+
+RESET_EFFICIENCY_HISTORY_SCHEMA = vol.Schema({
+    vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{4}-\d{2}-\d{2}$")),
+})
 
 SET_OVERRIDE_SCHEMA = vol.Schema({
     vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{4}-\d{2}-\d{2}$")),
@@ -195,6 +200,27 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
         DOMAIN, SERVICE_RESET_PV_FACTOR, handle_reset_pv_factor
     )
 
+    async def handle_reset_efficiency_history(call: ServiceCall) -> None:
+        """Handle resetting or removing an outlier day from battery efficiency history."""
+        target_date = call.data.get("date")
+        sensor = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("weekly_loss_sensor")
+        if not sensor:
+            _LOGGER.error("Weekly loss rate sensor not available for entry %s", entry.entry_id)
+            return
+        sensor.clear_history(target_date)
+        _LOGGER.info(
+            "Battery efficiency history updated via service: %s",
+            f"removed date {target_date}" if target_date else "all history cleared",
+        )
+        hass.bus.async_fire("ems_schedule_updated")
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESET_EFFICIENCY_HISTORY,
+        handle_reset_efficiency_history,
+        schema=RESET_EFFICIENCY_HISTORY_SCHEMA,
+    )
+
     # ── Boiler mode override services ────────────────────────────────────────
 
     async def handle_set_boiler_override(call: ServiceCall) -> None:
@@ -265,6 +291,7 @@ def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_START_CALIBRATION,
         SERVICE_RESET_CALIBRATION,
         SERVICE_RESET_PV_FACTOR,
+        SERVICE_RESET_EFFICIENCY_HISTORY,
         "start_manual_heating",
         "stop_manual_heating",
         SERVICE_SET_BOILER_OVERRIDE,

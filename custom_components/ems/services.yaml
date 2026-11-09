@@ -271,3 +271,15 @@ clear_boiler_override:
 clear_all_boiler_overrides:
   name: Clear All Boiler Mode Overrides
   description: Removes all forced boiler mode overrides, restoring full DP optimizer control for all hours.
+
+reset_battery_efficiency_history:
+  name: Reset battery efficiency history
+  description: Clears all daily efficiency history or removes a specific outlier date from sensor.ems_battery_weekly_loss_rate.
+  fields:
+    date:
+      name: Date
+      description: Specific date (YYYY-MM-DD) to remove from history. Omit to reset entire history.
+      required: false
+      example: "2026-11-07"
+      selector:
+        text:
