@@ -906,6 +906,12 @@ async def async_setup_entry(
     daily_coordinator.async_start()
     entry.async_on_unload(daily_coordinator.async_stop)
 
+    max_daily_profit_sensor = EmsMaxDailyProfitSensor(
+        entry.entry_id,
+        entry.title,
+    )
+    entities.append(max_daily_profit_sensor)
+
     if entities:
         async_add_entities(entities)
 
@@ -6511,3 +6517,249 @@ class EmsDailyEnergyAccountingCoordinator:
 
         self._pv_sensor.add_power_sample(p_pv_to_bat, now_ts, cap_chg)
         self._grid_sensor.add_power_sample(p_bat_to_grid, now_ts, cap_exp)
+
+
+
+class EmsMaxDailyProfitSensor(RestoreSensor, SensorEntity):
+    """EMS sensor that tracks all-time maximum daily profit and top-10 historical records."""
+
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:trophy"
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self,
+        entry_id: str,
+        device_name: str,
+    ) -> None:
+        """Initialize the max daily profit sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+
+        self._attr_name = "Max Daily Profit"
+        self._attr_unique_id = f"{entry_id}_max_daily_profit"
+        self.entity_id = "sensor.ems_max_daily_profit"
+
+        self._records: dict[str, float] = {}
+        self._max_profit: float = 0.0
+        self._max_profit_date: str | None = None
+        self._last_written_today_profit: float = 0.0
+        self._last_day: int = dt_util.now().day
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return native currency unit."""
+        if hasattr(self.hass, "config") and hasattr(self.hass.config, "currency"):
+            return self.hass.config.currency
+        return "PLN"
+
+    @property
+    def native_value(self) -> float:
+        """Return the all-time maximum daily profit."""
+        return round(self._max_profit, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return top 10 daily profits and statistics."""
+        sorted_records = sorted(
+            self._records.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        top_10 = [
+            {
+                "rank": rank,
+                "date": d,
+                "profit": round(val, 2),
+            }
+            for rank, (d, val) in enumerate(sorted_records[:10], 1)
+        ]
+        return {
+            "all_time_high_date": self._max_profit_date,
+            "top_10_profits": top_10,
+            "days_tracked": len(self._records),
+            "_records": self._records,
+            "_last_day": self._last_day,
+        }
+
+    def _recalculate_top(self) -> None:
+        """Find max profit and all_time_high_date."""
+        if not self._records:
+            self._max_profit = 0.0
+            self._max_profit_date = None
+            return
+
+        sorted_records = sorted(self._records.items(), key=lambda x: x[1], reverse=True)
+        top_date, top_val = sorted_records[0]
+        self._max_profit = round(top_val, 2)
+        self._max_profit_date = top_date
+
+    def _seed_from_roi_and_today(self) -> None:
+        """Seed initial history from sensor.roi _daily_history and today_profit."""
+        now = dt_util.now()
+        today = now.date()
+        today_str = today.strftime("%Y-%m-%d")
+
+        roi_state = self.hass.states.get("sensor.roi")
+        if roi_state and roi_state.attributes:
+            raw_history = roi_state.attributes.get("_daily_history")
+            if isinstance(raw_history, list) and raw_history:
+                n = len(raw_history)
+                for idx, p in enumerate(raw_history):
+                    try:
+                        p_val = float(p)
+                        if 0.0 < p_val <= 500.0:
+                            days_ago = n - idx
+                            past_date = today - timedelta(days=days_ago)
+                            self._records[past_date.strftime("%Y-%m-%d")] = round(p_val, 2)
+                    except (ValueError, TypeError):
+                        pass
+
+        profit_state = self.hass.states.get("sensor.today_profit")
+        if profit_state and profit_state.state not in (None, "unknown", "unavailable"):
+            try:
+                today_val = float(profit_state.state)
+                if 0.0 < today_val <= 500.0:
+                    self._records[today_str] = round(today_val, 2)
+                    self._last_written_today_profit = round(today_val, 2)
+            except (ValueError, TypeError):
+                pass
+
+        self._recalculate_top()
+
+    def _update_today_profit(self) -> None:
+        """Check today_profit sensor upon startup."""
+        profit_state = self.hass.states.get("sensor.today_profit")
+        if profit_state and profit_state.state not in (None, "unknown", "unavailable"):
+            try:
+                today_val = float(profit_state.state)
+                today_str = dt_util.now().strftime("%Y-%m-%d")
+                if 0.0 < today_val <= 500.0:
+                    cur = self._records.get(today_str, 0.0)
+                    if today_val > cur:
+                        self._records[today_str] = round(today_val, 2)
+                        self._last_written_today_profit = round(today_val, 2)
+            except (ValueError, TypeError):
+                pass
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity registry addition and restore historical states."""
+        await super().async_added_to_hass()
+
+        last_state = await self.async_get_last_state()
+        if last_state:
+            restored_records = {}
+            internal_records = last_state.attributes.get("_records")
+            if isinstance(internal_records, dict):
+                for k, v in internal_records.items():
+                    try:
+                        restored_records[str(k)] = float(v)
+                    except (ValueError, TypeError):
+                        pass
+
+            top_list = last_state.attributes.get("top_10_profits")
+            if isinstance(top_list, list):
+                for item in top_list:
+                    if isinstance(item, dict) and "date" in item and "profit" in item:
+                        try:
+                            restored_records[str(item["date"])] = float(item["profit"])
+                        except (ValueError, TypeError):
+                            pass
+
+            self._records = restored_records
+            self._max_profit_date = last_state.attributes.get("all_time_high_date")
+            try:
+                self._max_profit = float(last_state.state)
+            except (ValueError, TypeError):
+                self._max_profit = 0.0
+            self._last_day = int(last_state.attributes.get("_last_day", dt_util.now().day))
+
+        # Seed from sensor.roi if empty or fewer than 5 records
+        if len(self._records) < 5:
+            self._seed_from_roi_and_today()
+        else:
+            self._update_today_profit()
+            self._recalculate_top()
+
+        # Track changes to sensor.today_profit
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, ["sensor.today_profit"], self._async_profit_changed
+            )
+        )
+
+        # Midnight trigger
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._async_midnight_trigger, hour=0, minute=0, second=0
+            )
+        )
+
+    @callback
+    def _async_profit_changed(self, event) -> None:
+        """Handle sensor.today_profit state changes with throttling."""
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in (None, "unknown", "unavailable"):
+            return
+
+        try:
+            today_val = float(new_state.state)
+        except (ValueError, TypeError):
+            return
+
+        # Sanity check: valid profit between 0 and 500 PLN
+        if today_val <= 0.0 or today_val > 500.0:
+            return
+
+        today_str = dt_util.now().strftime("%Y-%m-%d")
+        current_today_record = self._records.get(today_str, 0.0)
+
+        # Only update if value increased
+        if today_val <= current_today_record:
+            return
+
+        self._records[today_str] = round(today_val, 2)
+        old_max = self._max_profit
+        self._recalculate_top()
+
+        is_new_all_time_high = (self._max_profit > old_max and self._max_profit_date == today_str)
+        profit_delta = today_val - self._last_written_today_profit
+
+        # Write state immediately on new ATH or on >= 0.5 PLN increments
+        if is_new_all_time_high or profit_delta >= 0.5:
+            self._last_written_today_profit = round(today_val, 2)
+            self.async_write_ha_state()
+
+    async def _async_midnight_trigger(self, datetime_now) -> None:
+        """Lock final day profit at midnight and roll over to new day."""
+        now = dt_util.now()
+        if now.day == self._last_day:
+            return
+
+        ems_log(self.hass, _LOGGER, logging.INFO, f"EMS MaxDailyProfit midnight rollover: closed day with records count {len(self._records)}")
+
+        self._last_day = now.day
+        self._last_written_today_profit = 0.0
+
+        # Prune if too large (> 365 records): keep top 50 all-time + most recent 365
+        if len(self._records) > 365:
+            top_keys = set(k for k, _ in sorted(self._records.items(), key=lambda x: x[1], reverse=True)[:50])
+            recent_keys = set(sorted(self._records.keys())[-365:])
+            keep_keys = top_keys | recent_keys
+            self._records = {k: v for k, v in self._records.items() if k in keep_keys}
+
+        self._recalculate_top()
+        self.async_write_ha_state()
