@@ -2220,18 +2220,15 @@ class EmsDpSensor(SensorEntity):
             except (ValueError, TypeError):
                 bat_soc_emergency_val = 10.0
 
-            if isinstance(soc, (int, float)) and soc <= bat_soc_emergency_val:
+            is_emergency = isinstance(soc, (int, float)) and soc <= bat_soc_emergency_val
+            if is_emergency:
                 ems_log(
                     self.hass,
                     _LOGGER,
                     logging.WARNING,
-                    f"Battery SOC {soc}% is at or below emergency threshold {bat_soc_emergency_val}%. Forcing 'bat_emergency' state."
+                    f"Battery SOC {soc}% is at or below emergency threshold {bat_soc_emergency_val}%. Battery in emergency state.",
                 )
                 self._last_calc_soc = soc  # prevent listener from getting stuck
-                self._state = "bat_emergency"
-                self._error_msg = None
-                self.async_write_ha_state()
-                return
 
             # Apply SOC hysteresis
             effective_soc = soc
@@ -2444,7 +2441,6 @@ class EmsDpSensor(SensorEntity):
             )
             result = await self.hass.async_add_executor_job(func)
 
-            self._state = result.get("current_action", "idle")
             self._charge_hours = result.get("charge_hours", [])
             self._discharge_hours = result.get("discharge_hours", [])
             self._pv_charge_hours = result.get("pv_charge_hours", [])
@@ -2453,6 +2449,16 @@ class EmsDpSensor(SensorEntity):
             self._solar_export_hours = result.get("solar_export_hours", [])
             self._schedule = result.get("schedule", [])
             self._stats = result.get("stats", {})
+
+            if is_emergency:
+                self._state = "bat_emergency"
+                if self._schedule:
+                    self._schedule[0]["action"] = "bat_emergency"
+                    self._schedule[0]["physical_mode"] = "bat_emergency"
+                    self._schedule[0]["energy_kwh"] = 0.0
+                    self._schedule[0]["power_w"] = 0.0
+            else:
+                self._state = result.get("current_action", "idle")
             self._error_msg = result.get("error")
             self._tomorrow_is_forecast = (self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source") == "pradcast_forecast")
             if self._error_msg:
