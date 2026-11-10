@@ -472,21 +472,29 @@ def run_unified_dp(
                                     net_needed = max(net_needed, home_saving_cap)
                                 max_gc = min(max_gc, net_needed)
                             else:
-                                # Arbitrage is profitable, but must not displace cheap solar!
-                                # If future solar can be sold at a higher price than current charging cost,
-                                # charging is allowed up to that profitable sale volume.
-                                pv_cheap_to_reserve = 0.0
-                                effective_charge_cost = effective_buy_cost + cycle_cost
-                                for f_slot in future_slots[1:]:
-                                    f_sell = f_slot.get("sell_price", 0.0)
-                                    f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0) + f_slot.get("ev_kwh", 0.0)
-                                    f_net_pv = max(0.0, f_slot.get("pv_kwh", 0.0) - f_cons)
-                                    if f_sell < effective_charge_cost:
-                                        pv_cheap_to_reserve += f_net_pv
-                                    if f_sell >= max_future_sell - 1e-4:
-                                        break
-                                allowed_arbitrage_gc = max(0.0, avail_cap - pv_cheap_to_reserve)
-                                max_gc = min(max_gc, allowed_arbitrage_gc)
+                                # Daytime solar window check: hours 7-17 with solar generation ahead
+                                is_daytime_solar_window = (
+                                    curr_slot.get("hour", 0) in range(7, 18)
+                                    and any(s.get("pv_kwh", 0.0) > 0.2 for s in future_slots[:6])
+                                )
+
+                                if is_daytime_solar_window and buy_price > (ref_night_buy * 1.25):
+                                    # Daytime grid arbitrage when grid is significantly more expensive than night
+                                    # is strictly prohibited so free solar is not displaced by expensive grid power.
+                                    max_gc = 0.0
+                                else:
+                                    # Arbitrage is profitable, but must not displace cheap solar!
+                                    # Sum all net solar surplus before peak selling hour with 0.85 confidence factor:
+                                    net_solar_ahead = 0.0
+                                    for f_slot in future_slots[1:]:
+                                        f_sell = f_slot.get("sell_price", 0.0)
+                                        f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0) + f_slot.get("ev_kwh", 0.0)
+                                        f_net_pv = max(0.0, f_slot.get("pv_kwh", 0.0) - f_cons)
+                                        net_solar_ahead += f_net_pv
+                                        if f_sell >= max_future_sell - 1e-4:
+                                            break
+                                    allowed_arbitrage_gc = max(0.0, avail_cap - (net_solar_ahead * 0.85))
+                                    max_gc = min(max_gc, allowed_arbitrage_gc)
 
                     min_ci = 1 if (slot_idx == 1 or avail_cap < config.min_energy_to_discharge) else (max(1, int(round(config.min_energy_to_discharge / energy_step))) if config.min_energy_to_discharge > 0 else 1)
                     for ci in range(min_ci, int(round(max_gc / energy_step)) + 1):
@@ -961,21 +969,29 @@ def run_unified_dp(
                                 net_needed = max(net_needed, home_saving_cap)
                             max_gc = min(max_gc, net_needed)
                         else:
-                            # Arbitrage is profitable, but must not displace cheap solar!
-                            # If future solar can be sold at a higher price than current charging cost,
-                            # charging is allowed up to that profitable sale volume.
-                            pv_cheap_to_reserve = 0.0
-                            effective_charge_cost = effective_buy_cost + cycle_cost
-                            for f_slot in future_slots[1:]:
-                                f_sell = f_slot.get("sell_price", 0.0)
-                                f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0) + f_slot.get("ev_kwh", 0.0)
-                                f_net_pv = max(0.0, f_slot.get("pv_kwh", 0.0) - f_cons)
-                                if f_sell < effective_charge_cost:
-                                    pv_cheap_to_reserve += f_net_pv
-                                if f_sell >= max_future_sell - 1e-4:
-                                    break
-                            allowed_arbitrage_gc = max(0.0, avail_cap - pv_cheap_to_reserve)
-                            max_gc = min(max_gc, allowed_arbitrage_gc)
+                            # Daytime solar window check: hours 7-17 with solar generation ahead
+                            is_daytime_solar_window = (
+                                curr_slot.get("hour", 0) in range(7, 18)
+                                and any(s.get("pv_kwh", 0.0) > 0.2 for s in future_slots[:6])
+                            )
+
+                            if is_daytime_solar_window and buy_price > (ref_night_buy * 1.25):
+                                # Daytime grid arbitrage when grid is significantly more expensive than night
+                                # is strictly prohibited so free solar is not displaced by expensive grid power.
+                                max_gc = 0.0
+                            else:
+                                # Arbitrage is profitable, but must not displace cheap solar!
+                                # Sum all net solar surplus before peak selling hour with 0.85 confidence factor:
+                                net_solar_ahead = 0.0
+                                for f_slot in future_slots[1:]:
+                                    f_sell = f_slot.get("sell_price", 0.0)
+                                    f_cons = f_slot.get("consumption_kwh", 0.0) + f_slot.get("planned_boiler_kwh", 0.0) + f_slot.get("ev_kwh", 0.0)
+                                    f_net_pv = max(0.0, f_slot.get("pv_kwh", 0.0) - f_cons)
+                                    net_solar_ahead += f_net_pv
+                                    if f_sell >= max_future_sell - 1e-4:
+                                        break
+                                allowed_arbitrage_gc = max(0.0, avail_cap - (net_solar_ahead * 0.85))
+                                max_gc = min(max_gc, allowed_arbitrage_gc)
                 
                 if target_nsi is not None:
                     max_possible_chg_steps = int(round(max_gc / energy_step))
