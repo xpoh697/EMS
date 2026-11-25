@@ -2632,10 +2632,6 @@ class EmsDpSensor(SensorEntity):
         reserve = sum(profile[h] for h in night_hours if h < len(profile))
         min_end_usable = min(reserve, usable_capacity)
 
-        horizon_buy = [slot["buy_price"] for slot in slots]
-        global_min_buy = min(horizon_buy) if horizon_buy else 0.0
-        terminal_value = max(min_sell_price, global_min_buy + cycle_cost)
-
         # Dynamically obtain live weekly round-trip efficiency from sensor/bus
         if weekly_rte is None:
             weekly_rte = float(self.hass.data.get(DOMAIN, {}).get("weekly_round_trip_efficiency", 0.865))
@@ -2646,6 +2642,17 @@ class EmsDpSensor(SensorEntity):
         except Exception:
             live_eta_charge = 0.930
             live_eta_discharge = 0.930
+
+        horizon_buy = [slot["buy_price"] for slot in slots]
+        global_min_buy = min(horizon_buy) if horizon_buy else 0.0
+        global_max_buy = max(horizon_buy) if horizon_buy else 0.0
+        if (global_max_buy - global_min_buy) < 0.05:
+            # Flat tariff: never value end-of-horizon reserve above immediate self-consumption value,
+            # otherwise DP hoards PV-charged energy forever instead of feeding the house.
+            min_end_usable = 0.0
+            terminal_value = max(min_sell_price, round(global_min_buy * live_eta_discharge - cycle_cost - 0.02, 4))
+        else:
+            terminal_value = max(min_sell_price, global_min_buy + cycle_cost)
 
         if tomorrow_is_forecast is None:
             tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")

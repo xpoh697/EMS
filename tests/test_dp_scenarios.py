@@ -1979,6 +1979,48 @@ class TestFixedTariffSupport(unittest.TestCase):
         self.assertEqual(chg, [], f"Flat tariff must stay idle/SOL instead of grid-charging for reserve, got {chg}")
         self.assertEqual(dis, [], f"Should not export when sell=0.15 < min_sell_price, got {dis}")
 
+    def test_dp_flat_tariff_uses_pv_charged_energy_for_self_consumption(self):
+        """On flat buy=1.20 / sell=0.15, battery must charge from PV surplus and then self-consume for house load."""
+        config = DPConfig(
+            min_sell_price=0.20,
+            min_discharge_price=0.50,
+            battery_max_discharge_power=6.5,
+            battery_max_charge_power=6.5,
+            battery_min_soc=15,
+            battery_capacity=16.0,
+            min_energy_to_discharge=0.5,
+            battery_min_soc_evening=15.0,
+            battery_min_soc_morning=15.0,
+            min_arbitrage_profit=0.30,
+            eta_charge=0.93,
+            eta_discharge=0.93,
+            tomorrow_is_forecast=False,
+        )
+        slots = [
+            {"date": "2026-11-25", "hour": 10, "buy_price": 1.20, "sell_price": 0.15, "pv_kwh": 2.0, "consumption_kwh": 0.3},
+            {"date": "2026-11-25", "hour": 11, "buy_price": 1.20, "sell_price": 0.15, "pv_kwh": 0.0, "consumption_kwh": 0.8},
+            {"date": "2026-11-25", "hour": 12, "buy_price": 1.20, "sell_price": 0.15, "pv_kwh": 0.0, "consumption_kwh": 0.8},
+            {"date": "2026-11-25", "hour": 13, "buy_price": 1.20, "sell_price": 0.15, "pv_kwh": 0.0, "consumption_kwh": 0.8},
+        ]
+        cycle_cost = 0.109375
+        flat_terminal = max(config.min_sell_price, round(1.20 * config.eta_discharge - cycle_cost - 0.02, 4))
+
+        chg, dis, pvc, sc, pim, stats = run_unified_dp(
+            slots=slots,
+            current_usable=1.12,  # 22% SOC
+            usable_capacity=13.6,
+            cycle_cost=cycle_cost,
+            terminal_value_per_kwh=flat_terminal,
+            min_end_usable=0.0,
+            config=config,
+            remaining_hour_fraction=1.0,
+        )
+
+        self.assertEqual(chg, [])
+        self.assertEqual(dis, [])
+        self.assertTrue(len(pvc) >= 1, f"Expected PV charge at 10h, got {pvc}")
+        self.assertTrue(len(sc) >= 1, f"Expected self-consumption discharge in 11h-13h, got {sc}")
+
 
 if __name__ == "__main__":
     unittest.main()
