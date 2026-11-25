@@ -2826,13 +2826,16 @@ class EmsDpSensor(SensorEntity):
                 energy = pim_keys[key].get("planned_grid_import_kwh", 0.0)
             else:
                 slot_rem_frac = remaining_hour_fraction if idx == 0 else 1.0
-                total_consumption = (
+                slot_consumption_rate = (
                     slot.get("consumption_kwh", 0.0)
                     + slot.get("ev_kwh", 0.0)
                     + slot.get("planned_boiler_kwh", 0.0)
-                ) * slot_rem_frac
-                effective_pv = slot.get("pv_kwh", 0.0) * slot_rem_frac
+                )
+                slot_pv_rate = slot.get("pv_kwh", 0.0)
+                total_consumption = slot_consumption_rate * slot_rem_frac
+                effective_pv = slot_pv_rate * slot_rem_frac
                 pv_surplus = max(0.0, effective_pv - total_consumption)
+                pv_surplus_rate = max(0.0, slot_pv_rate - slot_consumption_rate)
                 if pv_surplus > 0.1:
                     action = "solar_export"
                     solar_export_hours.append({
@@ -2840,7 +2843,7 @@ class EmsDpSensor(SensorEntity):
                         "hour": slot["hour"],
                         "pv_kwh": round(pv_surplus, 2),
                     })
-                elif slot.get("pv_kwh", 0.0) > 0.01:
+                elif pv_surplus_rate > 0.01:
                     action = "normal"
 
             if idx == 0:
