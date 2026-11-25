@@ -10,17 +10,6 @@ from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
 
-import sys
-import importlib
-for _mod in ("const", "utils", "services", "sensor", "dp_engine", "number", "select"):
-    _full = f"custom_components.ems.{_mod}"
-    if _full in sys.modules:
-        try:
-            importlib.reload(sys.modules[_full])
-            _LOGGER.info("EMS storage successfully triggered reload of %s", _full)
-        except Exception as _e:
-            _LOGGER.warning("Could not reload %s: %s", _full, _e)
-
 STORAGE_VERSION = 1
 STORAGE_KEY = "ems_schedule_{entry_id}"
 
@@ -46,6 +35,7 @@ class EmsScheduleStorage:
         self.boiler_auto_temp_limit: float = 60.0
         self.min_arbitrage_profit: float = 0.0
         self.max_daily_discharge_kwh: float = 0.0
+        self.monthly_baselines: dict[str, dict[str, dict[str, Any]]] = {}
 
     @property
     def min_bat_soc(self) -> float:
@@ -116,6 +106,7 @@ class EmsScheduleStorage:
             self.boiler_auto_temp_limit = 60.0
             self.min_arbitrage_profit = 0.0
             self.max_daily_discharge_kwh = float(entry.options.get('max_daily_discharge_kwh', entry.data.get('max_daily_discharge_kwh', 0.0))) if entry else 0.0
+            self.monthly_baselines = {}
         else:
             self._overrides = data.get("overrides", {})
             self._boiler_overrides = data.get("boiler_overrides", {})
@@ -141,7 +132,9 @@ class EmsScheduleStorage:
                 self.max_daily_discharge_kwh = float(data.get("max_daily_discharge_kwh", entry.options.get('max_daily_discharge_kwh', 0.0) if entry else 0.0))
             except (ValueError, TypeError):
                 self.min_arbitrage_profit = 0.0
-            self.max_daily_discharge_kwh = float(entry.options.get('max_daily_discharge_kwh', entry.data.get('max_daily_discharge_kwh', 0.0))) if entry else 0.0
+                self.max_daily_discharge_kwh = float(entry.options.get('max_daily_discharge_kwh', entry.data.get('max_daily_discharge_kwh', 0.0))) if entry else 0.0
+            raw_mb = data.get("monthly_baselines", {})
+            self.monthly_baselines = raw_mb if isinstance(raw_mb, dict) else {}
         _LOGGER.debug(
             "EMS Schedule Storage loaded: %d dates with overrides for entry %s",
             len(self._overrides),
@@ -165,6 +158,7 @@ class EmsScheduleStorage:
             "boiler_auto_temp_limit": self.boiler_auto_temp_limit,
             "min_arbitrage_profit": self.min_arbitrage_profit,
             "max_daily_discharge_kwh": self.max_daily_discharge_kwh,
+            "monthly_baselines": self.monthly_baselines,
         })
 
     def get_overrides(self) -> dict[str, dict[str, str]]:
@@ -254,6 +248,38 @@ class EmsScheduleStorage:
         if dates_to_remove or boiler_dates_to_remove:
             self.hass.async_create_task(self.async_save())
             _LOGGER.debug("EMS Cleaned up old overrides: %s, boiler: %s", dates_to_remove, boiler_dates_to_remove)
+
+    def get_monthly_baseline(self, month_key: str, sensor_id: str) -> dict[str, Any] | None:
+        """Return cached baseline metadata for a calendar month and sensor."""
+        month_map = self.monthly_baselines.get(month_key)
+        if not isinstance(month_map, dict):
+            return None
+        rec = month_map.get(sensor_id)
+        return dict(rec) if isinstance(rec, dict) else None
+
+    async def async_set_monthly_baseline(
+        self,
+        month_key: str,
+        sensor_id: str,
+        baseline_state: float,
+        source: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist monthly counter baseline and keep only the latest 3 months."""
+        month_map = self.monthly_baselines.setdefault(month_key, {})
+        record: dict[str, Any] = {
+            "baseline_state": float(baseline_state),
+            "source": source,
+            "updated_at": dt_util.now().isoformat(),
+        }
+        if extra:
+            record.update(extra)
+        month_map[sensor_id] = record
+        keys_sorted = sorted(self.monthly_baselines.keys())
+        if len(keys_sorted) > 3:
+            for old_key in keys_sorted[:-3]:
+                del self.monthly_baselines[old_key]
+        await self.async_save()
 
 
 

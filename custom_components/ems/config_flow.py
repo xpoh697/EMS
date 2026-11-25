@@ -41,9 +41,15 @@ from .const import (
     CONF_BAT_MAX_CHARGE_POWER,
     CONF_BAT_MAX_DISCHARGE_POWER,
     CONF_MAX_DAILY_DISCHARGE_KWH,
+    CONF_LIMIT_EXPORT_TO_MONTHLY_PV,
+    CONF_PV_TOTAL_PRODUCTION_SENSOR,
+    CONF_MONTHLY_EXPORT_SENSOR,
+    CONF_MONTHLY_EXPORT_SAFETY_MARGIN_KWH,
     DEFAULT_BAT_MAX_CHARGE_POWER,
     DEFAULT_BAT_MAX_DISCHARGE_POWER,
     DEFAULT_MAX_DAILY_DISCHARGE_KWH,
+    DEFAULT_LIMIT_EXPORT_TO_MONTHLY_PV,
+    DEFAULT_MONTHLY_EXPORT_SAFETY_MARGIN_KWH,
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
@@ -389,8 +395,13 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         """Handle the Battery optimization settings step."""
         if user_input is not None:
             self._user_input.update(user_input)
-            if not self._user_input.get(CONF_BAT_CAPACITY_ENTITY):
-                self._user_input.pop(CONF_BAT_CAPACITY_ENTITY, None)
+            for _opt_ent in (
+                CONF_BAT_CAPACITY_ENTITY,
+                CONF_PV_TOTAL_PRODUCTION_SENSOR,
+                CONF_MONTHLY_EXPORT_SENSOR,
+            ):
+                if not user_input.get(_opt_ent):
+                    self._user_input.pop(_opt_ent, None)
             return self.async_create_entry(title="", data=self._user_input)
 
         def get_value(key):
@@ -405,6 +416,8 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         bat_max_charge_power = self._user_input.get(CONF_BAT_MAX_CHARGE_POWER, DEFAULT_BAT_MAX_CHARGE_POWER)
         bat_max_discharge_power = self._user_input.get(CONF_BAT_MAX_DISCHARGE_POWER, DEFAULT_BAT_MAX_DISCHARGE_POWER)
         max_daily_discharge = float(self._user_input.get(CONF_MAX_DAILY_DISCHARGE_KWH, DEFAULT_MAX_DAILY_DISCHARGE_KWH))
+        limit_export_to_monthly_pv = bool(self._user_input.get(CONF_LIMIT_EXPORT_TO_MONTHLY_PV, DEFAULT_LIMIT_EXPORT_TO_MONTHLY_PV))
+        monthly_export_safety_margin = float(self._user_input.get(CONF_MONTHLY_EXPORT_SAFETY_MARGIN_KWH, DEFAULT_MONTHLY_EXPORT_SAFETY_MARGIN_KWH))
         bat_soc_emergency = self._user_input.get(CONF_BAT_SOC_EMERGENCY, DEFAULT_BAT_SOC_EMERGENCY)
 
         schema_dict = {}
@@ -457,6 +470,37 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         )
 
         schema_dict[vol.Required(CONF_MAX_DAILY_DISCHARGE_KWH, default=max_daily_discharge)] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0,
+                max=100.0,
+                step=0.5,
+                unit_of_measurement="kWh",
+                mode=selector.NumberSelectorMode.BOX
+            )
+        )
+
+        # Monthly PV-balanced grid export limit
+        schema_dict[vol.Required(CONF_LIMIT_EXPORT_TO_MONTHLY_PV, default=limit_export_to_monthly_pv)] = selector.BooleanSelector()
+
+        val_pv_total = get_value(CONF_PV_TOTAL_PRODUCTION_SENSOR)
+        if not val_pv_total and CONF_PV_TOTAL_PRODUCTION_SENSOR not in self._user_input and self.hass.states.get("sensor.inverter_total_production"):
+            val_pv_total = "sensor.inverter_total_production"
+        schema_dict[
+            vol.Optional(
+                CONF_PV_TOTAL_PRODUCTION_SENSOR,
+                description={"suggested_value": val_pv_total} if val_pv_total else {},
+            )
+        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
+
+        val_monthly_exp = get_value(CONF_MONTHLY_EXPORT_SENSOR)
+        schema_dict[
+            vol.Optional(
+                CONF_MONTHLY_EXPORT_SENSOR,
+                description={"suggested_value": val_monthly_exp} if val_monthly_exp else {},
+            )
+        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
+
+        schema_dict[vol.Required(CONF_MONTHLY_EXPORT_SAFETY_MARGIN_KWH, default=monthly_export_safety_margin)] = selector.NumberSelector(
             selector.NumberSelectorConfig(
                 min=0.0,
                 max=100.0,

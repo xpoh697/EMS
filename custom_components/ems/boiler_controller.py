@@ -2809,7 +2809,7 @@ class BoilerController:
         if mode_cfg and getattr(mode_cfg, "curtail_pv", False):
             active_limit = getattr(mode_cfg, "calibration_limit_soc", 90.0) or 90.0
 
-        bat_soc_sensor = self.config.get("battery_soc_sensor")
+        bat_soc_sensor = self.config.get(CONF_BAT_SOC_ENTITY)
         bat_soc = None
         if bat_soc_sensor:
             soc_state = self.hass.states.get(bat_soc_sensor)

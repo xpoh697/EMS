@@ -210,7 +210,8 @@ def map_dp_to_physical(
     if action == "discharge":
         if sell_price >= min_discharge_price:
             return "sale_pv_bat", reason
-        return "stop_sale", reason
+        # If sell_price dropped below min_discharge_price (e.g. user raised threshold),
+        # fall through to normal sell_price / min_sell_price mapping (sale_pv vs stop_sale).
 
     if action in ("grid_charge", "paid_import"):
         return "buy", reason

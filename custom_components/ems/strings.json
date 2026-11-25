@@ -84,7 +84,11 @@
           "bat_soc_emergency": "Emergency battery SOC threshold (%)",
           "bat_max_charge_power": "Battery max charge power (W)",
           "bat_max_discharge_power": "Battery max discharge power (W)",
-          "max_daily_discharge_kwh": "Daily battery sale limit (kWh, 0 = no sale)"
+          "max_daily_discharge_kwh": "Daily battery sale limit (kWh, 0 = no sale)",
+          "limit_export_to_monthly_pv": "Limit monthly grid export to PV production",
+          "pv_total_production_sensor": "Cumulative PV production sensor (total_increasing, kWh)",
+          "monthly_export_sensor": "Cumulative grid export sensor override (optional, defaults to Total Grid Export)",
+          "monthly_export_safety_margin_kwh": "Monthly export safety margin (kWh)"
         }
       },
       "boiler": {
@@ -168,6 +172,9 @@
       },
       "roi": {
         "name": "ROI"
+      },
+      "monthly_sellable_energy": {
+        "name": "Monthly Sellable Energy"
       }
     },
     "number": {

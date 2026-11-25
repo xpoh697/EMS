@@ -81,7 +81,11 @@
           "bat_soc_emergency": "Аварийный порог заряда АКБ (%)",
           "bat_max_charge_power": "Максимальная мощность заряда АКБ (Вт)",
           "bat_max_discharge_power": "Максимальная мощность разряда АКБ (Вт)",
-          "max_daily_discharge_kwh": "Лимит продажи из АКБ в сеть в день (кВт·ч, 0 — без продажи)"
+          "max_daily_discharge_kwh": "Лимит продажи из АКБ в сеть в день (кВт·ч, 0 — без продажи)",
+          "limit_export_to_monthly_pv": "Ограничить продажу в сеть месячной выработкой СЭС",
+          "pv_total_production_sensor": "Накопительный сенсор выработки СЭС (total_increasing, кВт·ч)",
+          "monthly_export_sensor": "Накопительный сенсор экспорта в сеть (опционально, по умолчанию Total Grid Export)",
+          "monthly_export_safety_margin_kwh": "Страховочный зазор месячного экспорта (кВт·ч)"
         }
       },
       "boiler": {
@@ -165,6 +169,9 @@
       },
       "roi": {
         "name": "ROI"
+      },
+      "monthly_sellable_energy": {
+        "name": "Доступно к продаже в месяце"
       }
     },
     "number": {

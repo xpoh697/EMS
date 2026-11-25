@@ -390,8 +390,9 @@ def run_boiler_dp(
     # Compute last discharge hour in [12..23] per date for dynamic morning min SOC
     _boiler_lsh: dict[str, int] = {}
     for _bs in slots:
+        _ba = _bs.get("action", "")
         _bm = _bs.get("physical_mode", "")
-        if _bm in ("discharge", "export", "self_consume_with_export"):
+        if _ba in ("discharge", "export", "self_consume_with_export") or _bm == "sale_pv_bat":
             _bd = _bs.get("date", "")
             _bh = int(_bs.get("hour", 0))
             if _bh >= 12:

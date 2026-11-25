@@ -63,9 +63,15 @@ from .const import (
     CONF_BAT_MAX_CHARGE_POWER,
     CONF_BAT_MAX_DISCHARGE_POWER,
     CONF_MAX_DAILY_DISCHARGE_KWH,
+    CONF_LIMIT_EXPORT_TO_MONTHLY_PV,
+    CONF_PV_TOTAL_PRODUCTION_SENSOR,
+    CONF_MONTHLY_EXPORT_SENSOR,
+    CONF_MONTHLY_EXPORT_SAFETY_MARGIN_KWH,
     DEFAULT_BAT_MAX_CHARGE_POWER,
     DEFAULT_BAT_MAX_DISCHARGE_POWER,
     DEFAULT_MAX_DAILY_DISCHARGE_KWH,
+    DEFAULT_LIMIT_EXPORT_TO_MONTHLY_PV,
+    DEFAULT_MONTHLY_EXPORT_SAFETY_MARGIN_KWH,
     CONF_BAT_CUR_POWER_ENTITY,
     CONF_BAT_SOC_ENTITY,
     CONF_BAT_VOLTAGE,
@@ -336,14 +342,6 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the EMS sensors from config entry."""
-    import sys, importlib
-    for _m in ('custom_components.ems.const', 'custom_components.ems.config_flow', 'custom_components.ems'):
-        if _m in sys.modules:
-            try:
-                importlib.reload(sys.modules[_m])
-                _LOGGER.debug("EMS Module Reload: reloaded %s successfully", _m)
-            except Exception as _ex:
-                _LOGGER.debug("EMS Module Reload: failed to reload %s: %s", _m, _ex)
     try:
         from homeassistant.helpers import translation
         cache = translation._async_get_translations_cache(hass)
@@ -783,6 +781,18 @@ async def async_setup_entry(
                 pv_tomorrow_id,
             )
         )
+
+    monthly_sellable_sensor = EmsMonthlySellableEnergySensor(
+        entry.entry_id,
+        entry.title,
+        entry,
+    )
+    try:
+        await monthly_sellable_sensor.async_prepare()
+    except Exception as _m_err:
+        ems_log(hass, _LOGGER, logging.WARNING, f"Monthly export baseline init deferred: {_m_err}")
+    hass.data[DOMAIN][entry.entry_id]["monthly_export_tracker"] = monthly_sellable_sensor
+    entities.append(monthly_sellable_sensor)
 
     if bat_soc_entity_id:
         entities.append(
@@ -1787,6 +1797,7 @@ class EmsDpSensor(SensorEntity):
         self._curtailed_pv_tomorrow: float = 0.0
         self._last_hour_action: str | None = None
         self._last_action_hour: int = -1
+        self._monthly_limit_snapshot: dict[str, Any] = {}
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -1831,6 +1842,12 @@ class EmsDpSensor(SensorEntity):
             "boiler_expected_consumption_tomorrow": self._boiler_expected_consumption_tomorrow,
             "curtailed_pv_today": self._curtailed_pv_today,
             "curtailed_pv_tomorrow": self._curtailed_pv_tomorrow,
+            "limit_export_to_monthly_pv": self._monthly_limit_snapshot.get("limit_enabled", False),
+            "monthly_pv_kwh": self._monthly_limit_snapshot.get("monthly_pv_kwh"),
+            "monthly_export_kwh": self._monthly_limit_snapshot.get("monthly_export_kwh"),
+            "monthly_export_remaining_kwh": self._monthly_limit_snapshot.get("remaining_kwh"),
+            "monthly_export_safety_margin_kwh": self._monthly_limit_snapshot.get("safety_margin_kwh"),
+            "monthly_export_limit_reached": self._monthly_limit_snapshot.get("limit_reached", False),
         }
 
     async def async_added_to_hass(self) -> None:
@@ -1900,6 +1917,9 @@ class EmsDpSensor(SensorEntity):
         self.async_on_remove(
             self.hass.bus.async_listen("ems_schedule_updated", self._async_force_update)
         )
+        self.async_on_remove(
+            self.hass.bus.async_listen("ems_monthly_export_updated", self._async_monthly_export_updated)
+        )
 
     async def _async_hourly_trigger(self, datetime_now) -> None:
         """Handle hourly recalculation."""
@@ -1911,6 +1931,11 @@ class EmsDpSensor(SensorEntity):
     async def _async_force_update(self, event) -> None:
         """Force recalculation when overrides change."""
         ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP trigger: manual overrides changed")
+        await self.async_update_strategy(force=True)
+
+    async def _async_monthly_export_updated(self, event) -> None:
+        """Recalculate DP when monthly PV export quota changes significantly or crosses zero."""
+        ems_log(self.hass, _LOGGER, logging.DEBUG, "EMS DP trigger: monthly export budget updated")
         await self.async_update_strategy(force=True)
 
     async def _async_generic_listener(self, event) -> None:
@@ -2406,6 +2431,40 @@ class EmsDpSensor(SensorEntity):
                     already_sold_today = float(sold_state.state)
                 except (ValueError, TypeError):
                     already_sold_today = 0.0
+
+            has_tomorrow_prices = bool(self.hass.data.get(DOMAIN, {}).get("price_tomorrow_has_data", False))
+            weekly_state = self.hass.states.get("sensor.ems_battery_weekly_loss_rate")
+            if weekly_state and weekly_state.state not in ("unknown", "unavailable"):
+                try:
+                    weekly_loss_pct = float(weekly_state.state)
+                    weekly_rte = max(0.50, min(1.0, (100.0 - weekly_loss_pct) / 100.0))
+                except (ValueError, TypeError):
+                    weekly_rte = 0.865
+            else:
+                weekly_rte = float(self.hass.data.get(DOMAIN, {}).get("weekly_round_trip_efficiency", 0.865))
+            tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")
+            tomorrow_is_forecast = (tomorrow_source == "pradcast_forecast")
+
+            limit_export_to_monthly_pv = bool(options.get(
+                CONF_LIMIT_EXPORT_TO_MONTHLY_PV,
+                config.get(CONF_LIMIT_EXPORT_TO_MONTHLY_PV, DEFAULT_LIMIT_EXPORT_TO_MONTHLY_PV),
+            ))
+            monthly_tracker = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {}).get("monthly_export_tracker")
+            monthly_export_remaining_kwh = 0.0
+            if monthly_tracker is not None:
+                m_snap = monthly_tracker.get_budget_snapshot()
+                self._monthly_limit_snapshot = m_snap
+                if limit_export_to_monthly_pv:
+                    if m_snap.get("fail_closed") or m_snap.get("remaining_kwh") is None:
+                        monthly_export_remaining_kwh = 0.0
+                    else:
+                        monthly_export_remaining_kwh = max(0.0, float(m_snap["remaining_kwh"]))
+            else:
+                self._monthly_limit_snapshot = {
+                    "limit_enabled": limit_export_to_monthly_pv,
+                    "limit_reached": limit_export_to_monthly_pv,
+                }
+
             import functools
             func = functools.partial(
                 self._calculate_strategy_sync,
@@ -2438,6 +2497,11 @@ class EmsDpSensor(SensorEntity):
                 min_arbitrage_profit=storage.min_arbitrage_profit,
                 max_daily_discharge_kwh=max_daily_discharge_kwh,
                 already_sold_today=already_sold_today,
+                has_tomorrow_prices=has_tomorrow_prices,
+                weekly_rte=weekly_rte,
+                tomorrow_is_forecast=tomorrow_is_forecast,
+                limit_export_to_monthly_pv=limit_export_to_monthly_pv,
+                monthly_export_remaining_kwh=monthly_export_remaining_kwh,
             )
             result = await self.hass.async_add_executor_job(func)
 
@@ -2530,11 +2594,14 @@ class EmsDpSensor(SensorEntity):
         min_arbitrage_profit: float = 0.0,
         max_daily_discharge_kwh: float = 0.0,
         already_sold_today: float = 0.0,
+        has_tomorrow_prices: bool | None = None,
+        weekly_rte: float | None = None,
+        tomorrow_is_forecast: bool | None = None,
+        limit_export_to_monthly_pv: bool = False,
+        monthly_export_remaining_kwh: float = 0.0,
     ) -> dict[str, Any]:
         """Build grid of slots and call DP core helper."""
-        import importlib
         from . import dp_engine
-        importlib.reload(dp_engine)
         run_unified_dp = dp_engine.run_unified_dp
         DPConfig = dp_engine.DPConfig
         from .const import INVERTER_MODES
@@ -2580,7 +2647,8 @@ class EmsDpSensor(SensorEntity):
         # Tomorrow — use the flag stored by update_prices() rather than any()
         # because any([0.0]*24) == False even when data was legitimately received
         # (Nordpool can publish zero or negative prices during energy surplus periods).
-        has_tomorrow_prices = self.hass.data.get(DOMAIN, {}).get("price_tomorrow_has_data", False)
+        if has_tomorrow_prices is None:
+            has_tomorrow_prices = bool(self.hass.data.get(DOMAIN, {}).get("price_tomorrow_has_data", False))
         if has_tomorrow_prices:
             for h in range(24):
                 override = overrides.get(tomorrow_str, {}).get(str(h))
@@ -2618,15 +2686,8 @@ class EmsDpSensor(SensorEntity):
         terminal_value = max(min_sell_price, global_min_buy + cycle_cost)
 
         # Dynamically obtain live weekly round-trip efficiency from sensor/bus
-        weekly_state = self.hass.states.get("sensor.ems_battery_weekly_loss_rate")
-        if weekly_state and weekly_state.state not in ("unknown", "unavailable"):
-            try:
-                weekly_loss_pct = float(weekly_state.state)
-                weekly_rte = max(0.50, min(1.0, (100.0 - weekly_loss_pct) / 100.0))
-            except (ValueError, TypeError):
-                weekly_rte = 0.865
-        else:
-            weekly_rte = self.hass.data.get(DOMAIN, {}).get("weekly_round_trip_efficiency", 0.865)
+        if weekly_rte is None:
+            weekly_rte = float(self.hass.data.get(DOMAIN, {}).get("weekly_round_trip_efficiency", 0.865))
 
         try:
             live_eta_charge = round(math.sqrt(max(0.50, min(1.0, weekly_rte))), 4)
@@ -2635,8 +2696,9 @@ class EmsDpSensor(SensorEntity):
             live_eta_charge = 0.930
             live_eta_discharge = 0.930
 
-        tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")
-        tomorrow_is_forecast = (tomorrow_source == "pradcast_forecast")
+        if tomorrow_is_forecast is None:
+            tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")
+            tomorrow_is_forecast = (tomorrow_source == "pradcast_forecast")
 
         # Calculate remaining daily discharge budget
         rem_today = max(0.0, max_daily_discharge_kwh - already_sold_today) if max_daily_discharge_kwh > 0.0 else 0.0
@@ -2644,6 +2706,14 @@ class EmsDpSensor(SensorEntity):
             today_str: rem_today,
             tomorrow_str: max_daily_discharge_kwh,
         }
+        today_month_key = today_str[:7]
+        tomorrow_month_key = tomorrow_str[:7]
+        remaining_monthly_export = {
+            today_month_key: max(0.0, float(monthly_export_remaining_kwh)),
+        }
+        if tomorrow_month_key != today_month_key:
+            # Next calendar month starts with 0 actual PV generated until sunrise
+            remaining_monthly_export[tomorrow_month_key] = 0.0
 
         dp_config = DPConfig(
             min_sell_price=min_sell_price,
@@ -2661,6 +2731,8 @@ class EmsDpSensor(SensorEntity):
             tomorrow_is_forecast=tomorrow_is_forecast,
             max_daily_discharge_kwh=max_daily_discharge_kwh,
             remaining_daily_discharge=remaining_daily_discharge,
+            limit_export_to_monthly_pv=limit_export_to_monthly_pv,
+            remaining_monthly_export=remaining_monthly_export,
             disable_discharge=(max_daily_discharge_kwh == 0.0),
         )
 
@@ -2690,38 +2762,6 @@ class EmsDpSensor(SensorEntity):
             math_slot["consumption_kwh"] = adjusted_cons
             math_slot["planned_boiler_kwh"] = 0.0  # merged into consumption_kwh
             math_slots.append(math_slot)
-
-        try:
-            import json as _json
-            with open("/config/scratch_math_slots.json", "w", encoding="utf-8") as _f:
-                _json.dump({
-                    "current_usable": current_usable,
-                    "usable_capacity": usable_capacity,
-                    "cycle_cost": cycle_cost,
-                    "terminal_value": terminal_value,
-                    "min_end_usable": min_end_usable,
-                    "remaining_hour_fraction": remaining_hour_fraction,
-                    "dp_config": {
-                        "min_sell_price": dp_config.min_sell_price,
-                        "min_discharge_price": dp_config.min_discharge_price,
-                        "battery_max_discharge_power": dp_config.battery_max_discharge_power,
-                        "battery_max_charge_power": dp_config.battery_max_charge_power,
-                        "battery_min_soc": dp_config.battery_min_soc,
-                        "battery_capacity": dp_config.battery_capacity,
-                        "min_energy_to_discharge": dp_config.min_energy_to_discharge,
-                        "disable_discharge": dp_config.disable_discharge,
-                        "battery_min_soc_evening": dp_config.battery_min_soc_evening,
-                        "battery_min_soc_morning": dp_config.battery_min_soc_morning,
-                        "min_arbitrage_profit": dp_config.min_arbitrage_profit,
-                        "eta_charge": dp_config.eta_charge,
-                        "eta_discharge": dp_config.eta_discharge,
-                        "last_sell_hour_by_date": getattr(dp_config, 'last_sell_hour_by_date', {}),
-                        "tomorrow_is_forecast": getattr(dp_config, 'tomorrow_is_forecast', False),
-                    },
-                    "slots": math_slots,
-                }, _f, indent=2)
-        except Exception as _e:
-            _LOGGER.error("Failed to dump scratch_math_slots: %s", _e)
 
         try:
             (
@@ -2874,13 +2914,31 @@ class EmsDpSensor(SensorEntity):
                 ):
                     action = "self_consume"
 
+                _slot_m_key = str(slot.get("date") or "")[:7]
+                _monthly_blocked_slot0 = dp_config.limit_export_to_monthly_pv and (
+                    float(dp_config.remaining_monthly_export.get(_slot_m_key, 0.0)) <= 1e-4
+                )
+                _daily_blocked_slot0 = (
+                    dp_config.max_daily_discharge_kwh > 0.0
+                    and rem_today <= 1e-4
+                )
+                can_hold_discharge = (
+                    not slot.get("override")
+                    and not dp_config.disable_discharge
+                    and not _monthly_blocked_slot0
+                    and not _daily_blocked_slot0
+                    and slot.get("sell_price", 0.0) >= min_discharge_price
+                    and slot.get("sell_price", 0.0) > 0.0
+                    and soc > (effective_min_soc + 0.2)
+                )
+
                 # Anti-chattering for discharge: prevent mid-hour drop to self_consume/idle/normal/solar_export
-                # when discharge was already active in this hour and battery is safely above minimum SOC
+                # only while discharge remains permitted by min_discharge_price and safe SOC
                 if (
                     self._last_hour_action == "discharge"
                     and action in ("self_consume", "idle", "normal", "solar_export")
                     and now.hour == self._last_action_hour
-                    and soc > (effective_min_soc + 0.2)
+                    and can_hold_discharge
                 ):
                     action = "discharge"
 
@@ -2931,7 +2989,7 @@ class EmsDpSensor(SensorEntity):
                 now_s = now.second
                 rem_sec = (59 - now_m) * 60 + (60 - now_s)
                 if rem_sec < 900 and now.hour == self._last_action_hour and not slot.get("override"):
-                    if self._last_hour_action == "discharge" and soc > (effective_min_soc + 0.2):
+                    if self._last_hour_action == "discharge" and can_hold_discharge:
                         action = "discharge"
                     elif self._last_hour_action == "pv_charge" and soc < 99.0:
                         action = "pv_charge"
@@ -3151,6 +3209,36 @@ class EmsSchedulerSensor(SensorEntity):
             if avg_pv < avg_load - self._HYSTERESIS_W:
                 self._dynamic_sale_pv_active = True
 
+    def _is_monthly_export_blocked(self) -> tuple[bool, str]:
+        """Return (blocked, reason) when monthly PV-balanced export quota is exhausted or unavailable."""
+        config = self._entry.data
+        options = self._entry.options
+        enabled = bool(options.get(
+            CONF_LIMIT_EXPORT_TO_MONTHLY_PV,
+            config.get(CONF_LIMIT_EXPORT_TO_MONTHLY_PV, DEFAULT_LIMIT_EXPORT_TO_MONTHLY_PV),
+        ))
+        if not enabled:
+            return False, ""
+
+        tracker = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {}).get("monthly_export_tracker")
+        if tracker is None:
+            return True, "monthly_pv_export_limit_reached: tracker_not_ready"
+
+        snap = tracker.get_budget_snapshot()
+        rem = snap.get("remaining_kwh")
+        if snap.get("fail_closed") or rem is None:
+            return True, f"monthly_pv_export_limit_reached: sensor_unavailable ({snap.get('status', 'unknown')})"
+
+        if float(rem) <= 0.0:
+            pv_m = snap.get("monthly_pv_kwh")
+            exp_m = snap.get("monthly_export_kwh")
+            margin = snap.get("safety_margin_kwh", 0.0)
+            pv_s = f"{pv_m:.2f}" if pv_m is not None else "n/a"
+            exp_s = f"{exp_m:.2f}" if exp_m is not None else "n/a"
+            return True, f"monthly_pv_export_limit_reached: remaining=0.00 kWh (pv={pv_s}, exp={exp_s}, margin={margin:.2f})"
+
+        return False, "" 
+
     @property
     def native_value(self) -> str | None:
         """Return the state of the scheduler (current active mode)."""
@@ -3217,6 +3305,8 @@ class EmsSchedulerSensor(SensorEntity):
                 min_discharge_price=storage.min_discharge_price,
                 cheap_ahead=cheap_ahead,
             )
+            if physical_mode == "sale_pv_bat" and self._is_monthly_export_blocked()[0]:
+                return "sale_pv"
             return physical_mode
 
         if dp_state is None or dp_state.state in ("unknown", "unavailable"):
@@ -3261,6 +3351,9 @@ class EmsSchedulerSensor(SensorEntity):
                     min_sell_price = 0.0
 
                 return "sale_pv" if sell_price > min_sell_price else "stop_sale"
+
+        if base_mode == "sale_pv_bat" and self._is_monthly_export_blocked()[0]:
+            return "sale_pv"
 
         return base_mode
 
@@ -3585,6 +3678,12 @@ class EmsSchedulerSensor(SensorEntity):
                     slot_data['action'] = 'self_consume'
                     slot_data['physical_mode'] = 'sale_pv'
                     slot_data['mapping_reason'] = f'daily_battery_discharge_limit_reached: {cur_sold:.2f} >= {max_daily_discharge_kwh:.2f} kWh'
+                else:
+                    _m_blocked, _m_reason = self._is_monthly_export_blocked()
+                    if _m_blocked:
+                        slot_data['action'] = 'self_consume'
+                        slot_data['physical_mode'] = 'sale_pv'
+                        slot_data['mapping_reason'] = _m_reason
 
             if slot_idx == 0 and self._grid_outage:
                 slot_data["action"] = "OffGrid"
@@ -3829,9 +3928,23 @@ class EmsSchedulerSensor(SensorEntity):
                 )
             )
 
+        # React immediately when monthly sellable export quota hits zero or updates
+        self.async_on_remove(
+            self.hass.bus.async_listen("ems_monthly_export_updated", self._async_monthly_limit_changed)
+        )
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, ["sensor.ems_monthly_sellable_energy"], self._async_monthly_limit_changed
+            )
+        )
+
     async def _async_dp_changed(self, event) -> None:
         """Handle DP sensor changes."""
         self._update_dynamic_switching()
+        self.async_write_ha_state()
+
+    async def _async_monthly_limit_changed(self, event) -> None:
+        """Handle monthly PV export quota updates immediately."""
         self.async_write_ha_state()
 
     async def _async_grid_changed(self, event) -> None:
@@ -5227,6 +5340,20 @@ class EmsBoilerDpSensor(RestoreSensor, SensorEntity):
     async def async_update_boiler_dp(self, force: bool = False) -> None:
         """Calculate the Boiler DP schedule inside executor."""
         self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = True
+        try:
+            await self._async_update_boiler_dp_inner(force=force)
+        except Exception as err:
+            self.hass.data.setdefault(DOMAIN, {})["boiler_recalculating"] = False
+            ems_log(
+                self.hass,
+                _LOGGER,
+                logging.ERROR,
+                f"Unexpected error in async_update_boiler_dp: {err}",
+                exc_info=True,
+            )
+
+    async def _async_update_boiler_dp_inner(self, force: bool = False) -> None:
+        """Inner Boiler DP update guarded by outer exception handler."""
         now = dt_util.now()
 
         # Debounce/cooldown check
@@ -6769,3 +6896,430 @@ class EmsMaxDailyProfitSensor(RestoreSensor, SensorEntity):
 
         self._recalculate_top()
         self.async_write_ha_state()
+
+
+
+class EmsMonthlySellableEnergySensor(RestoreSensor, SensorEntity):
+    """Sensor tracking remaining sellable grid export energy balanced by monthly PV generation."""
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_has_entity_name = True
+    _attr_translation_key = "monthly_sellable_energy"
+
+    def __init__(self, entry_id: str, device_name: str, entry: ConfigEntry) -> None:
+        """Initialize the monthly sellable energy sensor."""
+        self._entry_id = entry_id
+        self._device_name = device_name
+        self._entry = entry
+        self._attr_name = "Monthly Sellable Energy"
+        self._attr_unique_id = f"{entry_id}_monthly_sellable_energy"
+        self.entity_id = "sensor.ems_monthly_sellable_energy"
+        self._attr_icon = "mdi:transmission-tower-export"
+
+        options = entry.options
+        config = entry.data
+        self._limit_enabled: bool = bool(options.get(
+            CONF_LIMIT_EXPORT_TO_MONTHLY_PV,
+            config.get(CONF_LIMIT_EXPORT_TO_MONTHLY_PV, DEFAULT_LIMIT_EXPORT_TO_MONTHLY_PV),
+        ))
+        self._pv_sensor_id: str | None = options.get(
+            CONF_PV_TOTAL_PRODUCTION_SENSOR,
+            config.get(CONF_PV_TOTAL_PRODUCTION_SENSOR),
+        ) or None
+        self._export_sensor_id: str | None = (
+            options.get(CONF_MONTHLY_EXPORT_SENSOR, config.get(CONF_MONTHLY_EXPORT_SENSOR))
+            or options.get(CONF_TOTAL_GRID_EXPORT, config.get(CONF_TOTAL_GRID_EXPORT))
+            or None
+        )
+        try:
+            self._safety_margin_kwh: float = max(
+                0.0,
+                float(options.get(
+                    CONF_MONTHLY_EXPORT_SAFETY_MARGIN_KWH,
+                    config.get(CONF_MONTHLY_EXPORT_SAFETY_MARGIN_KWH, DEFAULT_MONTHLY_EXPORT_SAFETY_MARGIN_KWH),
+                )),
+            )
+        except (ValueError, TypeError):
+            self._safety_margin_kwh = DEFAULT_MONTHLY_EXPORT_SAFETY_MARGIN_KWH
+
+        self._current_month: str = dt_util.now().strftime("%Y-%m")
+        self._channels: dict[str, dict[str, Any]] = {
+            "pv": self._empty_channel(self._pv_sensor_id),
+            "export": self._empty_channel(self._export_sensor_id),
+        }
+
+        self._monthly_pv_kwh: float | None = None
+        self._monthly_export_kwh: float | None = None
+        self._remaining_sellable_kwh: float | None = None
+        self._fail_closed: bool = self._limit_enabled
+        self._status: str = "initializing"
+
+        self._last_write_ts: float = 0.0
+        self._last_written_val: float | None = None
+        self._last_bus_val: float | None = None
+        self._last_bus_blocked: bool | None = None
+
+    @staticmethod
+    def _empty_channel(sensor_id: str | None) -> dict[str, Any]:
+        return {
+            "sensor_id": sensor_id,
+            "current_val": None,
+            "closed_hours_delta": None,
+            "last_closed_state": None,
+            "baseline_state": None,
+            "baseline_source": "none",
+            "last_valid_ts": None,
+            "is_total_monthly": False,
+        }
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._device_name,
+            manufacturer="Energy Trader System",
+            model="EMS Controller",
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return remaining sellable energy for the current calendar month (kWh)."""
+        if self._remaining_sellable_kwh is None:
+            return 0.0 if (self._limit_enabled and self._fail_closed) else None
+        return round(self._remaining_sellable_kwh, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return diagnostic monthly PV vs grid export accounting attributes."""
+        pv_ch = self._channels["pv"]
+        exp_ch = self._channels["export"]
+        snap = self.get_budget_snapshot()
+        return {
+            "month": self._current_month,
+            "limit_enabled": self._limit_enabled,
+            "limit_reached": snap["limit_reached"],
+            "fail_closed": snap["fail_closed"],
+            "status": self._status,
+            "monthly_pv_kwh": snap["monthly_pv_kwh"],
+            "monthly_export_kwh": snap["monthly_export_kwh"],
+            "safety_margin_kwh": round(self._safety_margin_kwh, 2),
+            "raw_balance_kwh": (
+                round(self._monthly_pv_kwh - self._monthly_export_kwh, 2)
+                if (self._monthly_pv_kwh is not None and self._monthly_export_kwh is not None)
+                else None
+            ),
+            "pv_sensor_id": self._pv_sensor_id,
+            "pv_baseline_state": pv_ch["baseline_state"],
+            "pv_baseline_source": pv_ch["baseline_source"],
+            "export_sensor_id": self._export_sensor_id,
+            "export_baseline_state": exp_ch["baseline_state"],
+            "export_baseline_source": exp_ch["baseline_source"],
+        }
+
+    def get_budget_snapshot(self) -> dict[str, Any]:
+        """Return thread-safe snapshot for DP and Scheduler."""
+        rem = self._remaining_sellable_kwh
+        fail_closed = self._fail_closed
+        limit_reached = bool(
+            self._limit_enabled
+            and (fail_closed or rem is None or rem <= 0.0)
+        )
+        return {
+            "month_key": self._current_month,
+            "limit_enabled": self._limit_enabled,
+            "fail_closed": fail_closed,
+            "limit_reached": limit_reached,
+            "status": self._status,
+            "monthly_pv_kwh": round(self._monthly_pv_kwh, 2) if self._monthly_pv_kwh is not None else None,
+            "monthly_export_kwh": round(self._monthly_export_kwh, 2) if self._monthly_export_kwh is not None else None,
+            "remaining_kwh": round(rem, 2) if rem is not None else None,
+            "safety_margin_kwh": round(self._safety_margin_kwh, 2),
+        }
+
+    def _read_sensor_float(self, sensor_id: str | None) -> tuple[float | None, bool]:
+        """Read numeric value in kWh and detect state_class=='total'."""
+        if not sensor_id or not self.hass:
+            return None, False
+        st = self.hass.states.get(sensor_id)
+        if not st or st.state in (None, "unknown", "unavailable", ""):
+            return None, False
+        try:
+            val = float(st.state)
+        except (ValueError, TypeError):
+            return None, False
+        unit = (st.attributes.get("unit_of_measurement") or "").strip()
+        if unit == "Wh":
+            val = val / 1000.0
+        state_class = (st.attributes.get("state_class") or "").strip().lower()
+        return val, (state_class == "total")
+
+    def _compute_channel_month_kwh(self, key: str) -> float | None:
+        """Compute current month accumulated energy for a channel in O(1)."""
+        ch = self._channels[key]
+        sensor_id = ch["sensor_id"]
+        if not sensor_id:
+            return None
+
+        val, is_total = self._read_sensor_float(sensor_id)
+        now_ts = time.monotonic()
+        if val is not None:
+            ch["current_val"] = val
+            ch["last_valid_ts"] = now_ts
+            ch["is_total_monthly"] = is_total
+        else:
+            # Allow brief <120s reconnect glitch; fail closed afterwards
+            if ch["last_valid_ts"] is None or (now_ts - ch["last_valid_ts"]) > 120.0:
+                return None
+            val = ch["current_val"]
+            if val is None:
+                return None
+
+        if ch["is_total_monthly"]:
+            return max(0.0, float(val))
+
+        closed_delta = ch["closed_hours_delta"]
+        last_closed = ch["last_closed_state"]
+        if closed_delta is not None and last_closed is not None:
+            if val >= last_closed:
+                live_delta = val - last_closed
+            elif (last_closed - val) <= 0.1:
+                live_delta = 0.0
+            else:
+                # Counter reset during current unclosed hour
+                live_delta = max(0.0, val)
+            return max(0.0, float(closed_delta) + live_delta)
+
+        baseline = ch["baseline_state"]
+        if baseline is not None:
+            if val >= baseline:
+                return max(0.0, val - baseline)
+            if (baseline - val) <= 0.1:
+                return 0.0
+            # Counter reset without closed LTS
+            return max(0.0, val)
+
+        return None
+
+    async def async_prepare(self) -> None:
+        """Initialize baselines from storage and HA long-term statistics."""
+        await self.async_refresh_from_lts(save_fallback=True)
+        self._recompute_balance(notify_bus=False)
+
+    async def async_refresh_from_lts(self, save_fallback: bool = False) -> None:
+        """Query HA recorder statistics for the 1st-of-month boundary & closed hours."""
+        from .statistics import async_get_monthly_counter_stats
+
+        now = dt_util.now()
+        month_key = now.strftime("%Y-%m")
+        self._current_month = month_key
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        storage = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {}).get("storage")
+
+        for key in ("pv", "export"):
+            ch = self._channels[key]
+            sensor_id = ch["sensor_id"]
+            if not sensor_id:
+                continue
+
+            cur_val, is_total = self._read_sensor_float(sensor_id)
+            if cur_val is not None:
+                ch["current_val"] = cur_val
+                ch["last_valid_ts"] = time.monotonic()
+                ch["is_total_monthly"] = is_total
+            if ch["is_total_monthly"]:
+                ch["baseline_source"] = "direct_total"
+                continue
+
+            cached = storage.get_monthly_baseline(month_key, sensor_id) if storage else None
+            lts = await async_get_monthly_counter_stats(self.hass, sensor_id, month_start)
+
+            if lts is not None:
+                lts_src = lts.get("baseline_source", "lts_partial_month")
+                lts_base = lts.get("baseline_state")
+                ch["closed_hours_delta"] = lts.get("closed_hours_delta")
+                ch["last_closed_state"] = lts.get("last_closed_state")
+
+                # Prefer exact rollover or lts_boundary over partial_month/fallback
+                if cached and cached.get("source") == "rollover" and lts_src != "lts_boundary":
+                    ch["baseline_state"] = cached["baseline_state"]
+                    ch["baseline_source"] = "rollover"
+                    ch["closed_hours_delta"] = None
+                    ch["last_closed_state"] = None
+                elif lts_src == "lts_boundary":
+                    if lts_base is not None:
+                        ch["baseline_state"] = lts_base
+                    ch["baseline_source"] = "lts_boundary"
+                    if storage and lts_base is not None and (not cached or cached.get("source") != "rollover"):
+                        await storage.async_set_monthly_baseline(month_key, sensor_id, lts_base, "lts_boundary")
+                elif cached and cached.get("source") in ("rollover", "lts_boundary"):
+                    ch["baseline_state"] = cached["baseline_state"]
+                    ch["baseline_source"] = cached["source"]
+                else:
+                    ch["baseline_state"] = lts_base
+                    ch["baseline_source"] = lts_src
+                    if storage and lts_base is not None and not cached:
+                        await storage.async_set_monthly_baseline(month_key, sensor_id, lts_base, lts_src)
+            elif cached:
+                ch["baseline_state"] = float(cached["baseline_state"])
+                ch["baseline_source"] = str(cached.get("source", "storage_cache"))
+            elif save_fallback and ch["current_val"] is not None:
+                ch["baseline_state"] = float(ch["current_val"])
+                ch["baseline_source"] = "startup_fallback"
+                if storage:
+                    await storage.async_set_monthly_baseline(
+                        month_key, sensor_id, ch["baseline_state"], "startup_fallback"
+                    )
+
+    def _recompute_balance(self, notify_bus: bool = True) -> None:
+        """Recompute monthly PV, export, and remaining sellable budget."""
+        if not self._pv_sensor_id or not self._export_sensor_id:
+            self._monthly_pv_kwh = None
+            self._monthly_export_kwh = None
+            self._remaining_sellable_kwh = None
+            self._fail_closed = self._limit_enabled
+            self._status = "missing_sensor_config"
+            return
+
+        pv_m = self._compute_channel_month_kwh("pv")
+        exp_m = self._compute_channel_month_kwh("export")
+        self._monthly_pv_kwh = pv_m
+        self._monthly_export_kwh = exp_m
+
+        if pv_m is None or exp_m is None:
+            self._remaining_sellable_kwh = 0.0 if self._limit_enabled else None
+            self._fail_closed = self._limit_enabled
+            self._status = "sensor_unavailable_or_no_baseline"
+        else:
+            rem = max(0.0, pv_m - exp_m - self._safety_margin_kwh)
+            self._remaining_sellable_kwh = rem
+            self._fail_closed = False
+            self._status = "ok"
+
+        if notify_bus and self.hass:
+            cur_blocked = bool(self._limit_enabled and (self._fail_closed or (self._remaining_sellable_kwh or 0.0) <= 0.0))
+            cur_val = self._remaining_sellable_kwh
+            crossed_threshold = (self._last_bus_blocked is None) or (cur_blocked != self._last_bus_blocked)
+            significant_delta = (
+                self._limit_enabled
+                and cur_val is not None
+                and (self._last_bus_val is None or abs(cur_val - self._last_bus_val) >= 0.5)
+            )
+            if crossed_threshold or significant_delta:
+                self._last_bus_blocked = cur_blocked
+                self._last_bus_val = cur_val
+                self.hass.bus.async_fire("ems_monthly_export_updated", self.get_budget_snapshot())
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to counter state updates, hourly LTS sync, and midnight month rollover."""
+        await super().async_added_to_hass()
+
+        # Re-read live values in case source sensors became ready during HA startup
+        needs_init = any(
+            self._channels[k]["sensor_id"] and self._channels[k]["baseline_source"] in ("none", "startup_fallback")
+            for k in ("pv", "export")
+        )
+        if needs_init:
+            await self.async_refresh_from_lts(save_fallback=True)
+        self._recompute_balance(notify_bus=False)
+        self.async_write_ha_state()
+
+        tracked = [s for s in (self._pv_sensor_id, self._export_sensor_id) if s]
+        if tracked:
+            self.async_on_remove(
+                async_track_state_change_event(self.hass, tracked, self._async_counter_changed)
+            )
+
+        # Hourly LTS resync (at :01:00 after recorder writes closed hour stats)
+        self.async_on_remove(
+            async_track_time_change(self.hass, self._async_hourly_lts_sync, minute=1, second=0)
+        )
+        # Midnight check for 1st-of-month rollover
+        self.async_on_remove(
+            async_track_time_change(self.hass, self._async_midnight_check, hour=0, minute=0, second=0)
+        )
+
+    @callback
+    def _async_counter_changed(self, event) -> None:
+        """Handle live counter updates in O(1) with throttled state writes."""
+        # Check if month rolled over cleanly before computing
+        now_month = dt_util.now().strftime("%Y-%m")
+        if now_month != self._current_month:
+            self.hass.async_create_task(self._async_handle_month_rollover(now_month))
+            return
+
+        # If a channel had no baseline at startup, trigger async baseline resolution
+        need_async = False
+        for key in ("pv", "export"):
+            ch = self._channels[key]
+            if ch["sensor_id"] and ch["baseline_source"] == "none":
+                need_async = True
+                break
+
+        prev_blocked = bool(self._limit_enabled and (self._fail_closed or (self._remaining_sellable_kwh or 0.0) <= 0.0))
+        self._recompute_balance(notify_bus=True)
+        new_blocked = bool(self._limit_enabled and (self._fail_closed or (self._remaining_sellable_kwh or 0.0) <= 0.0))
+
+        now_ts = time.monotonic()
+        val_now = self.native_value
+        delta_ok = (
+            val_now != self._last_written_val
+            and (self._last_written_val is None or val_now is None or abs(val_now - self._last_written_val) >= 0.05)
+        )
+        if prev_blocked != new_blocked or delta_ok or (now_ts - self._last_write_ts >= 30.0):
+            self._last_write_ts = now_ts
+            self._last_written_val = val_now
+            self.async_write_ha_state()
+
+        if need_async:
+            self.hass.async_create_task(self._async_hourly_lts_sync(dt_util.now()))
+
+    async def _async_hourly_lts_sync(self, datetime_now) -> None:
+        """Synchronize closed-hour sums with long-term statistics."""
+        await self.async_refresh_from_lts(save_fallback=True)
+        self._recompute_balance(notify_bus=True)
+        self.async_write_ha_state()
+
+    async def _async_midnight_check(self, datetime_now) -> None:
+        """Detect 1st-of-month rollover at midnight."""
+        now_month = dt_util.now().strftime("%Y-%m")
+        if now_month != self._current_month:
+            await self._async_handle_month_rollover(now_month)
+
+    async def _async_handle_month_rollover(self, new_month: str) -> None:
+        """Lock 00:00 counter snapshots as rollover baselines for the new calendar month."""
+        storage = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {}).get("storage")
+        self._current_month = new_month
+        for key in ("pv", "export"):
+            ch = self._channels[key]
+            sensor_id = ch["sensor_id"]
+            if not sensor_id:
+                continue
+            val, is_total = self._read_sensor_float(sensor_id)
+            snap_val = val if val is not None else ch["current_val"]
+            ch["closed_hours_delta"] = None
+            ch["last_closed_state"] = None
+            if is_total:
+                ch["is_total_monthly"] = True
+                ch["baseline_source"] = "direct_total"
+            elif snap_val is not None:
+                ch["current_val"] = snap_val
+                ch["baseline_state"] = float(snap_val)
+                ch["baseline_source"] = "rollover"
+                if storage:
+                    await storage.async_set_monthly_baseline(new_month, sensor_id, float(snap_val), "rollover")
+            else:
+                ch["baseline_state"] = None
+                ch["baseline_source"] = "none"
+
+        self._recompute_balance(notify_bus=True)
+        self.async_write_ha_state()
+        ems_log(
+            self.hass,
+            _LOGGER,
+            logging.INFO,
+            f"EMS Monthly Export rollover to {new_month}: remaining={self._remaining_sellable_kwh} kWh",
+        )
