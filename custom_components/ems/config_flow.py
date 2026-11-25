@@ -384,91 +384,79 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
         sell_fixed = source_data.get(CONF_PRICE_SELL_FIXED, DEFAULT_PRICE_SELL_FIXED)
         if sell_fixed is None:
             sell_fixed = DEFAULT_PRICE_SELL_FIXED
-        system_cost = source_data.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST)
+        system_cost_raw = source_data.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST)
+        system_cost = float(DEFAULT_SYSTEM_COST if system_cost_raw is None else system_cost_raw)
 
-        mode_selector = selector.SelectSelector(
-            selector.SelectSelectorConfig(
-                options=[
-                    {"value": PRICE_MODE_SENSOR, "label": "From sensor"},
-                    {"value": PRICE_MODE_FIXED, "label": "Fixed value"},
-                ],
-                mode=selector.SelectSelectorMode.DROPDOWN,
-                translation_key="price_source_mode",
+        def _make_mode_selector():
+            return selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[PRICE_MODE_SENSOR, PRICE_MODE_FIXED],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    translation_key="price_source_mode",
+                )
             )
-        )
-        price_number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=-10.0,
-                max=50.0,
-                step=0.0001,
-                mode=selector.NumberSelectorMode.BOX,
+
+        def _make_price_number_selector():
+            return selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-10.0,
+                    max=50.0,
+                    step=0.0001,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
             )
-        )
 
-        schema_dict = {}
+        def _add_optional_sensor(target_dict: dict, key: str, val: str | None) -> None:
+            ent_sel = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
+            if val:
+                target_dict[vol.Optional(key, description={"suggested_value": val})] = ent_sel
+            else:
+                target_dict[vol.Optional(key)] = ent_sel
 
-        # Buy price: mode + optional sensor + fixed number
-        schema_dict[vol.Required(CONF_PRICE_BUY_MODE, default=price_buy_mode)] = mode_selector
-        val_buy_sensor = get_value(CONF_PRICE_BUY_SENSOR)
-        schema_dict[
-            vol.Optional(
-                CONF_PRICE_BUY_SENSOR,
-                description={"suggested_value": val_buy_sensor} if val_buy_sensor else {},
+        try:
+            schema_dict = {}
+
+            # Buy price: mode + optional sensor + fixed number
+            schema_dict[vol.Required(CONF_PRICE_BUY_MODE, default=price_buy_mode)] = _make_mode_selector()
+            _add_optional_sensor(schema_dict, CONF_PRICE_BUY_SENSOR, get_value(CONF_PRICE_BUY_SENSOR))
+            schema_dict[vol.Optional(CONF_PRICE_BUY_FIXED, default=float(buy_fixed))] = _make_price_number_selector()
+
+            # Sell price: mode + optional sensor + fixed number
+            schema_dict[vol.Required(CONF_PRICE_SELL_MODE, default=price_sell_mode)] = _make_mode_selector()
+            _add_optional_sensor(schema_dict, CONF_PRICE_SELL_SENSOR, get_value(CONF_PRICE_SELL_SENSOR))
+            schema_dict[vol.Optional(CONF_PRICE_SELL_FIXED, default=float(sell_fixed))] = _make_price_number_selector()
+
+            schema_dict[vol.Required(CONF_SYSTEM_COST, default=system_cost)] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0.0,
+                    step=0.01,
+                    mode=selector.NumberSelectorMode.BOX
+                )
             )
-        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
-        schema_dict[vol.Optional(CONF_PRICE_BUY_FIXED, default=float(buy_fixed))] = price_number_selector
 
-        # Sell price: mode + optional sensor + fixed number
-        schema_dict[vol.Required(CONF_PRICE_SELL_MODE, default=price_sell_mode)] = mode_selector
-        val_sell_sensor = get_value(CONF_PRICE_SELL_SENSOR)
-        schema_dict[
-            vol.Optional(
-                CONF_PRICE_SELL_SENSOR,
-                description={"suggested_value": val_sell_sensor} if val_sell_sensor else {},
+            # PradCast Price Sensors - Optional
+            _add_optional_sensor(schema_dict, CONF_PRADCAST_TODAY_SENSOR, get_value(CONF_PRADCAST_TODAY_SENSOR))
+            _add_optional_sensor(schema_dict, CONF_PRADCAST_TOMORROW_SENSOR, get_value(CONF_PRADCAST_TOMORROW_SENSOR))
+
+            distrib_raw = source_data.get(CONF_DISTRIBUTION_FEE_FALLBACK, DEFAULT_DISTRIBUTION_FEE_FALLBACK)
+            distrib_fallback = float(DEFAULT_DISTRIBUTION_FEE_FALLBACK if distrib_raw is None else distrib_raw)
+            schema_dict[vol.Optional(CONF_DISTRIBUTION_FEE_FALLBACK, default=distrib_fallback)] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0.0,
+                    max=2.0,
+                    step=0.01,
+                    mode=selector.NumberSelectorMode.BOX
+                )
             )
-        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
-        schema_dict[vol.Optional(CONF_PRICE_SELL_FIXED, default=float(sell_fixed))] = price_number_selector
 
-        schema_dict[vol.Required(CONF_SYSTEM_COST, default=system_cost)] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0,
-                step=0.01,
-                mode=selector.NumberSelectorMode.BOX
+            return self.async_show_form(
+                step_id="financial",
+                data_schema=vol.Schema(schema_dict),
+                errors=errors or None,
             )
-        )
-
-        # PradCast Price Sensors - Optional
-        val_prad_today = get_value(CONF_PRADCAST_TODAY_SENSOR)
-        schema_dict[
-            vol.Optional(
-                CONF_PRADCAST_TODAY_SENSOR,
-                description={"suggested_value": val_prad_today} if val_prad_today else {},
-            )
-        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
-
-        val_prad_tomorrow = get_value(CONF_PRADCAST_TOMORROW_SENSOR)
-        schema_dict[
-            vol.Optional(
-                CONF_PRADCAST_TOMORROW_SENSOR,
-                description={"suggested_value": val_prad_tomorrow} if val_prad_tomorrow else {},
-            )
-        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
-
-        distrib_fallback = float(source_data.get(CONF_DISTRIBUTION_FEE_FALLBACK, DEFAULT_DISTRIBUTION_FEE_FALLBACK))
-        schema_dict[vol.Optional(CONF_DISTRIBUTION_FEE_FALLBACK, default=distrib_fallback)] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0,
-                max=2.0,
-                step=0.01,
-                mode=selector.NumberSelectorMode.BOX
-            )
-        )
-
-        return self.async_show_form(
-            step_id="financial",
-            data_schema=vol.Schema(schema_dict),
-            errors=errors,
-        )
+        except Exception:
+            _LOGGER.exception("Failed to build or show Financial options form")
+            raise
 
     async def async_step_battery_optimization(self, user_input=None):
         """Handle the Battery optimization settings step."""
