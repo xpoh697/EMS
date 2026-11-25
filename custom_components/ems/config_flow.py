@@ -129,7 +129,6 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             category = user_input.get("category")
-            _LOGGER.warning("EMS OptionsFlow init selected category=%s", category)
             if category == "basic_settings":
                 return await self.async_step_basic_settings()
             if category == "pv_forecast":
@@ -402,7 +401,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 selector.NumberSelectorConfig(
                     min=-10.0,
                     max=50.0,
-                    step=0.0001,
+                    step="any",
                     mode=selector.NumberSelectorMode.BOX,
                 )
             )
@@ -450,7 +449,6 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 )
             )
 
-            _LOGGER.warning("EMS OptionsFlow financial returning form with keys=%s", list(schema_dict.keys()))
             if errors:
                 return self.async_show_form(
                     step_id="financial",
