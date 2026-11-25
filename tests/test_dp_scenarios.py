@@ -2021,6 +2021,47 @@ class TestFixedTariffSupport(unittest.TestCase):
         self.assertTrue(len(pvc) >= 1, f"Expected PV charge at 10h, got {pvc}")
         self.assertTrue(len(sc) >= 1, f"Expected self-consumption discharge in 11h-13h, got {sc}")
 
+    def test_partial_slot0_does_not_starve_next_peak_hour_daily_budget(self):
+        """At 15:54 (remaining_hour_fraction=0.10) with 6.84 kWh daily budget left, 16:00 must still sell remaining budget."""
+        config = DPConfig(
+            min_sell_price=0.10,
+            min_discharge_price=1.80,
+            battery_max_discharge_power=8.0,
+            battery_max_charge_power=11.0,
+            battery_min_soc=15,
+            battery_capacity=29.9,
+            min_energy_to_discharge=0.5,
+            battery_min_soc_evening=15.0,
+            battery_min_soc_morning=15.0,
+            min_arbitrage_profit=1.0,
+            eta_charge=0.93,
+            eta_discharge=0.93,
+            tomorrow_is_forecast=False,
+            max_daily_discharge_kwh=14.0,
+            remaining_daily_discharge={"2026-11-25": 6.84},
+        )
+        slots = [
+            {"date": "2026-11-25", "hour": 15, "buy_price": 4.60, "sell_price": 3.973, "pv_kwh": 0.0, "consumption_kwh": 0.5},
+            {"date": "2026-11-25", "hour": 16, "buy_price": 4.60, "sell_price": 3.970, "pv_kwh": 0.0, "consumption_kwh": 0.8},
+            {"date": "2026-11-25", "hour": 17, "buy_price": 3.68, "sell_price": 3.050, "pv_kwh": 0.0, "consumption_kwh": 0.6},
+            {"date": "2026-11-25", "hour": 20, "buy_price": 4.33, "sell_price": 3.700, "pv_kwh": 0.0, "consumption_kwh": 0.8},
+            {"date": "2026-11-25", "hour": 23, "buy_price": 1.39, "sell_price": 1.190, "pv_kwh": 0.0, "consumption_kwh": 0.5},
+        ]
+        chg, dis, pvc, sc, pim, stats = run_unified_dp(
+            slots=slots,
+            current_usable=18.2,  # ~76% SOC
+            usable_capacity=25.4,
+            cycle_cost=0.10,
+            terminal_value_per_kwh=1.49,
+            min_end_usable=1.0,
+            config=config,
+            remaining_hour_fraction=0.10,
+        )
+
+        dis_hours = [d["hour"] for d in dis]
+        self.assertIn(15, dis_hours, f"Expected 15h partial discharge, got {dis}")
+        self.assertIn(16, dis_hours, f"Expected 16h to sell remaining daily budget (~6 kWh), got {dis}")
+
 
 if __name__ == "__main__":
     unittest.main()

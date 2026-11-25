@@ -1205,8 +1205,9 @@ def run_unified_dp(
                     slot_caps[idx] = 0.0
                     continue
 
+                slot_max_dis = config.battery_max_discharge_power * (remaining_hour_fraction if idx == 0 else 1.0)
                 max_by_monthly = (m_rem + home_def) if config.limit_export_to_monthly_pv else float("inf")
-                alloc = min(config.battery_max_discharge_power, d_rem, max_by_monthly)
+                alloc = min(slot_max_dis, d_rem, max_by_monthly)
                 slot_caps[idx] = round(max(0.0, alloc), 2)
 
                 if config.max_daily_discharge_kwh > 0.0:
