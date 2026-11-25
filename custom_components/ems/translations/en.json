@@ -61,7 +61,11 @@
           "min_sell_price": "Minimum sell price",
           "pradcast_today_sensor": "PradCast: Today prices sensor (optional)",
           "pradcast_tomorrow_sensor": "PradCast: Tomorrow prices forecast sensor (optional)",
-          "distribution_fee_fallback": "Fallback distribution fee (PLN/kWh)"
+          "distribution_fee_fallback": "Fallback distribution fee (PLN/kWh)",
+          "price_buy_mode": "Buy price source",
+          "price_buy_fixed": "Fixed buy price (per kWh)",
+          "price_sell_mode": "Sell price source",
+          "price_sell_fixed": "Fixed sell price (per kWh)"
         }
       },
       "battery_optimization": {
@@ -119,6 +123,10 @@
           "boiler_warm_diff": "Warm Boiler Override Temperature Difference (°C)"
         }
       }
+    },
+    "error": {
+      "sensor_required": "Select a price sensor when 'From sensor' mode is chosen",
+      "fixed_price_required": "Enter a fixed price when 'Fixed value' mode is chosen"
     }
   },
   "selector": {
@@ -135,6 +143,12 @@
       "options": {
         "manual": "Manual",
         "auto": "Auto"
+      }
+    },
+    "price_source_mode": {
+      "options": {
+        "sensor": "From sensor",
+        "fixed": "Fixed value"
       }
     }
   },

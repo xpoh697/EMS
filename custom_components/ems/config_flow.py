@@ -28,6 +28,15 @@ from .const import (
     CONF_PEOPLE_HOME_SENSOR,
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
+    CONF_PRICE_BUY_MODE,
+    CONF_PRICE_SELL_MODE,
+    CONF_PRICE_BUY_FIXED,
+    CONF_PRICE_SELL_FIXED,
+    PRICE_MODE_SENSOR,
+    PRICE_MODE_FIXED,
+    DEFAULT_PRICE_MODE,
+    DEFAULT_PRICE_BUY_FIXED,
+    DEFAULT_PRICE_SELL_FIXED,
     CONF_SYSTEM_COST,
     CONF_MIN_SELL_PRICE,
     CONF_PRADCAST_TODAY_SENSOR,
@@ -321,31 +330,104 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_financial(self, user_input=None):
         """Handle the Financial settings step."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._user_input.update(user_input)
-            return self.async_create_entry(title="", data=self._user_input)
+            buy_mode_in = user_input.get(CONF_PRICE_BUY_MODE, PRICE_MODE_SENSOR)
+            sell_mode_in = user_input.get(CONF_PRICE_SELL_MODE, PRICE_MODE_SENSOR)
+
+            if buy_mode_in == PRICE_MODE_SENSOR and not user_input.get(CONF_PRICE_BUY_SENSOR):
+                errors[CONF_PRICE_BUY_SENSOR] = "sensor_required"
+            elif buy_mode_in == PRICE_MODE_FIXED and user_input.get(CONF_PRICE_BUY_FIXED) is None:
+                errors[CONF_PRICE_BUY_FIXED] = "fixed_price_required"
+
+            if sell_mode_in == PRICE_MODE_SENSOR and not user_input.get(CONF_PRICE_SELL_SENSOR):
+                errors[CONF_PRICE_SELL_SENSOR] = "sensor_required"
+            elif sell_mode_in == PRICE_MODE_FIXED and user_input.get(CONF_PRICE_SELL_FIXED) is None:
+                errors[CONF_PRICE_SELL_FIXED] = "fixed_price_required"
+
+            if not errors:
+                self._user_input.update(user_input)
+                for _opt_ent in (
+                    CONF_PRICE_BUY_SENSOR,
+                    CONF_PRICE_SELL_SENSOR,
+                    CONF_PRADCAST_TODAY_SENSOR,
+                    CONF_PRADCAST_TOMORROW_SENSOR,
+                ):
+                    if not user_input.get(_opt_ent):
+                        self._user_input.pop(_opt_ent, None)
+                for _fixed_key, _def in (
+                    (CONF_PRICE_BUY_FIXED, DEFAULT_PRICE_BUY_FIXED),
+                    (CONF_PRICE_SELL_FIXED, DEFAULT_PRICE_SELL_FIXED),
+                ):
+                    val = user_input.get(_fixed_key)
+                    self._user_input[_fixed_key] = float(val) if val is not None else float(self._user_input.get(_fixed_key, _def))
+                return self.async_create_entry(title="", data=self._user_input)
+
+        source_data = user_input if user_input is not None else self._user_input
 
         def get_value(key):
-            val = self._user_input.get(key)
+            val = source_data.get(key)
             if not val or val == "undefined":
                 return None
             return str(val[0]) if isinstance(val, (list, tuple)) else str(val)
 
-        system_cost = self._user_input.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST)
+        price_buy_mode = source_data.get(CONF_PRICE_BUY_MODE, DEFAULT_PRICE_MODE)
+        if price_buy_mode not in (PRICE_MODE_SENSOR, PRICE_MODE_FIXED):
+            price_buy_mode = DEFAULT_PRICE_MODE
+        price_sell_mode = source_data.get(CONF_PRICE_SELL_MODE, DEFAULT_PRICE_MODE)
+        if price_sell_mode not in (PRICE_MODE_SENSOR, PRICE_MODE_FIXED):
+            price_sell_mode = DEFAULT_PRICE_MODE
+
+        buy_fixed = source_data.get(CONF_PRICE_BUY_FIXED, DEFAULT_PRICE_BUY_FIXED)
+        if buy_fixed is None:
+            buy_fixed = DEFAULT_PRICE_BUY_FIXED
+        sell_fixed = source_data.get(CONF_PRICE_SELL_FIXED, DEFAULT_PRICE_SELL_FIXED)
+        if sell_fixed is None:
+            sell_fixed = DEFAULT_PRICE_SELL_FIXED
+        system_cost = source_data.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST)
+
+        mode_selector = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[
+                    {"value": PRICE_MODE_SENSOR, "label": "From sensor"},
+                    {"value": PRICE_MODE_FIXED, "label": "Fixed value"},
+                ],
+                mode=selector.SelectSelectorMode.DROPDOWN,
+                translation_key="price_source_mode",
+            )
+        )
+        price_number_selector = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=-10.0,
+                max=50.0,
+                step=0.0001,
+                mode=selector.NumberSelectorMode.BOX,
+            )
+        )
 
         schema_dict = {}
 
-        # Price Buy & Sell Sensors - Required
-        for key in [CONF_PRICE_BUY_SENSOR, CONF_PRICE_SELL_SENSOR]:
-            val = get_value(key)
-            if val:
-                schema_dict[vol.Required(key, default=val)] = selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor")
-                )
-            else:
-                schema_dict[vol.Required(key)] = selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor")
-                )
+        # Buy price: mode + optional sensor + fixed number
+        schema_dict[vol.Required(CONF_PRICE_BUY_MODE, default=price_buy_mode)] = mode_selector
+        val_buy_sensor = get_value(CONF_PRICE_BUY_SENSOR)
+        schema_dict[
+            vol.Optional(
+                CONF_PRICE_BUY_SENSOR,
+                description={"suggested_value": val_buy_sensor} if val_buy_sensor else {},
+            )
+        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
+        schema_dict[vol.Optional(CONF_PRICE_BUY_FIXED, default=float(buy_fixed))] = price_number_selector
+
+        # Sell price: mode + optional sensor + fixed number
+        schema_dict[vol.Required(CONF_PRICE_SELL_MODE, default=price_sell_mode)] = mode_selector
+        val_sell_sensor = get_value(CONF_PRICE_SELL_SENSOR)
+        schema_dict[
+            vol.Optional(
+                CONF_PRICE_SELL_SENSOR,
+                description={"suggested_value": val_sell_sensor} if val_sell_sensor else {},
+            )
+        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
+        schema_dict[vol.Optional(CONF_PRICE_SELL_FIXED, default=float(sell_fixed))] = price_number_selector
 
         schema_dict[vol.Required(CONF_SYSTEM_COST, default=system_cost)] = selector.NumberSelector(
             selector.NumberSelectorConfig(
@@ -357,26 +439,22 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
         # PradCast Price Sensors - Optional
         val_prad_today = get_value(CONF_PRADCAST_TODAY_SENSOR)
-        if val_prad_today:
-            schema_dict[vol.Optional(CONF_PRADCAST_TODAY_SENSOR, default=val_prad_today)] = selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
+        schema_dict[
+            vol.Optional(
+                CONF_PRADCAST_TODAY_SENSOR,
+                description={"suggested_value": val_prad_today} if val_prad_today else {},
             )
-        else:
-            schema_dict[vol.Optional(CONF_PRADCAST_TODAY_SENSOR)] = selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
-            )
+        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
 
         val_prad_tomorrow = get_value(CONF_PRADCAST_TOMORROW_SENSOR)
-        if val_prad_tomorrow:
-            schema_dict[vol.Optional(CONF_PRADCAST_TOMORROW_SENSOR, default=val_prad_tomorrow)] = selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
+        schema_dict[
+            vol.Optional(
+                CONF_PRADCAST_TOMORROW_SENSOR,
+                description={"suggested_value": val_prad_tomorrow} if val_prad_tomorrow else {},
             )
-        else:
-            schema_dict[vol.Optional(CONF_PRADCAST_TOMORROW_SENSOR)] = selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor")
-            )
+        ] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
 
-        distrib_fallback = float(self._user_input.get(CONF_DISTRIBUTION_FEE_FALLBACK, DEFAULT_DISTRIBUTION_FEE_FALLBACK))
+        distrib_fallback = float(source_data.get(CONF_DISTRIBUTION_FEE_FALLBACK, DEFAULT_DISTRIBUTION_FEE_FALLBACK))
         schema_dict[vol.Optional(CONF_DISTRIBUTION_FEE_FALLBACK, default=distrib_fallback)] = selector.NumberSelector(
             selector.NumberSelectorConfig(
                 min=0.0,
@@ -388,7 +466,8 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="financial",
-            data_schema=vol.Schema(schema_dict)
+            data_schema=vol.Schema(schema_dict),
+            errors=errors,
         )
 
     async def async_step_battery_optimization(self, user_input=None):

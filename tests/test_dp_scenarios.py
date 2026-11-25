@@ -52,6 +52,8 @@ from custom_components.ems.dp_engine import (
     ACT_SELF_CONSUME,
     ACT_PAID_IMPORT,
 )
+from custom_components.ems.const import PRICE_MODE_FIXED, PRICE_MODE_SENSOR
+from custom_components.ems.utils import resolve_hourly_tariffs
 
 
 class TestDPScenarios(unittest.TestCase):
@@ -1733,6 +1735,209 @@ class TestDPScenarios(unittest.TestCase):
         self.assertEqual(bad_hours, [], f"Must NOT grid-charge at expensive 13h/14h/21h before cheaper night: got {chg_24}")
 
 
+
+
+class _MockPriceState:
+    """Minimal HA State stub for price parsing tests."""
+
+    def __init__(self, entity_id: str, state: str, attributes: dict):
+        self.entity_id = entity_id
+        self.state = state
+        self.attributes = attributes
+
+
+class TestFixedTariffSupport(unittest.TestCase):
+    """Tests for independent fixed/sensor buy & sell electricity tariff modes."""
+
+    def setUp(self):
+        from homeassistant.util import dt as dt_util
+
+        self._orig_parse_datetime = getattr(dt_util, "parse_datetime", None)
+        self._orig_as_local = getattr(dt_util, "as_local", None)
+        if self._orig_parse_datetime is None:
+            dt_util.parse_datetime = datetime.fromisoformat
+        if self._orig_as_local is None:
+            dt_util.as_local = lambda d: d
+
+    def tearDown(self):
+        from homeassistant.util import dt as dt_util
+
+        if self._orig_parse_datetime is None and hasattr(dt_util, "parse_datetime"):
+            delattr(dt_util, "parse_datetime")
+        if self._orig_as_local is None and hasattr(dt_util, "as_local"):
+            delattr(dt_util, "as_local")
+
+    def _make_pstryk_state(self, entity_id: str, today_price: float | None, tomorrow_price: float | None):
+        from datetime import timedelta
+        from homeassistant.util import dt as dt_util
+
+        today_date = dt_util.now().date()
+        tomorrow_date = today_date + timedelta(days=1)
+        attrs = {}
+        if today_price is not None:
+            attrs["price_today"] = [
+                {"start": f"{today_date}T{h:02d}:00:00+00:00", "price": today_price}
+                for h in range(24)
+            ]
+        if tomorrow_price is not None:
+            attrs["price_tomorrow"] = [
+                {"start": f"{tomorrow_date}T{h:02d}:00:00+00:00", "price": tomorrow_price}
+                for h in range(24)
+            ]
+        return _MockPriceState(entity_id, str(today_price or 0.0), attrs)
+
+    def _make_pradcast_state(self, entity_id: str, target_date, price_kwh: float):
+        attrs = {
+            "date": str(target_date),
+            "prices": [{"hour": h, "price_kwh": price_kwh} for h in range(24)],
+        }
+        return _MockPriceState(entity_id, str(price_kwh), attrs)
+
+    def test_both_fixed_with_zero_sell_ignores_pradcast_and_forecast_discount(self):
+        from datetime import timedelta
+        from homeassistant.util import dt as dt_util
+
+        today = dt_util.now().date()
+        tomorrow = today + timedelta(days=1)
+        prad_td = self._make_pradcast_state("sensor.prad_today", today, 0.90)
+        prad_tmr = self._make_pradcast_state("sensor.prad_tomorrow", tomorrow, 1.10)
+
+        res = resolve_hourly_tariffs(
+            buy_mode=PRICE_MODE_FIXED,
+            buy_fixed=1.15,
+            buy_state=None,
+            sell_mode=PRICE_MODE_FIXED,
+            sell_fixed=0.0,
+            sell_state=None,
+            prad_today_state=prad_td,
+            prad_tomorrow_state=prad_tmr,
+            distribution_fee_fallback=0.40,
+        )
+
+        self.assertEqual(res["buy_today"], [1.15] * 24)
+        self.assertEqual(res["buy_tomorrow"], [1.15] * 24)
+        self.assertEqual(res["sell_today"], [0.0] * 24)
+        self.assertEqual(res["sell_tomorrow"], [0.0] * 24)
+        self.assertTrue(res["price_tomorrow_has_data"])
+        self.assertEqual(res["today_source"], "fixed")
+        self.assertEqual(res["tomorrow_source"], "fixed")
+        self.assertFalse(res["tomorrow_is_forecast"])
+
+    def test_hybrid_fixed_buy_and_sensor_sell_with_pradcast_forecast(self):
+        from datetime import timedelta
+        from homeassistant.util import dt as dt_util
+
+        today = dt_util.now().date()
+        tomorrow = today + timedelta(days=1)
+        sell_state = self._make_pstryk_state("sensor.pstryk_sell", today_price=0.80, tomorrow_price=None)
+        prad_tmr = self._make_pradcast_state("sensor.prad_tomorrow", tomorrow, 1.00)
+
+        res = resolve_hourly_tariffs(
+            buy_mode=PRICE_MODE_FIXED,
+            buy_fixed=1.20,
+            buy_state=None,
+            sell_mode=PRICE_MODE_SENSOR,
+            sell_fixed=None,
+            sell_state=sell_state,
+            prad_today_state=None,
+            prad_tomorrow_state=prad_tmr,
+            distribution_fee_fallback=0.40,
+        )
+
+        # Fixed buy must remain untouched by PradCast tomorrow forecast
+        self.assertEqual(res["buy_today"], [1.20] * 24)
+        self.assertEqual(res["buy_tomorrow"], [1.20] * 24)
+        # Sensor sell gets Pstryk today and PradCast * 1.23 tomorrow
+        self.assertEqual(res["sell_today"], [0.80] * 24)
+        self.assertEqual(res["sell_tomorrow"], [1.23] * 24)
+        self.assertTrue(res["price_tomorrow_has_data"])
+        self.assertEqual(res["tomorrow_source"], "pradcast_forecast")
+        self.assertTrue(res["tomorrow_is_forecast"])
+
+    def test_hybrid_sensor_buy_and_fixed_zero_sell_guards_missing_tomorrow(self):
+        from datetime import timedelta
+        from homeassistant.util import dt as dt_util
+
+        today = dt_util.now().date()
+        tomorrow = today + timedelta(days=1)
+
+        # Case A: Buy sensor has today only (no tomorrow) -> must NOT mark tomorrow ready
+        buy_today_only = self._make_pstryk_state("sensor.pstryk_buy", today_price=1.50, tomorrow_price=None)
+        res_no_tmr = resolve_hourly_tariffs(
+            buy_mode=PRICE_MODE_SENSOR,
+            buy_fixed=None,
+            buy_state=buy_today_only,
+            sell_mode=PRICE_MODE_FIXED,
+            sell_fixed=0.0,
+            sell_state=None,
+        )
+        self.assertFalse(res_no_tmr["price_tomorrow_has_data"])
+        self.assertEqual(res_no_tmr["sell_today"], [0.0] * 24)
+        self.assertEqual(res_no_tmr["sell_tomorrow"], [0.0] * 24)
+
+        # Case B: Buy sensor uses PradCast tomorrow while sell is fixed -> tomorrow ready, NO sell forecast discount
+        prad_tmr = self._make_pradcast_state("sensor.prad_tomorrow", tomorrow, 1.00)
+        res_with_prad = resolve_hourly_tariffs(
+            buy_mode=PRICE_MODE_SENSOR,
+            buy_fixed=None,
+            buy_state=buy_today_only,
+            sell_mode=PRICE_MODE_FIXED,
+            sell_fixed=0.0,
+            sell_state=None,
+            prad_tomorrow_state=prad_tmr,
+            distribution_fee_fallback=0.40,
+        )
+        self.assertTrue(res_with_prad["price_tomorrow_has_data"])
+        self.assertEqual(res_with_prad["buy_tomorrow"], [1.63] * 24)
+        self.assertEqual(res_with_prad["sell_tomorrow"], [0.0] * 24)
+        self.assertFalse(res_with_prad["tomorrow_is_forecast"])
+
+    def test_dp_fixed_buy_and_zero_sell_avoids_grid_charge_and_discharge(self):
+        """With constant buy=1.20 and sell=0.00 across 48h, DP must neither grid-charge nor export."""
+        config = DPConfig(
+            min_sell_price=0.20,
+            min_discharge_price=0.50,
+            battery_max_discharge_power=5.0,
+            battery_max_charge_power=5.0,
+            battery_min_soc=15,
+            battery_capacity=20.0,
+            min_energy_to_discharge=0.5,
+            battery_min_soc_evening=15.0,
+            battery_min_soc_morning=15.0,
+            min_arbitrage_profit=0.30,
+            eta_charge=0.93,
+            eta_discharge=0.93,
+            tomorrow_is_forecast=False,
+        )
+        slots = []
+        for day in ("2026-11-25", "2026-11-26"):
+            for h in range(24):
+                pv = 2.0 if 10 <= h <= 14 else 0.0
+                slots.append({
+                    "date": day,
+                    "hour": h,
+                    "buy_price": 1.20,
+                    "sell_price": 0.0,
+                    "pv_kwh": pv,
+                    "consumption_kwh": 0.5,
+                })
+
+        chg, dis, pvc, sc, pim, stats = run_unified_dp(
+            slots=slots,
+            current_usable=8.0,
+            usable_capacity=17.0,
+            cycle_cost=0.10,
+            terminal_value_per_kwh=1.20,
+            min_end_usable=3.0,
+            config=config,
+            remaining_hour_fraction=1.0,
+        )
+
+        self.assertEqual(chg, [], f"Should never grid-charge on flat tariff, got {chg}")
+        self.assertEqual(dis, [], f"Should never paid-discharge when sell=0.0, got {dis}")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

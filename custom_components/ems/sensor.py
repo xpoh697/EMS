@@ -27,7 +27,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
-from .utils import ems_log, is_debug_enabled
+from .utils import ems_log, is_debug_enabled, resolve_hourly_tariffs
 
 from .const import (
     DOMAIN,
@@ -50,6 +50,15 @@ from .const import (
     CONF_PEOPLE_HOME_SENSOR,
     CONF_PRICE_BUY_SENSOR,
     CONF_PRICE_SELL_SENSOR,
+    CONF_PRICE_BUY_MODE,
+    CONF_PRICE_SELL_MODE,
+    CONF_PRICE_BUY_FIXED,
+    CONF_PRICE_SELL_FIXED,
+    PRICE_MODE_SENSOR,
+    PRICE_MODE_FIXED,
+    DEFAULT_PRICE_MODE,
+    DEFAULT_PRICE_BUY_FIXED,
+    DEFAULT_PRICE_SELL_FIXED,
     CONF_SYSTEM_COST,
     CONF_MIN_SELL_PRICE,
     CONF_PRADCAST_TODAY_SENSOR,
@@ -382,8 +391,18 @@ async def async_setup_entry(
     pv_tomorrow_id = options.get(CONF_PV_FORECAST_TOMORROW, config.get(CONF_PV_FORECAST_TOMORROW))
 
     # Financial settings
-    price_buy_sensor_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
-    price_sell_sensor_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
+    price_buy_mode = options.get(CONF_PRICE_BUY_MODE, config.get(CONF_PRICE_BUY_MODE, DEFAULT_PRICE_MODE))
+    price_sell_mode = options.get(CONF_PRICE_SELL_MODE, config.get(CONF_PRICE_SELL_MODE, DEFAULT_PRICE_MODE))
+    price_buy_fixed = float(options.get(CONF_PRICE_BUY_FIXED, config.get(CONF_PRICE_BUY_FIXED, DEFAULT_PRICE_BUY_FIXED)))
+    price_sell_fixed = float(options.get(CONF_PRICE_SELL_FIXED, config.get(CONF_PRICE_SELL_FIXED, DEFAULT_PRICE_SELL_FIXED)))
+    price_buy_sensor_id = (
+        None if price_buy_mode == PRICE_MODE_FIXED
+        else options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
+    )
+    price_sell_sensor_id = (
+        None if price_sell_mode == PRICE_MODE_FIXED
+        else options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
+    )
     system_cost = options.get(CONF_SYSTEM_COST, config.get(CONF_SYSTEM_COST, DEFAULT_SYSTEM_COST))
     min_sell_price = options.get(CONF_MIN_SELL_PRICE, config.get(CONF_MIN_SELL_PRICE, DEFAULT_MIN_SELL_PRICE))
     pradcast_today_sensor_id = options.get(CONF_PRADCAST_TODAY_SENSOR, config.get(CONF_PRADCAST_TODAY_SENSOR))
@@ -455,13 +474,17 @@ async def async_setup_entry(
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"PV Forecast tomorrow sensor configured successfully: {pv_tomorrow_id}")
 
-    # Log errors or info for Financial sensors
-    if not price_buy_sensor_id:
+    # Log errors or info for Financial tariffs
+    if price_buy_mode == PRICE_MODE_FIXED:
+        ems_log(hass, _LOGGER, logging.INFO, f"Price buy configured as fixed value: {price_buy_fixed}")
+    elif not price_buy_sensor_id:
         ems_log(hass, _LOGGER, logging.ERROR, "Price buy sensor is not configured in settings!")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Price buy sensor configured successfully: {price_buy_sensor_id}")
 
-    if not price_sell_sensor_id:
+    if price_sell_mode == PRICE_MODE_FIXED:
+        ems_log(hass, _LOGGER, logging.INFO, f"Price sell configured as fixed value: {price_sell_fixed}")
+    elif not price_sell_sensor_id:
         ems_log(hass, _LOGGER, logging.ERROR, "Price sell sensor is not configured in settings!")
     else:
         ems_log(hass, _LOGGER, logging.INFO, f"Price sell sensor configured successfully: {price_sell_sensor_id}")
@@ -554,162 +577,69 @@ async def async_setup_entry(
 
     # Calculate and log buy/sell price sensors
     def update_prices():
-        """Fetch and parse buy/sell prices, then save to hass.data.
-
-        Midnight rollover protection:
-        - Before parsing: save a snapshot of the current tomorrow-prices as
-          ``price_buy_prev_tomorrow`` / ``price_sell_prev_tomorrow``.  We only
-          overwrite the snapshot when the currently-stored tomorrow list is
-          non-empty (has at least one non-zero value), so the snapshot always
-          holds the last meaningful set of tomorrow prices.
-        - After parsing: if ``today_has_data`` comes back False (the sensor's
-          ``price_today`` attribute is absent or not a list) **and** a non-empty
-          prev_tomorrow snapshot exists, we promote that snapshot to ``price_buy_today``
-          / ``price_sell_today``.  This covers the window right after midnight when
-          the provider has already renamed yesterday's tomorrow → today, but the new
-          day's data hasn't been fetched yet by the HA sensor.
-        - ``price_tomorrow_has_data`` is stored as a separate bool so that
-          ``_calculate_strategy_sync`` can distinguish "no tomorrow data" from
-          "tomorrow prices are legitimately zero/negative".
-        """
+        """Fetch and resolve buy/sell prices (sensor, fixed, or hybrid), then save to hass.data."""
         if DOMAIN not in hass.data:
             hass.data[DOMAIN] = {}
 
-        buy_today_has_data = False
-        sell_today_has_data = False
-        tomorrow_has_data_buy = False
-        tomorrow_has_data_sell = False
-
-        if price_buy_sensor_id:
-            # --- snapshot: remember last valid tomorrow prices BEFORE they disappear ---
+        if price_buy_mode == PRICE_MODE_SENSOR:
             existing_buy_tomorrow = hass.data[DOMAIN].get("price_buy_tomorrow", [])
             if any(v != 0.0 for v in existing_buy_tomorrow):
                 hass.data[DOMAIN]["price_buy_prev_tomorrow"] = list(existing_buy_tomorrow)
 
-            buy_state = hass.states.get(price_buy_sensor_id)
-            buy_today, buy_tomorrow, buy_today_has_data, tomorrow_has_data_buy = parse_price_sensor(buy_state)
-
-            # --- fallback: if today rolled over but new data not yet arrived ---
-            if not buy_today_has_data:
-                prev = hass.data[DOMAIN].get("price_buy_prev_tomorrow", [])
-                if any(v != 0.0 for v in prev):
-                    buy_today = list(prev)
-                    ems_log(
-                        hass, _LOGGER, logging.WARNING,
-                        "Price buy today attribute missing — using prev-tomorrow snapshot as today (midnight rollover)"
-                    )
-
-            hass.data[DOMAIN]["price_buy_today"] = buy_today
-            hass.data[DOMAIN]["price_buy_tomorrow"] = buy_tomorrow
-            ems_log(
-                hass,
-                _LOGGER,
-                logging.INFO,
-                f"Parsed Buy Prices Today (has_data={buy_today_has_data}): {buy_today}, "
-                f"Tomorrow (has_data={tomorrow_has_data_buy}): {buy_tomorrow}"
-            )
-
-        if price_sell_sensor_id:
-            # --- snapshot: remember last valid tomorrow prices BEFORE they disappear ---
+        if price_sell_mode == PRICE_MODE_SENSOR:
             existing_sell_tomorrow = hass.data[DOMAIN].get("price_sell_tomorrow", [])
             if any(v != 0.0 for v in existing_sell_tomorrow):
                 hass.data[DOMAIN]["price_sell_prev_tomorrow"] = list(existing_sell_tomorrow)
 
-            sell_state = hass.states.get(price_sell_sensor_id)
-            sell_today, sell_tomorrow, sell_today_has_data, tomorrow_has_data_sell = parse_price_sensor(sell_state)
+        buy_state = hass.states.get(price_buy_sensor_id) if (price_buy_mode == PRICE_MODE_SENSOR and price_buy_sensor_id) else None
+        sell_state = hass.states.get(price_sell_sensor_id) if (price_sell_mode == PRICE_MODE_SENSOR and price_sell_sensor_id) else None
+        prad_state_td = hass.states.get(pradcast_today_sensor_id) if pradcast_today_sensor_id else None
+        prad_state_tmr = hass.states.get(pradcast_tomorrow_sensor_id) if pradcast_tomorrow_sensor_id else None
 
-            # --- fallback: if today rolled over but new data not yet arrived ---
-            if not sell_today_has_data:
-                prev = hass.data[DOMAIN].get("price_sell_prev_tomorrow", [])
-                if any(v != 0.0 for v in prev):
-                    sell_today = list(prev)
-                    ems_log(
-                        hass, _LOGGER, logging.WARNING,
-                        "Price sell today attribute missing — using prev-tomorrow snapshot as today (midnight rollover)"
-                    )
+        resolved = resolve_hourly_tariffs(
+            buy_mode=price_buy_mode,
+            buy_fixed=price_buy_fixed,
+            buy_state=buy_state,
+            sell_mode=price_sell_mode,
+            sell_fixed=price_sell_fixed,
+            sell_state=sell_state,
+            prad_today_state=prad_state_td,
+            prad_tomorrow_state=prad_state_tmr,
+            distribution_fee_fallback=distribution_fee_fallback,
+            prev_buy_tomorrow=hass.data[DOMAIN].get("price_buy_prev_tomorrow"),
+            prev_sell_tomorrow=hass.data[DOMAIN].get("price_sell_prev_tomorrow"),
+        )
 
-            hass.data[DOMAIN]["price_sell_today"] = sell_today
-            hass.data[DOMAIN]["price_sell_tomorrow"] = sell_tomorrow
+        if resolved["buy_rollover_used"]:
             ems_log(
-                hass,
-                _LOGGER,
-                logging.INFO,
-                f"Parsed Sell Prices Today (has_data={sell_today_has_data}): {sell_today}, "
-                f"Tomorrow (has_data={tomorrow_has_data_sell}): {sell_tomorrow}"
+                hass, _LOGGER, logging.WARNING,
+                "Price buy today attribute missing — using prev-tomorrow snapshot as today (midnight rollover)"
+            )
+        if resolved["sell_rollover_used"]:
+            ems_log(
+                hass, _LOGGER, logging.WARNING,
+                "Price sell today attribute missing — using prev-tomorrow snapshot as today (midnight rollover)"
             )
 
-        # Check if tomorrow prices are available from Pstryk
-        tomorrow_source = "pstryk" if (tomorrow_has_data_buy and any(v != 0.0 for v in hass.data[DOMAIN].get("price_buy_tomorrow", []))) else "none"
+        hass.data[DOMAIN]["price_buy_today"] = resolved["buy_today"]
+        hass.data[DOMAIN]["price_buy_tomorrow"] = resolved["buy_tomorrow"]
+        hass.data[DOMAIN]["price_sell_today"] = resolved["sell_today"]
+        hass.data[DOMAIN]["price_sell_tomorrow"] = resolved["sell_tomorrow"]
+        hass.data[DOMAIN]["today_prices_source"] = resolved["today_source"]
+        hass.data[DOMAIN]["tomorrow_prices_source"] = resolved["tomorrow_source"]
+        hass.data[DOMAIN]["tomorrow_is_forecast"] = resolved["tomorrow_is_forecast"]
+        hass.data[DOMAIN]["price_tomorrow_has_data"] = resolved["price_tomorrow_has_data"]
 
-        # Check if today prices are available from Pstryk
-        today_source = "pstryk" if (buy_today_has_data and any(v != 0.0 for v in hass.data[DOMAIN].get("price_buy_today", []))) else "none"
-
-        # If Pstryk today is missing, check if PradCast today forecast is configured
-        if today_source != "pstryk" and pradcast_today_sensor_id:
-            prad_state_td = hass.states.get(pradcast_today_sensor_id)
-            if prad_state_td:
-                prad_td, _, has_prad_td, _ = parse_price_sensor(prad_state_td)
-                if has_prad_td and any(v != 0.0 for v in prad_td):
-                    if not any(v != 0.0 for v in hass.data[DOMAIN].get("price_buy_today", [])):
-                        forecast_sell_td = [round(prad_td[h] * 1.23, 6) for h in range(24)]
-                        forecast_buy_td = [round(max(0.0, forecast_sell_td[h] + distribution_fee_fallback), 6) for h in range(24)]
-                        hass.data[DOMAIN]["price_buy_today"] = forecast_buy_td
-                        hass.data[DOMAIN]["price_sell_today"] = forecast_sell_td
-                        buy_today_has_data = True
-                        today_source = "pradcast_forecast"
-
-        # If Pstryk tomorrow is missing, check if PradCast tomorrow forecast is configured
-        if tomorrow_source != "pstryk" and pradcast_tomorrow_sensor_id:
-            prad_state_tmr = hass.states.get(pradcast_tomorrow_sensor_id)
-            if prad_state_tmr:
-                _, prad_tmr, _, has_prad_tmr = parse_price_sensor(prad_state_tmr)
-                if has_prad_tmr and any(v != 0.0 for v in prad_tmr):
-                    cur_buy_today = hass.data[DOMAIN].get("price_buy_today", [])
-                    cur_sell_today = hass.data[DOMAIN].get("price_sell_today", [])
-
-                    if (not cur_sell_today or not any(cur_sell_today)) and pradcast_today_sensor_id:
-                        prad_state_td = hass.states.get(pradcast_today_sensor_id)
-                        if prad_state_td:
-                            prad_td, _, has_prad_td, _ = parse_price_sensor(prad_state_td)
-                            if has_prad_td and any(prad_td):
-                                cur_sell_today = [round(p * 1.23, 6) for p in prad_td]
-
-                    diffs = []
-                    hourly_distrib = [distribution_fee_fallback] * 24
-                    for h in range(24):
-                        b = cur_buy_today[h] if h < len(cur_buy_today) else 0.0
-                        s = cur_sell_today[h] if h < len(cur_sell_today) else 0.0
-                        if b > 0.0 and s > 0.0 and b > s:
-                            d = round(b - s, 4)
-                            diffs.append(d)
-                            hourly_distrib[h] = d
-
-                    if diffs:
-                        diffs_sorted = sorted(diffs)
-                        median_d = diffs_sorted[len(diffs_sorted) // 2]
-                        for h in range(24):
-                            if hourly_distrib[h] == distribution_fee_fallback:
-                                hourly_distrib[h] = median_d
-
-                    # Calculate tomorrow forecast: Sell = TGE * 1.23, Buy = max(0.0, Sell + D(h))
-                    forecast_sell = [round(prad_tmr[h] * 1.23, 6) for h in range(24)]
-                    forecast_buy = [round(max(0.0, forecast_sell[h] + hourly_distrib[h]), 6) for h in range(24)]
-
-                    hass.data[DOMAIN]["price_buy_tomorrow"] = forecast_buy
-                    hass.data[DOMAIN]["price_sell_tomorrow"] = forecast_sell
-                    tomorrow_has_data_buy = True
-                    tomorrow_has_data_sell = True
-                    tomorrow_source = "pradcast_forecast"
-                    ems_log(
-                        hass,
-                        _LOGGER,
-                        logging.INFO,
-                        f"PradCast Day-Ahead forecast applied for tomorrow: buy={forecast_buy[:3]}..., sell={forecast_sell[:3]}... (source={tomorrow_source})"
-                    )
-
-        hass.data[DOMAIN]["today_prices_source"] = today_source
-        hass.data[DOMAIN]["tomorrow_prices_source"] = tomorrow_source
-        hass.data[DOMAIN]["price_tomorrow_has_data"] = tomorrow_has_data_buy or tomorrow_has_data_sell
+        ems_log(
+            hass,
+            _LOGGER,
+            logging.INFO,
+            f"Resolved Buy Prices (mode={price_buy_mode}) Today={resolved['buy_today'][:3]}..., "
+            f"Tomorrow(has_data={resolved['buy_tomorrow_has_data']})={resolved['buy_tomorrow'][:3]}...; "
+            f"Sell Prices (mode={price_sell_mode}) Today={resolved['sell_today'][:3]}..., "
+            f"Tomorrow(has_data={resolved['sell_tomorrow_has_data']})={resolved['sell_tomorrow'][:3]}... "
+            f"(sources today={resolved['today_source']}, tomorrow={resolved['tomorrow_source']}, forecast={resolved['tomorrow_is_forecast']})"
+        )
 
     # Initial calculation
     update_prices()
@@ -810,7 +740,9 @@ async def async_setup_entry(
             )
         )
 
-    if total_grid_export_id and total_grid_import_id and target_sensor_id and price_buy_sensor_id and price_sell_sensor_id:
+    has_buy_tariff = (price_buy_mode == PRICE_MODE_FIXED) or bool(price_buy_sensor_id)
+    has_sell_tariff = (price_sell_mode == PRICE_MODE_FIXED) or bool(price_sell_sensor_id)
+    if total_grid_export_id and total_grid_import_id and target_sensor_id and has_buy_tariff and has_sell_tariff:
         entities.append(
             EmsTodayProfitSensor(
                 entry_id=entry.entry_id,
@@ -820,6 +752,8 @@ async def async_setup_entry(
                 grid_import_sensor_id=total_grid_import_id,
                 price_buy_sensor_id=price_buy_sensor_id,
                 price_sell_sensor_id=price_sell_sensor_id,
+                price_buy_fixed=price_buy_fixed if price_buy_mode == PRICE_MODE_FIXED else None,
+                price_sell_fixed=price_sell_fixed if price_sell_mode == PRICE_MODE_FIXED else None,
             )
         )
         entities.append(
@@ -864,6 +798,7 @@ async def async_setup_entry(
         discharge_sensor_id=bat_discharge_today_entity_id,
         inverter_losses_sensor_id=inverter_losses_today_entity_id,
         fallback_min_soc=float(min_bat_soc_morning if min_bat_soc_morning is not None else 17.0),
+        price_buy_fixed=price_buy_fixed if price_buy_mode == PRICE_MODE_FIXED else None,
     )
     entities.append(conversion_loss_sensor)
     entities.append(
@@ -1874,8 +1809,10 @@ class EmsDpSensor(SensorEntity):
 
         config = self._entry.data
         options = self._entry.options
-        price_buy_sensor_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
-        price_sell_sensor_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
+        price_buy_mode = options.get(CONF_PRICE_BUY_MODE, config.get(CONF_PRICE_BUY_MODE, DEFAULT_PRICE_MODE))
+        price_sell_mode = options.get(CONF_PRICE_SELL_MODE, config.get(CONF_PRICE_SELL_MODE, DEFAULT_PRICE_MODE))
+        price_buy_sensor_id = None if price_buy_mode == PRICE_MODE_FIXED else options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
+        price_sell_sensor_id = None if price_sell_mode == PRICE_MODE_FIXED else options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
         bat_soc_entity_id = options.get(CONF_BAT_SOC_ENTITY, config.get(CONF_BAT_SOC_ENTITY))
         total_load_consumption_id = options.get(CONF_TOTAL_LOAD_CONSUMPTION, config.get(CONF_TOTAL_LOAD_CONSUMPTION))
 
@@ -2039,12 +1976,15 @@ class EmsDpSensor(SensorEntity):
             from datetime import timedelta
             tomorrow_date_str = (dt_util.now() + timedelta(days=1)).strftime("%Y-%m-%d")
             plan_has_tomorrow = any(slot.get("date") == tomorrow_date_str for slot in self._schedule)
-            buy_prices_tomorrow = self.hass.data.get(DOMAIN, {}).get("price_buy_tomorrow", [])
-            has_tomorrow_prices = any(v != 0.0 for v in buy_prices_tomorrow)
+            has_tomorrow_prices = bool(self.hass.data.get(DOMAIN, {}).get("price_tomorrow_has_data", False))
             tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")
+            tomorrow_is_fcst_now = bool(
+                self.hass.data.get(DOMAIN, {}).get("tomorrow_is_forecast", tomorrow_source == "pradcast_forecast")
+            )
 
             tomorrow_prices_just_arrived = has_tomorrow_prices and (
-                not plan_has_tomorrow or (getattr(self, "_tomorrow_is_forecast", False) and tomorrow_source == "pstryk")
+                not plan_has_tomorrow
+                or (getattr(self, "_tomorrow_is_forecast", False) and not tomorrow_is_fcst_now and tomorrow_source in ("pstryk", "fixed"))
             )
 
             force = (was_invalid and is_valid) or (has_no_prices_in_plan and has_prices_now) or tomorrow_prices_just_arrived
@@ -2109,14 +2049,18 @@ class EmsDpSensor(SensorEntity):
             storage = self.hass.data[DOMAIN][self._entry_id]["storage"]
 
             # 1. Validate mandatory configuration keys are present
+            price_buy_mode = options.get(CONF_PRICE_BUY_MODE, config.get(CONF_PRICE_BUY_MODE, DEFAULT_PRICE_MODE))
+            price_sell_mode = options.get(CONF_PRICE_SELL_MODE, config.get(CONF_PRICE_SELL_MODE, DEFAULT_PRICE_MODE))
             required_keys = [
                 CONF_TOTAL_LOAD_CONSUMPTION,
                 CONF_PV_FORECAST_TODAY,
                 CONF_PV_FORECAST_TOMORROW,
-                CONF_PRICE_BUY_SENSOR,
-                CONF_PRICE_SELL_SENSOR,
                 CONF_BAT_SOC_ENTITY,
             ]
+            if price_buy_mode != PRICE_MODE_FIXED:
+                required_keys.append(CONF_PRICE_BUY_SENSOR)
+            if price_sell_mode != PRICE_MODE_FIXED:
+                required_keys.append(CONF_PRICE_SELL_SENSOR)
             for key in required_keys:
                 entity_id = options.get(key, config.get(key))
                 if not entity_id:
@@ -2139,8 +2083,8 @@ class EmsDpSensor(SensorEntity):
             bat_voltage_entity_id = options.get(CONF_BAT_VOLTAGE, config.get(CONF_BAT_VOLTAGE))
 
             # 2. Check states of required entities
-            price_buy_id = options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
-            price_sell_id = options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
+            price_buy_id = None if price_buy_mode == PRICE_MODE_FIXED else options.get(CONF_PRICE_BUY_SENSOR, config.get(CONF_PRICE_BUY_SENSOR))
+            price_sell_id = None if price_sell_mode == PRICE_MODE_FIXED else options.get(CONF_PRICE_SELL_SENSOR, config.get(CONF_PRICE_SELL_SENSOR))
             for entity_id in [
                 total_load_consumption_id,
                 bat_soc_entity_id,
@@ -2443,7 +2387,9 @@ class EmsDpSensor(SensorEntity):
             else:
                 weekly_rte = float(self.hass.data.get(DOMAIN, {}).get("weekly_round_trip_efficiency", 0.865))
             tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")
-            tomorrow_is_forecast = (tomorrow_source == "pradcast_forecast")
+            tomorrow_is_forecast = bool(
+                self.hass.data.get(DOMAIN, {}).get("tomorrow_is_forecast", tomorrow_source == "pradcast_forecast")
+            )
 
             limit_export_to_monthly_pv = bool(options.get(
                 CONF_LIMIT_EXPORT_TO_MONTHLY_PV,
@@ -2524,7 +2470,12 @@ class EmsDpSensor(SensorEntity):
             else:
                 self._state = result.get("current_action", "idle")
             self._error_msg = result.get("error")
-            self._tomorrow_is_forecast = (self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source") == "pradcast_forecast")
+            self._tomorrow_is_forecast = bool(
+                self.hass.data.get(DOMAIN, {}).get(
+                    "tomorrow_is_forecast",
+                    self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source") == "pradcast_forecast",
+                )
+            )
             if self._error_msg:
                 ems_log(self.hass, _LOGGER, logging.ERROR, f"EMS DP calculation error: {self._error_msg}")
             self._curtailed_pv_today = result.get("curtailed_pv_today", 0.0)
@@ -2698,7 +2649,9 @@ class EmsDpSensor(SensorEntity):
 
         if tomorrow_is_forecast is None:
             tomorrow_source = self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source")
-            tomorrow_is_forecast = (tomorrow_source == "pradcast_forecast")
+            tomorrow_is_forecast = bool(
+                self.hass.data.get(DOMAIN, {}).get("tomorrow_is_forecast", tomorrow_source == "pradcast_forecast")
+            )
 
         # Calculate remaining daily discharge budget
         rem_today = max(0.0, max_daily_discharge_kwh - already_sold_today) if max_daily_discharge_kwh > 0.0 else 0.0
@@ -3851,7 +3804,12 @@ class EmsSchedulerSensor(SensorEntity):
             "today_is_forecast": (self.hass.data.get(DOMAIN, {}).get("today_prices_source") == "pradcast_forecast"),
             "tomorrow_prices_available": self.hass.data.get(DOMAIN, {}).get("price_tomorrow_has_data", False),
             "tomorrow_prices_source": self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source", "none"),
-            "tomorrow_is_forecast": (self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source") == "pradcast_forecast"),
+            "tomorrow_is_forecast": bool(
+                self.hass.data.get(DOMAIN, {}).get(
+                    "tomorrow_is_forecast",
+                    self.hass.data.get(DOMAIN, {}).get("tomorrow_prices_source") == "pradcast_forecast",
+                )
+            ),
             "version": VERSION,
         }
 
@@ -4108,8 +4066,10 @@ class EmsTodayProfitSensor(RestoreSensor, SensorEntity):
         load_consumption_sensor_id: str,
         grid_export_sensor_id: str,
         grid_import_sensor_id: str,
-        price_buy_sensor_id: str,
-        price_sell_sensor_id: str,
+        price_buy_sensor_id: str | None = None,
+        price_sell_sensor_id: str | None = None,
+        price_buy_fixed: float | None = None,
+        price_sell_fixed: float | None = None,
     ) -> None:
         """Initialize the profit sensor."""
         self._entry_id = entry_id
@@ -4119,6 +4079,8 @@ class EmsTodayProfitSensor(RestoreSensor, SensorEntity):
         self._grid_import_sensor_id = grid_import_sensor_id
         self._price_buy_sensor_id = price_buy_sensor_id
         self._price_sell_sensor_id = price_sell_sensor_id
+        self._price_buy_fixed = price_buy_fixed
+        self._price_sell_fixed = price_sell_fixed
 
         self._attr_name = "Today Profit"
         self._attr_unique_id = f"{entry_id}_today_profit"
@@ -4245,19 +4207,25 @@ class EmsTodayProfitSensor(RestoreSensor, SensorEntity):
         buy_price = 0.0
         sell_price = 0.0
 
-        buy_state = self.hass.states.get(self._price_buy_sensor_id)
-        if buy_state and buy_state.state not in (None, "unknown", "unavailable"):
-            try:
-                buy_price = float(buy_state.state)
-            except (ValueError, TypeError):
-                pass
+        if self._price_buy_fixed is not None:
+            buy_price = float(self._price_buy_fixed)
+        elif self._price_buy_sensor_id:
+            buy_state = self.hass.states.get(self._price_buy_sensor_id)
+            if buy_state and buy_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    buy_price = float(buy_state.state)
+                except (ValueError, TypeError):
+                    pass
 
-        sell_state = self.hass.states.get(self._price_sell_sensor_id)
-        if sell_state and sell_state.state not in (None, "unknown", "unavailable"):
-            try:
-                sell_price = float(sell_state.state)
-            except (ValueError, TypeError):
-                pass
+        if self._price_sell_fixed is not None:
+            sell_price = float(self._price_sell_fixed)
+        elif self._price_sell_sensor_id:
+            sell_state = self.hass.states.get(self._price_sell_sensor_id)
+            if sell_state and sell_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    sell_price = float(sell_state.state)
+                except (ValueError, TypeError):
+                    pass
 
         return buy_price, sell_price
 
@@ -5901,6 +5869,7 @@ class EmsConversionLossesTodaySensor(RestoreSensor, SensorEntity):
         discharge_sensor_id: str | None = None,
         inverter_losses_sensor_id: str | None = None,
         fallback_min_soc: float = 17.0,
+        price_buy_fixed: float | None = None,
     ) -> None:
         self._entry_id = entry_id
         self._device_name = device_name
@@ -5909,6 +5878,7 @@ class EmsConversionLossesTodaySensor(RestoreSensor, SensorEntity):
         self._fallback_capacity = fallback_capacity
         self._price_buy_sensor_id = price_buy_sensor_id
         self._fallback_min_soc = fallback_min_soc
+        self._price_buy_fixed = price_buy_fixed
 
         self._attr_name = "Conversion Losses Today"
         self._attr_unique_id = f"{entry_id}_conversion_losses_today"
@@ -6128,7 +6098,11 @@ class EmsConversionLossesTodaySensor(RestoreSensor, SensorEntity):
         throughput_kwh = self._charge_today_kwh + self._discharge_today_kwh
         effective_base_kwh = max(0.5, throughput_kwh * 0.5)
 
-        buy_price = self._get_float(self._price_buy_sensor_id) or 0.85
+        if self._price_buy_fixed is not None:
+            buy_price = float(self._price_buy_fixed)
+        else:
+            sensor_buy = self._get_float(self._price_buy_sensor_id) if self._price_buy_sensor_id else None
+            buy_price = sensor_buy if sensor_buy is not None else 0.85
         self._cost_loss_pln = round(self._total_losses_kwh * buy_price, 2)
 
         # Fallback RTE from weekly rolling sensor or domain data to avoid morning startup spikes

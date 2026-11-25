@@ -4,7 +4,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
-from .const import DOMAIN, CONF_DEBUG
+from .const import DOMAIN, CONF_DEBUG, PRICE_MODE_FIXED, PRICE_MODE_SENSOR
 
 def is_debug_enabled(hass: HomeAssistant) -> bool:
     """Check if debug logging is enabled for the EMS integration."""
@@ -184,6 +184,150 @@ def parse_price_sensor(state_obj) -> tuple[list[float], list[float], bool, bool]
                     today_has_data = True
 
     return price_today, price_tomorrow, today_has_data, tomorrow_has_data
+
+def resolve_hourly_tariffs(
+    *,
+    buy_mode: str,
+    buy_fixed: float | None,
+    buy_state,
+    sell_mode: str,
+    sell_fixed: float | None,
+    sell_state,
+    prad_today_state=None,
+    prad_tomorrow_state=None,
+    distribution_fee_fallback: float = 0.0,
+    prev_buy_tomorrow: list[float] | None = None,
+    prev_sell_tomorrow: list[float] | None = None,
+) -> dict:
+    """Resolve 24h today/tomorrow buy & sell tariffs for sensor, fixed, or hybrid modes."""
+    buy_rollover_used = False
+    sell_rollover_used = False
+
+    if buy_mode == PRICE_MODE_FIXED:
+        fixed_b = round(float(buy_fixed if buy_fixed is not None else 0.0), 6)
+        buy_today = [fixed_b] * 24
+        buy_tomorrow = [fixed_b] * 24
+        buy_today_has_data = True
+        buy_tomorrow_has_data = True
+        buy_today_source = "fixed"
+        buy_tomorrow_source = "fixed"
+    else:
+        buy_today, buy_tomorrow, buy_today_has_data, buy_tomorrow_has_data = parse_price_sensor(buy_state)
+        if not buy_today_has_data and prev_buy_tomorrow and any(v != 0.0 for v in prev_buy_tomorrow):
+            buy_today = list(prev_buy_tomorrow)
+            buy_rollover_used = True
+        buy_today_source = "pstryk" if (buy_today_has_data and any(v != 0.0 for v in buy_today)) else "none"
+        buy_tomorrow_source = "pstryk" if (buy_tomorrow_has_data and any(v != 0.0 for v in buy_tomorrow)) else "none"
+
+    if sell_mode == PRICE_MODE_FIXED:
+        fixed_s = round(float(sell_fixed if sell_fixed is not None else 0.0), 6)
+        sell_today = [fixed_s] * 24
+        sell_tomorrow = [fixed_s] * 24
+        sell_today_has_data = True
+        sell_tomorrow_has_data = True
+        sell_today_source = "fixed"
+        sell_tomorrow_source = "fixed"
+    else:
+        sell_today, sell_tomorrow, sell_today_has_data, sell_tomorrow_has_data = parse_price_sensor(sell_state)
+        if not sell_today_has_data and prev_sell_tomorrow and any(v != 0.0 for v in prev_sell_tomorrow):
+            sell_today = list(prev_sell_tomorrow)
+            sell_rollover_used = True
+        sell_today_source = "pstryk" if (sell_today_has_data and any(v != 0.0 for v in sell_today)) else "none"
+        sell_tomorrow_source = "pstryk" if (sell_tomorrow_has_data and any(v != 0.0 for v in sell_tomorrow)) else "none"
+
+    prad_td: list[float] = []
+    has_prad_td = False
+    if prad_today_state is not None:
+        prad_td, _, has_prad_td, _ = parse_price_sensor(prad_today_state)
+
+    # PradCast Today fallback (only for sensor-mode channels without Pstryk today data)
+    if (
+        (buy_mode == PRICE_MODE_SENSOR and buy_today_source != "pstryk")
+        or (sell_mode == PRICE_MODE_SENSOR and sell_today_source != "pstryk")
+    ):
+        if has_prad_td and any(v != 0.0 for v in prad_td):
+            forecast_sell_td = [round(prad_td[h] * 1.23, 6) for h in range(24)]
+            forecast_buy_td = [round(max(0.0, forecast_sell_td[h] + distribution_fee_fallback), 6) for h in range(24)]
+            if buy_mode == PRICE_MODE_SENSOR and buy_today_source != "pstryk" and not any(v != 0.0 for v in buy_today):
+                buy_today = forecast_buy_td
+                buy_today_has_data = True
+                buy_today_source = "pradcast_forecast"
+            if sell_mode == PRICE_MODE_SENSOR and sell_today_source != "pstryk" and not any(v != 0.0 for v in sell_today):
+                sell_today = forecast_sell_td
+                sell_today_has_data = True
+                sell_today_source = "pradcast_forecast"
+
+    # PradCast Tomorrow fallback (only for sensor-mode channels without Pstryk tomorrow data)
+    if prad_tomorrow_state is not None and (
+        (buy_mode == PRICE_MODE_SENSOR and buy_tomorrow_source != "pstryk")
+        or (sell_mode == PRICE_MODE_SENSOR and sell_tomorrow_source != "pstryk")
+    ):
+        _, prad_tmr, _, has_prad_tmr = parse_price_sensor(prad_tomorrow_state)
+        if has_prad_tmr and any(v != 0.0 for v in prad_tmr):
+            cur_sell_today = list(sell_today)
+            if (not cur_sell_today or not any(cur_sell_today)) and has_prad_td and any(prad_td):
+                cur_sell_today = [round(p * 1.23, 6) for p in prad_td]
+
+            diffs = []
+            hourly_distrib = [distribution_fee_fallback] * 24
+            for h in range(24):
+                b = buy_today[h] if h < len(buy_today) else 0.0
+                s = cur_sell_today[h] if h < len(cur_sell_today) else 0.0
+                if b > 0.0 and s > 0.0 and b > s:
+                    d = round(b - s, 4)
+                    diffs.append(d)
+                    hourly_distrib[h] = d
+
+            if diffs:
+                diffs_sorted = sorted(diffs)
+                median_d = diffs_sorted[len(diffs_sorted) // 2]
+                for h in range(24):
+                    if hourly_distrib[h] == distribution_fee_fallback:
+                        hourly_distrib[h] = median_d
+
+            forecast_sell = [round(prad_tmr[h] * 1.23, 6) for h in range(24)]
+            forecast_buy = [round(max(0.0, forecast_sell[h] + hourly_distrib[h]), 6) for h in range(24)]
+
+            if buy_mode == PRICE_MODE_SENSOR and buy_tomorrow_source != "pstryk":
+                buy_tomorrow = forecast_buy
+                buy_tomorrow_has_data = True
+                buy_tomorrow_source = "pradcast_forecast"
+            if sell_mode == PRICE_MODE_SENSOR and sell_tomorrow_source != "pstryk":
+                sell_tomorrow = forecast_sell
+                sell_tomorrow_has_data = True
+                sell_tomorrow_source = "pradcast_forecast"
+
+    def _combine_sources(b_src: str, s_src: str) -> str:
+        if "pradcast_forecast" in (b_src, s_src):
+            return "pradcast_forecast"
+        if "pstryk" in (b_src, s_src):
+            return "pstryk"
+        if "fixed" in (b_src, s_src):
+            return "fixed"
+        return "none"
+
+    today_source = _combine_sources(buy_today_source, sell_today_source)
+    tomorrow_source = _combine_sources(buy_tomorrow_source, sell_tomorrow_source)
+    # Apply forecast sell discount only when tomorrow sell price itself is a PradCast forecast
+    tomorrow_is_forecast = (sell_tomorrow_source == "pradcast_forecast")
+    price_tomorrow_has_data = buy_tomorrow_has_data and sell_tomorrow_has_data
+
+    return {
+        "buy_today": buy_today,
+        "buy_tomorrow": buy_tomorrow,
+        "sell_today": sell_today,
+        "sell_tomorrow": sell_tomorrow,
+        "buy_today_has_data": buy_today_has_data,
+        "buy_tomorrow_has_data": buy_tomorrow_has_data,
+        "sell_today_has_data": sell_today_has_data,
+        "sell_tomorrow_has_data": sell_tomorrow_has_data,
+        "price_tomorrow_has_data": price_tomorrow_has_data,
+        "today_source": today_source,
+        "tomorrow_source": tomorrow_source,
+        "tomorrow_is_forecast": tomorrow_is_forecast,
+        "buy_rollover_used": buy_rollover_used,
+        "sell_rollover_used": sell_rollover_used,
+    }
 
 def map_dp_to_physical(
     action: str | None,

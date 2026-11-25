@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 DOMAIN = "ems"
-VERSION = "0.3.214"
+VERSION = "0.3.215"
 
 # Configuration and options keys
 CONF_TOTAL_LOAD_CONSUMPTION = "total_load_consumption"
@@ -39,6 +39,12 @@ CONF_BOILER_WARM_DIFF = "boiler_warm_diff"
 # Financial configuration keys
 CONF_PRICE_BUY_SENSOR = "price_buy_sensor"
 CONF_PRICE_SELL_SENSOR = "price_sell_sensor"
+CONF_PRICE_BUY_MODE = "price_buy_mode"
+CONF_PRICE_SELL_MODE = "price_sell_mode"
+CONF_PRICE_BUY_FIXED = "price_buy_fixed"
+CONF_PRICE_SELL_FIXED = "price_sell_fixed"
+PRICE_MODE_SENSOR = "sensor"
+PRICE_MODE_FIXED = "fixed"
 CONF_SYSTEM_COST = "system_cost"
 CONF_MIN_SELL_PRICE = "min_sell_price"
 CONF_MIN_DISCHARGE_PRICE = "min_discharge_price"
@@ -76,6 +82,9 @@ DEFAULT_FALLBACK_CONSUMPTION = 0.5
 DEFAULT_DEBUG = False
 
 DEFAULT_SYSTEM_COST = 0.0
+DEFAULT_PRICE_MODE = PRICE_MODE_SENSOR
+DEFAULT_PRICE_BUY_FIXED = 0.0
+DEFAULT_PRICE_SELL_FIXED = 0.0
 DEFAULT_MIN_SELL_PRICE = 0.0
 DEFAULT_DISTRIBUTION_FEE_FALLBACK = 0.40
 DEFAULT_MIN_DISCHARGE_PRICE = 0.0

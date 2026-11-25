@@ -223,6 +223,14 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
         CONF_BAT_SOC_ENTITY,
         CONF_PRICE_BUY_SENSOR,
         CONF_PRICE_SELL_SENSOR,
+        CONF_PRICE_BUY_MODE,
+        CONF_PRICE_SELL_MODE,
+        CONF_PRICE_BUY_FIXED,
+        CONF_PRICE_SELL_FIXED,
+        PRICE_MODE_FIXED,
+        DEFAULT_PRICE_MODE,
+        DEFAULT_PRICE_BUY_FIXED,
+        DEFAULT_PRICE_SELL_FIXED,
         CONF_BAT_CAPACITY_ENTITY,
         CONF_BAT_CAPACITY_FALLBACK,
         DEFAULT_BAT_CAPACITY_FALLBACK,
@@ -233,8 +241,12 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
     import_entity = config.get(CONF_TOTAL_GRID_IMPORT)
     export_entity = config.get(CONF_TOTAL_GRID_EXPORT)
     soc_entity = config.get(CONF_BAT_SOC_ENTITY)
-    buy_entity = config.get(CONF_PRICE_BUY_SENSOR)
-    sell_entity = config.get(CONF_PRICE_SELL_SENSOR)
+    buy_mode = config.get(CONF_PRICE_BUY_MODE, DEFAULT_PRICE_MODE)
+    sell_mode = config.get(CONF_PRICE_SELL_MODE, DEFAULT_PRICE_MODE)
+    buy_fixed = float(config.get(CONF_PRICE_BUY_FIXED, DEFAULT_PRICE_BUY_FIXED))
+    sell_fixed = float(config.get(CONF_PRICE_SELL_FIXED, DEFAULT_PRICE_SELL_FIXED))
+    buy_entity = None if buy_mode == PRICE_MODE_FIXED else config.get(CONF_PRICE_BUY_SENSOR)
+    sell_entity = None if sell_mode == PRICE_MODE_FIXED else config.get(CONF_PRICE_SELL_SENSOR)
     cap_entity = config.get(CONF_BAT_CAPACITY_ENTITY)
 
     _LOGGER.debug(
@@ -365,8 +377,10 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
                     except (ValueError, TypeError, IndexError):
                         pass
 
-        populate_from_fallback(buy_prices_fallback, buy_means)
-        populate_from_fallback(sell_prices_fallback, sell_means)
+        if buy_mode != PRICE_MODE_FIXED:
+            populate_from_fallback(buy_prices_fallback, buy_means)
+        if sell_mode != PRICE_MODE_FIXED:
+            populate_from_fallback(sell_prices_fallback, sell_means)
 
         _LOGGER.debug(
             "ws_get_history_30_days: stats deltas/means computed: load=%d, pv=%d, import=%d, export=%d, soc=%d, buy=%d, sell=%d",
@@ -406,17 +420,23 @@ async def ws_get_history_30_days(hass: HomeAssistant, connection: websocket_api.
                 else:
                     soc_val = last_soc
                 
-            buy_val = buy_means.get((date_str, hour))
-            if buy_val is not None:
-                last_buy = buy_val
+            if buy_mode == PRICE_MODE_FIXED:
+                buy_val = round(buy_fixed, 4)
             else:
-                buy_val = last_buy
-                
-            sell_val = sell_means.get((date_str, hour))
-            if sell_val is not None:
-                last_sell = sell_val
+                buy_val = buy_means.get((date_str, hour))
+                if buy_val is not None:
+                    last_buy = buy_val
+                else:
+                    buy_val = last_buy
+
+            if sell_mode == PRICE_MODE_FIXED:
+                sell_val = round(sell_fixed, 4)
             else:
-                sell_val = last_sell
+                sell_val = sell_means.get((date_str, hour))
+                if sell_val is not None:
+                    last_sell = sell_val
+                else:
+                    sell_val = last_sell
                 
             day_entry[hour] = {
                 "hour": hour,
