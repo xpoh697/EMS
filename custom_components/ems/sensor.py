@@ -2840,7 +2840,7 @@ class EmsDpSensor(SensorEntity):
                         "hour": slot["hour"],
                         "pv_kwh": round(pv_surplus, 2),
                     })
-                elif effective_pv > 0.05:
+                elif slot.get("pv_kwh", 0.0) > 0.01:
                     action = "normal"
 
             if idx == 0:
