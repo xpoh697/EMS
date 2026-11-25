@@ -1936,6 +1936,49 @@ class TestFixedTariffSupport(unittest.TestCase):
         self.assertEqual(chg, [], f"Should never grid-charge on flat tariff, got {chg}")
         self.assertEqual(dis, [], f"Should never paid-discharge when sell=0.0, got {dis}")
 
+    def test_dp_flat_tariff_low_soc_below_min_end_usable_stays_idle(self):
+        """Even when current_usable < min_end_usable, flat buy=1.20 / sell=0.15 must NOT grid-charge."""
+        config = DPConfig(
+            min_sell_price=0.20,
+            min_discharge_price=0.50,
+            battery_max_discharge_power=6.5,
+            battery_max_charge_power=6.5,
+            battery_min_soc=15,
+            battery_capacity=16.0,
+            min_energy_to_discharge=0.5,
+            battery_min_soc_evening=15.0,
+            battery_min_soc_morning=15.0,
+            min_arbitrage_profit=0.30,
+            eta_charge=0.93,
+            eta_discharge=0.93,
+            tomorrow_is_forecast=False,
+        )
+        slots = []
+        for day, start_h in (("2026-11-25", 9), ("2026-11-26", 0)):
+            for h in range(start_h, 24):
+                slots.append({
+                    "date": day,
+                    "hour": h,
+                    "buy_price": 1.20,
+                    "sell_price": 0.15,
+                    "pv_kwh": 0.16 if h == 9 else 0.05,
+                    "consumption_kwh": 0.40,
+                })
+
+        chg, dis, pvc, sc, pim, stats = run_unified_dp(
+            slots=slots,
+            current_usable=0.48,  # 18% SOC < 28% min_end_usable
+            usable_capacity=13.6,
+            cycle_cost=0.109375,
+            terminal_value_per_kwh=1.309375,
+            min_end_usable=2.08,  # 28% SOC reserve target
+            config=config,
+            remaining_hour_fraction=0.25,
+        )
+
+        self.assertEqual(chg, [], f"Flat tariff must stay idle/SOL instead of grid-charging for reserve, got {chg}")
+        self.assertEqual(dis, [], f"Should not export when sell=0.15 < min_sell_price, got {dis}")
+
 
 if __name__ == "__main__":
     unittest.main()

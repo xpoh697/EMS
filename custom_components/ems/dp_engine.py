@@ -249,8 +249,13 @@ def _compute_arbitrage_gc_cap(
                         sum_pv_ahead += (f_pv - f_cons)
                     elif f_buy > eff_stored_cost:
                         sum_day_home_def += (f_cons - f_pv)
+                reserve_needed = (
+                    float(min_end_usable or 0.0)
+                    if (sum_day_home_def > 0.0 or buy_price <= 0.0)
+                    else 0.0
+                )
                 needed_day_deficit = max(
-                    0.0, sum_day_home_def + float(min_end_usable or 0.0) - sum_pv_ahead - usable_energy
+                    0.0, sum_day_home_def + reserve_needed - sum_pv_ahead - usable_energy
                 )
                 allowed_capacity = max(pre_solar_needed, needed_day_deficit)
             else:
@@ -296,10 +301,19 @@ def _compute_arbitrage_gc_cap(
                 else:
                     uncovered_home_deficit += (net_def - sim_bat)
                     sim_bat = 0.0
-        reserve_to_charge = float(min_end_usable or 0.0) if buy_price <= (ref_night_buy + 0.15) else 0.0
+        max_future_buy = max((s.get("buy_price", 0.0) for s in future_slots[1:]), default=0.0)
+        has_saving_opportunity = (
+            sum_expensive_deficit > 0.0
+            or (max_future_buy * config.eta_discharge > eff_stored_cost)
+            or buy_price <= 0.0
+        )
+        reserve_to_charge = (
+            float(min_end_usable or 0.0)
+            if (buy_price <= (ref_night_buy + 0.15) and has_saving_opportunity)
+            else 0.0
+        )
         total_deficit = max(0.0, sum_expensive_deficit + reserve_to_charge - sum_pv_between - usable_energy)
         net_needed = max(0.0, total_deficit - cheaper_future_capacity)
-        max_future_buy = max((s.get("buy_price", 0.0) for s in future_slots[1:]), default=0.0)
         eff_saving_vs_future_buy = max_future_buy * config.eta_discharge - eff_stored_cost
         if eff_saving_vs_future_buy >= 0.15 or buy_price <= 0.25:
             spare_capacity_after_solar = max(0.0, avail_cap - sum_pv_between)
