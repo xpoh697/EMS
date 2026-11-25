@@ -129,6 +129,7 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             category = user_input.get("category")
+            _LOGGER.warning("EMS OptionsFlow init selected category=%s", category)
             if category == "basic_settings":
                 return await self.async_step_basic_settings()
             if category == "pv_forecast":
@@ -419,12 +420,12 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
             # Buy price: mode + optional sensor + fixed number
             schema_dict[vol.Required(CONF_PRICE_BUY_MODE, default=price_buy_mode)] = _make_mode_selector()
             _add_optional_sensor(schema_dict, CONF_PRICE_BUY_SENSOR, get_value(CONF_PRICE_BUY_SENSOR))
-            schema_dict[vol.Optional(CONF_PRICE_BUY_FIXED, default=float(buy_fixed))] = _make_price_number_selector()
+            schema_dict[vol.Required(CONF_PRICE_BUY_FIXED, default=float(buy_fixed))] = _make_price_number_selector()
 
             # Sell price: mode + optional sensor + fixed number
             schema_dict[vol.Required(CONF_PRICE_SELL_MODE, default=price_sell_mode)] = _make_mode_selector()
             _add_optional_sensor(schema_dict, CONF_PRICE_SELL_SENSOR, get_value(CONF_PRICE_SELL_SENSOR))
-            schema_dict[vol.Optional(CONF_PRICE_SELL_FIXED, default=float(sell_fixed))] = _make_price_number_selector()
+            schema_dict[vol.Required(CONF_PRICE_SELL_FIXED, default=float(sell_fixed))] = _make_price_number_selector()
 
             schema_dict[vol.Required(CONF_SYSTEM_COST, default=system_cost)] = selector.NumberSelector(
                 selector.NumberSelectorConfig(
@@ -449,10 +450,16 @@ class EmsOptionsFlow(config_entries.OptionsFlow):
                 )
             )
 
+            _LOGGER.warning("EMS OptionsFlow financial returning form with keys=%s", list(schema_dict.keys()))
+            if errors:
+                return self.async_show_form(
+                    step_id="financial",
+                    data_schema=vol.Schema(schema_dict),
+                    errors=errors,
+                )
             return self.async_show_form(
                 step_id="financial",
                 data_schema=vol.Schema(schema_dict),
-                errors=errors or None,
             )
         except Exception:
             _LOGGER.exception("Failed to build or show Financial options form")
