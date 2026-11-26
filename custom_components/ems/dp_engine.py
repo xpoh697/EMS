@@ -1134,14 +1134,14 @@ def run_unified_dp(
             eta_c = config.eta_charge if config.eta_charge > 0.0 else 1.0
 
             def _low_spread_before_gc(d_idx: int) -> bool:
-                subseq_buys = [
+                gc_buys = [
                     scaled_slots[g].get("buy_price", 0.0)
                     for g in gc_indices
-                    if g > d_idx
+                    if g != d_idx
                 ]
-                if not subseq_buys:
+                if not gc_buys:
                     return False
-                min_gc_buy = min(subseq_buys)
+                min_gc_buy = min(gc_buys)
                 sell_net = scaled_slots[d_idx].get("sell_price", 0.0) * config.eta_discharge
                 replace_cost = (min_gc_buy / eta_c) + cycle_cost
                 return (sell_net - replace_cost) < config.min_arbitrage_profit
@@ -1431,6 +1431,38 @@ def run_unified_dp(
                         "(net_grid=%.3f kWh < 0.25 threshold or soc=%.1f%% >= 95%%, no pv_surplus)",
                         slot.get("date"), slot.get("hour"), net_grid, soc_val,
                     )
+
+        # Preserve sub-step PV_CHARGE on the current running fractional slot (e.g. minute 58)
+        # when pv_surplus < energy_step (0.1 kWh) prevented DP from selecting ACT_PV_CHARGE.
+        if (
+            act == ACT_SOL
+            and slot is scaled_slots[0]
+            and remaining_hour_fraction < 1.0
+            and not slot.get("override")
+        ):
+            pv_surplus = max(
+                0.0,
+                slot.get("pv_kwh", 0.0)
+                - (
+                    slot.get("consumption_kwh", 0.0)
+                    + slot.get("ev_kwh", 0.0)
+                    + slot.get("planned_boiler_kwh", 0.0)
+                ),
+            )
+            eff_sell = slot.get("sell_price", 0.0) if slot.get("sell_price", 0.0) >= config.min_sell_price else 0.0
+            if (
+                0.0 < pv_surplus < energy_step
+                and (usable_capacity - usable_energy) >= pv_surplus
+                and (
+                    eff_sell < terminal_value_per_kwh
+                    or any(
+                        t in (ACT_GRID_CHARGE, ACT_SELF_CONSUME, ACT_DIS)
+                        for t in types_by_slot[1:]
+                    )
+                )
+            ):
+                act = ACT_PV_CHARGE
+                amount = round(pv_surplus, 2)
 
         if act == ACT_DIS and amount > 0:
             end_usable = usable_energy - amount
