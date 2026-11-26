@@ -1464,6 +1464,41 @@ def run_unified_dp(
                 act = ACT_PV_CHARGE
                 amount = round(pv_surplus, 2)
 
+        # Preserve sub-step SELF_CONSUME (NORMAL) when a small deficit (< energy_step)
+        # occurs during an expensive hour and the battery has spare energy above reserve.
+        if act == ACT_SOL and not slot.get("override"):
+            total_cons = (
+                slot.get("consumption_kwh", 0.0)
+                + slot.get("ev_kwh", 0.0)
+                + slot.get("planned_boiler_kwh", 0.0)
+            )
+            pv_def = max(0.0, total_cons - slot.get("pv_kwh", 0.0))
+            eta_d = config.eta_discharge if config.eta_discharge > 0.0 else 1.0
+            eta_c = config.eta_charge if config.eta_charge > 0.0 else 1.0
+            needed_dc = pv_def / eta_d
+            if 0.001 < pv_def and needed_dc < energy_step:
+                slot_min_soc = config.get_min_soc(slot.get("hour", 0), slot.get("date"))
+                min_slot_usable = max(
+                    0.0,
+                    (slot_min_soc - config.battery_min_soc) / 100.0 * config.battery_capacity,
+                )
+                reserve_floor = max(min_slot_usable, min_end_usable)
+                gc_buys_all = [
+                    s.get("buy_price", 0.0)
+                    for s, t, a in zip(scaled_slots, types_by_slot, amounts_by_slot, strict=False)
+                    if t == ACT_GRID_CHARGE and a > 0.0
+                ]
+                if gc_buys_all:
+                    ref_cost = (max(gc_buys_all) / (eta_c * eta_d)) + cycle_cost
+                else:
+                    ref_cost = (terminal_value_per_kwh / eta_d) + cycle_cost
+                if (
+                    (usable_energy - needed_dc) >= reserve_floor
+                    and slot.get("buy_price", 0.0) > ref_cost
+                ):
+                    act = ACT_SELF_CONSUME
+                    amount = max(0.01, round(needed_dc, 2))
+
         if act == ACT_DIS and amount > 0:
             end_usable = usable_energy - amount
             total_battery_discharge += amount

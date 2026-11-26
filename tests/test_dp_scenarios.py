@@ -2145,6 +2145,49 @@ class TestFixedTariffSupport(unittest.TestCase):
         self.assertEqual(dis, [], f"Must NOT sell at 08:00 (2.797) after 03:00 grid-charge (1.306) when spread < 1.30, got {dis}")
 
 
+    def test_substep_pv_deficit_at_expensive_hour_uses_self_consume(self):
+        """Sub-step PV deficit (e.g. 0.04 kWh at 11:00 @ 2.67 PLN) must stay in SELF_CONSUME, not IDLE."""
+        cfg = DPConfig(
+            battery_capacity=29.8,
+            battery_min_soc=11.0,
+            battery_min_soc_evening=17.0,
+            battery_min_soc_morning=11.0,
+            battery_max_charge_power=6.6,
+            battery_max_discharge_power=6.6,
+            min_sell_price=0.04,
+            min_discharge_price=1.80,
+            min_arbitrage_profit=1.30,
+            eta_charge=0.9338,
+            eta_discharge=0.9338,
+        )
+        buys = [1.43, 1.39, 1.32, 1.306, 1.31, 1.43, 2.38, 3.04, 3.427, 3.23, 2.78, 2.67, 2.67, 2.53, 2.38, 2.59, 2.62, 2.63, 2.57, 2.43, 2.28, 2.14, 1.56, 1.37]
+        sells = [1.23, 1.19, 1.12, 1.106, 1.11, 1.23, 1.75, 2.41, 2.797, 2.60, 2.15, 2.04, 2.04, 2.33, 2.18, 1.96, 1.99, 2.00, 1.94, 1.79, 1.65, 1.51, 1.36, 1.17]
+        slots = [
+            {
+                "date": "2026-11-27",
+                "hour": h,
+                "buy_price": buys[h],
+                "sell_price": sells[h],
+                "pv_kwh": (0.36 if h == 11 else (0.20 if 8 <= h <= 13 else 0.0)),
+                "consumption_kwh": (0.40 if h == 11 else 0.55),
+                "ev_kwh": 0.0,
+                "planned_boiler_kwh": 0.0,
+            }
+            for h in range(24)
+        ]
+        chg, dis, pvc, sc, pim, summary = run_unified_dp(
+            slots=slots,
+            current_usable=29.8 * (0.36 - 0.11),
+            usable_capacity=29.8 * 0.89,
+            cycle_cost=0.1254,
+            terminal_value_per_kwh=1.50,
+            min_end_usable=29.8 * (0.27 - 0.11),
+            config=cfg,
+        )
+        sc_hours = {s["hour"] for s in sc}
+        self.assertIn(11, sc_hours, "Hour 11 (pv=0.36, cons=0.40, buy=2.67) must use SELF_CONSUME, not IDLE")
+
+
 if __name__ == "__main__":
     unittest.main()
 
