@@ -355,6 +355,7 @@ def run_unified_dp(
     config: DPConfig,
     remaining_hour_fraction: float = 1.0,
     _is_second_pass: bool = False,
+    _arb_pass_done: bool = False,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -1120,6 +1121,63 @@ def run_unified_dp(
         if state_idx < 0:
             break
 
+    # Prevent hidden low-margin arbitrage: block ACT_DIS when followed by a future GRID_CHARGE
+    # whose replacement cost leaves net spread < config.min_arbitrage_profit.
+    if config.min_arbitrage_profit > 0.0 and not _arb_pass_done:
+        gc_indices = [
+            i for i in range(n_slots)
+            if types_by_slot[i] == ACT_GRID_CHARGE
+            and amounts_by_slot[i] > 0.0
+            and not scaled_slots[i].get("override")
+        ]
+        if gc_indices:
+            eta_c = config.eta_charge if config.eta_charge > 0.0 else 1.0
+
+            def _low_spread_before_gc(d_idx: int) -> bool:
+                subseq_buys = [
+                    scaled_slots[g].get("buy_price", 0.0)
+                    for g in gc_indices
+                    if g > d_idx
+                ]
+                if not subseq_buys:
+                    return False
+                min_gc_buy = min(subseq_buys)
+                sell_net = scaled_slots[d_idx].get("sell_price", 0.0) * config.eta_discharge
+                replace_cost = (min_gc_buy / eta_c) + cycle_cost
+                return (sell_net - replace_cost) < config.min_arbitrage_profit
+
+            has_blocked_dis = any(
+                types_by_slot[i] == ACT_DIS
+                and amounts_by_slot[i] > 0.0
+                and not scaled_slots[i].get("override")
+                and _low_spread_before_gc(i)
+                for i in range(n_slots)
+            )
+            if has_blocked_dis:
+                new_slots = [dict(s) for s in slots]
+                blocked_count = 0
+                for i in range(n_slots):
+                    if not scaled_slots[i].get("override") and _low_spread_before_gc(i):
+                        new_slots[i]["max_discharge_energy"] = 0.0
+                        blocked_count += 1
+                _LOGGER.debug(
+                    "EMS DP: Blocked %d discharge slot(s) before subsequent GRID_CHARGE (spread < min_arbitrage_profit=%.2f). Re-running DP.",
+                    blocked_count,
+                    config.min_arbitrage_profit,
+                )
+                return run_unified_dp(
+                    new_slots,
+                    current_usable,
+                    usable_capacity,
+                    cycle_cost,
+                    terminal_value_per_kwh,
+                    min_end_usable,
+                    config,
+                    remaining_hour_fraction,
+                    _is_second_pass=_is_second_pass,
+                    _arb_pass_done=True,
+                )
+
     # Enforce daily battery discharge limit and monthly PV export limit via two-stage allocation
     if (config.max_daily_discharge_kwh > 0.0 or config.limit_export_to_monthly_pv) and not _is_second_pass:
         dis_by_date: dict[str, list[int]] = {}
@@ -1237,6 +1295,7 @@ def run_unified_dp(
                 config,
                 remaining_hour_fraction,
                 _is_second_pass=True,
+                _arb_pass_done=_arb_pass_done,
             )
 
     # --- DEBUG: log full DP trajectory after backtracking ---

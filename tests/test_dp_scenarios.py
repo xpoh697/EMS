@@ -2062,6 +2062,48 @@ class TestFixedTariffSupport(unittest.TestCase):
         self.assertIn(15, dis_hours, f"Expected 15h partial discharge, got {dis}")
         self.assertIn(16, dis_hours, f"Expected 16h to sell remaining daily budget (~6 kWh), got {dis}")
 
+    def test_no_low_spread_discharge_before_subsequent_grid_charge(self):
+        """Selling at 15:00 (2.10 PLN) and re-buying at 04:00 (1.335 PLN) has spread < min_arbitrage_profit=1.30 and must be blocked."""
+        config = DPConfig(
+            min_sell_price=0.04,
+            min_discharge_price=1.80,
+            battery_max_discharge_power=8.0,
+            battery_max_charge_power=11.0,
+            battery_min_soc=11,
+            battery_capacity=29.9,
+            min_energy_to_discharge=0.5,
+            battery_min_soc_evening=17.0,
+            battery_min_soc_morning=11.0,
+            min_arbitrage_profit=1.30,
+            eta_charge=0.9338,
+            eta_discharge=0.9338,
+            tomorrow_is_forecast=False,
+        )
+        slots = [
+            {"date": "2026-11-26", "hour": 14, "buy_price": 2.14, "sell_price": 1.94, "pv_kwh": 0.06, "consumption_kwh": 0.43},
+            {"date": "2026-11-26", "hour": 15, "buy_price": 2.73, "sell_price": 2.102, "pv_kwh": 0.01, "consumption_kwh": 0.37},
+            {"date": "2026-11-26", "hour": 16, "buy_price": 2.63, "sell_price": 2.001, "pv_kwh": 0.00, "consumption_kwh": 0.64},
+            {"date": "2026-11-26", "hour": 19, "buy_price": 2.54, "sell_price": 1.907, "pv_kwh": 0.00, "consumption_kwh": 1.10},
+            {"date": "2026-11-26", "hour": 23, "buy_price": 1.344, "sell_price": 1.144, "pv_kwh": 0.00, "consumption_kwh": 0.56},
+            {"date": "2026-11-27", "hour": 4, "buy_price": 1.335, "sell_price": 1.135, "pv_kwh": 0.00, "consumption_kwh": 0.51},
+            {"date": "2026-11-27", "hour": 15, "buy_price": 2.80, "sell_price": 2.05, "pv_kwh": 0.00, "consumption_kwh": 1.50},
+            {"date": "2026-11-27", "hour": 18, "buy_price": 2.70, "sell_price": 1.95, "pv_kwh": 0.00, "consumption_kwh": 2.00},
+            {"date": "2026-11-27", "hour": 19, "buy_price": 2.60, "sell_price": 1.90, "pv_kwh": 0.00, "consumption_kwh": 2.00},
+        ]
+        chg, dis, pvc, sc, pim, stats = run_unified_dp(
+            slots=slots,
+            current_usable=12.0,  # ~51% SOC
+            usable_capacity=26.6,
+            cycle_cost=0.1254,
+            terminal_value_per_kwh=1.46,
+            min_end_usable=2.0,
+            config=config,
+            remaining_hour_fraction=1.0,
+        )
+
+        dis_26 = [d for d in dis if d["date"] == "2026-11-26"]
+        self.assertEqual(dis_26, [], f"Must NOT sell on 2026-11-26 when replaced by 04h grid-charge with spread < 1.30, got {dis_26}")
+
 
 if __name__ == "__main__":
     unittest.main()
